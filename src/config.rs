@@ -318,7 +318,8 @@ full_sync_interval_hours = 24
     pub fn github_token(&self) -> Result<String> {
         std::env::var("WSHM_TOKEN")
             .or_else(|_| std::env::var("GITHUB_TOKEN"))
-            .context("Set GITHUB_TOKEN or WSHM_TOKEN environment variable")
+            .or_else(|_| gh_auth_token())
+            .context("No GitHub token found. Set GITHUB_TOKEN, WSHM_TOKEN, or authenticate with `gh auth login`")
     }
 
     pub fn ai_api_key(&self) -> Result<String> {
@@ -348,6 +349,26 @@ impl Default for Config {
             wshm_dir: PathBuf::from(".wshm"),
         }
     }
+}
+
+fn gh_auth_token() -> Result<String, std::env::VarError> {
+    std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if token.is_empty() {
+                    None
+                } else {
+                    Some(token)
+                }
+            } else {
+                None
+            }
+        })
+        .ok_or(std::env::VarError::NotPresent)
 }
 
 fn detect_repo() -> Result<(String, String)> {
