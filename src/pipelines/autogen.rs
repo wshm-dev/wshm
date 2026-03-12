@@ -170,7 +170,8 @@ pub async fn run(config: &Config, db: &Database, gh: &GhClient, args: &FixArgs) 
 const SUSPICIOUS_PATTERNS: &[(&str, &str)] = &[
     ("curl ", "HTTP request (potential data exfiltration)"),
     ("wget ", "HTTP request (potential data exfiltration)"),
-    ("nc ", "Netcat (potential reverse shell)"),
+    ("ncat ", "Netcat (potential reverse shell)"),
+    (" nc -", "Netcat (potential reverse shell)"),
     ("eval(", "Dynamic code execution"),
     ("exec(", "Process execution"),
     ("subprocess", "Process execution"),
