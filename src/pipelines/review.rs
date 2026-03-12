@@ -133,7 +133,7 @@ pub async fn run(
                 .collect();
 
             let review_body = format!(
-                "{}## Inline Code Review\n\n{}\n\n{}\n\n{}",
+                "{}## 🔎 Automated Code Review\n\n{}\n\n{}\n\n{}",
                 config.branding.header(),
                 result.summary,
                 format_size_summary(&size),

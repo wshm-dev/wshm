@@ -155,11 +155,31 @@ async fn triage_issue(
 
 fn format_triage_comment(c: &IssueClassification, config: &Config) -> String {
     let mut comment = config.branding.header();
+
+    let priority_emoji = match c.priority.as_deref() {
+        Some("critical") => "🔴",
+        Some("high") => "🟠",
+        Some("medium") => "🟡",
+        Some("low") => "🟢",
+        _ => "⚪",
+    };
+
+    let category_emoji = match c.category.as_str() {
+        "bug" => "🐛",
+        "feature" => "✨",
+        "duplicate" => "♻️",
+        "wontfix" => "🚫",
+        "needs-info" => "❓",
+        _ => "📋",
+    };
+
     comment.push_str(&format!(
-        "## 🔍 Triage Summary\n\n\
-         **Category:** {}\n\
-         **Priority:** {}\n\
-         **Confidence:** {:.0}%\n\n\
+        "## 🔍 Automated Triage\n\n\
+         | | |\n|---|---|\n\
+         | {category_emoji} **Category** | `{}` |\n\
+         | {priority_emoji} **Priority** | `{}` |\n\
+         | 🎯 **Confidence** | {:.0}% |\n\n\
+         ### Summary\n\n\
          {}\n",
         c.category,
         c.priority.as_deref().unwrap_or("unset"),
@@ -168,14 +188,19 @@ fn format_triage_comment(c: &IssueClassification, config: &Config) -> String {
     ));
 
     if c.is_simple_fix {
-        comment.push_str("\n💡 This looks like a simple fix that could be auto-resolved.\n");
+        comment.push_str("\n> 💡 This looks like a **simple fix** that could be auto-resolved. Use `/wshm fix` to attempt it.\n");
+    }
+
+    if let Some(ref dup) = c.is_duplicate_of {
+        comment.push_str(&format!("\n> ♻️ Possible duplicate of #{dup}\n"));
     }
 
     if !c.relevant_files.is_empty() {
-        comment.push_str("\n**Relevant files:**\n");
+        comment.push_str("\n<details>\n<summary>📁 Relevant files</summary>\n\n");
         for f in &c.relevant_files {
             comment.push_str(&format!("- `{f}`\n"));
         }
+        comment.push_str("\n</details>\n");
     }
 
     comment.push_str(&format!("\n{}", config.branding.footer("Triaged")));

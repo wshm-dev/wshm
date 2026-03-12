@@ -161,10 +161,29 @@ async fn analyze_pr(
 
 fn format_analysis_comment(a: &PrAnalysis, config: &Config) -> String {
     let mut comment = config.branding.header();
+
+    let risk_emoji = match a.risk_level.as_str() {
+        "high" => "🔴",
+        "medium" => "🟡",
+        "low" => "🟢",
+        _ => "⚪",
+    };
+
+    let type_emoji = match a.pr_type.as_str() {
+        "bug-fix" => "🐛",
+        "feature" => "✨",
+        "refactor" => "♻️",
+        "docs" => "📝",
+        "chore" => "🔧",
+        _ => "📋",
+    };
+
     comment.push_str(&format!(
-        "## 📊 PR Analysis\n\n\
-         **Type:** {}\n\
-         **Risk:** {}\n\n\
+        "## 📊 Automated PR Analysis\n\n\
+         | | |\n|---|---|\n\
+         | {type_emoji} **Type** | `{}` |\n\
+         | {risk_emoji} **Risk** | `{}` |\n\n\
+         ### Summary\n\n\
          {}\n\n\
          ### Review Checklist\n\
          - [{}] Tests present\n\
@@ -173,28 +192,14 @@ fn format_analysis_comment(a: &PrAnalysis, config: &Config) -> String {
         a.pr_type,
         a.risk_level,
         a.summary,
-        if a.review_checklist.tests_present {
-            "x"
-        } else {
-            " "
-        },
-        if a.review_checklist.breaking_change {
-            "x"
-        } else {
-            " "
-        },
-        if a.review_checklist.docs_updated {
-            "x"
-        } else {
-            " "
-        },
+        if a.review_checklist.tests_present { "x" } else { " " },
+        if a.review_checklist.breaking_change { "x" } else { " " },
+        if a.review_checklist.docs_updated { "x" } else { " " },
     ));
 
     if !a.linked_issues.is_empty() {
-        comment.push_str("\n**Linked issues:** ");
         let links: Vec<String> = a.linked_issues.iter().map(|n| format!("#{n}")).collect();
-        comment.push_str(&links.join(", "));
-        comment.push('\n');
+        comment.push_str(&format!("\n**Linked issues:** {}\n", links.join(", ")));
     }
 
     comment.push_str(&format!("\n{}", config.branding.footer("Analyzed")));

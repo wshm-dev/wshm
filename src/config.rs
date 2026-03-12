@@ -361,7 +361,7 @@ impl BrandingConfig {
     /// Build the footer line for a comment. `action` is e.g. "Triaged", "Analyzed", "Reviewed".
     pub fn footer(&self, action: &str) -> String {
         let tmpl = self.footer_template.as_deref()
-            .unwrap_or("*{action} by [{name}]({url})*");
+            .unwrap_or("🤖 *{action} automatically by [{name}]({url})* · This is an automated analysis, not a human review.");
 
         let result = tmpl
             .replace("{action}", action)
@@ -371,20 +371,21 @@ impl BrandingConfig {
         format!("---\n{}\n{}", result, self.comment_marker())
     }
 
-    /// Build a comment header with optional avatar and tagline.
+    /// Build a comment header — always shows a clear bot banner.
     pub fn header(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(ref avatar) = self.avatar_url {
-            parts.push(format!("<img src=\"{avatar}\" width=\"20\" height=\"20\" align=\"absmiddle\"> "));
-        }
-        if let Some(ref tagline) = self.tagline {
-            if !parts.is_empty() || self.avatar_url.is_some() {
-                parts.push(format!("**{}** — {tagline}\n\n", self.name));
-            } else {
-                parts.push(format!("**{}** — {tagline}\n\n", self.name));
-            }
-        }
-        parts.join("")
+        let icon = if let Some(ref avatar) = self.avatar_url {
+            format!("<img src=\"{avatar}\" width=\"24\" height=\"24\" align=\"absmiddle\">")
+        } else {
+            "🧞".to_string()
+        };
+
+        let tagline = self.tagline.as_deref()
+            .unwrap_or("Automated triage by AI");
+
+        format!(
+            "> {icon} **{name}** · {tagline}\n\n",
+            name = self.name,
+        )
     }
 }
 
