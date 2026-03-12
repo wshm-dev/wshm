@@ -1,0 +1,21 @@
+{
+  "number": 10,
+  "title": "Fix empty input handling in triage pipeline",
+  "body": "Fixes #42\n\nAdds an early return when the issues list is empty instead of panicking.",
+  "state": "open",
+  "labels": [],
+  "user": {
+    "login": "contributor"
+  },
+  "head": {
+    "sha": "abc123def456",
+    "ref": "fix/empty-input"
+  },
+  "base": {
+    "sha": "main-sha-789",
+    "ref": "main"
+  },
+  "mergeable": true,
+  "created_at": "2026-03-11T12:00:00Z",
+  "updated_at": "2026-03-11T12:00:00Z"
+}

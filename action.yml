@@ -1,0 +1,228 @@
+name: "wshm"
+description: "AI-powered GitHub agent for OSS maintainers"
+branding:
+  icon: "zap"
+  color: "purple"
+
+inputs:
+  github-token:
+    description: "GitHub token with repo access"
+    required: true
+    default: ${{ github.token }}
+  ai-provider:
+    description: "AI provider (anthropic, google, openai, mistral, groq, etc.)"
+    required: false
+    default: "anthropic"
+  ai-api-key:
+    description: "AI API key (Anthropic, Google, OpenAI, etc.)"
+    required: true
+  ai-model:
+    description: "AI model name"
+    required: false
+    default: ""
+  command:
+    description: "wshm command to run (default: run --apply)"
+    required: false
+    default: "run --apply"
+  report-format:
+    description: "Report format: md, html (default: html)"
+    required: false
+    default: "html"
+  upload-artifact:
+    description: "Upload report as CI artifact (true/false)"
+    required: false
+    default: "true"
+  # Cloud storage (all optional)
+  cloud-storage:
+    description: "Cloud storage type: s3, gcs, r2, none (default: none)"
+    required: false
+    default: "none"
+  cloud-bucket:
+    description: "Cloud bucket name"
+    required: false
+    default: ""
+  cloud-path:
+    description: "Path prefix in bucket (default: wshm/{repo})"
+    required: false
+    default: ""
+  aws-access-key-id:
+    description: "AWS access key (for S3/R2)"
+    required: false
+    default: ""
+  aws-secret-access-key:
+    description: "AWS secret key (for S3/R2)"
+    required: false
+    default: ""
+  aws-region:
+    description: "AWS region (for S3)"
+    required: false
+    default: "us-east-1"
+  r2-account-id:
+    description: "Cloudflare R2 account ID"
+    required: false
+    default: ""
+  gcs-service-account-key:
+    description: "GCS service account key (JSON)"
+    required: false
+    default: ""
+  claude-credentials-json:
+    description: "Claude OAuth credentials JSON (from ~/.claude/.credentials.json) for Max/Pro subscription auth in Podman sandbox"
+    required: false
+    default: ""
+
+outputs:
+  report-path:
+    description: "Path to the generated report"
+    value: ${{ steps.report.outputs.report-path }}
+  cloud-url:
+    description: "URL of the uploaded report (if cloud storage enabled)"
+    value: ${{ steps.cloud.outputs.url }}
+
+runs:
+  using: "composite"
+  steps:
+    # ── Install ────────────────────────────────────────────────
+    - name: Install wshm
+      shell: bash
+      run: |
+        cargo install --path .
+
+    # ── Configure ──────────────────────────────────────────────
+    - name: Configure wshm
+      shell: bash
+      run: |
+        mkdir -p .wshm
+        if [ ! -f .wshm/config.toml ]; then
+          cat > .wshm/config.toml << 'CONF'
+        [github]
+        [ai]
+        provider = "${{ inputs.ai-provider }}"
+        CONF
+          if [ -n "${{ inputs.ai-model }}" ]; then
+            echo "model = \"${{ inputs.ai-model }}\"" >> .wshm/config.toml
+          fi
+        fi
+
+    # ── Run main command ───────────────────────────────────────
+    - name: Run wshm
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        ANTHROPIC_API_KEY: ${{ inputs.ai-api-key }}
+        GOOGLE_API_KEY: ${{ inputs.ai-api-key }}
+        OPENAI_API_KEY: ${{ inputs.ai-api-key }}
+        MISTRAL_API_KEY: ${{ inputs.ai-api-key }}
+        GROQ_API_KEY: ${{ inputs.ai-api-key }}
+        CLAUDE_CREDENTIALS_JSON: ${{ inputs.claude-credentials-json }}
+      run: |
+        echo "::group::wshm ${{ inputs.command }}"
+        wshm ${{ inputs.command }} 2>&1 | tee /tmp/wshm-run.log
+        echo "::endgroup::"
+
+    # ── Generate report ────────────────────────────────────────
+    - name: Generate report
+      id: report
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        REPORT_FILE="wshm-report.${{ inputs.report-format }}"
+        echo "::group::wshm report"
+        wshm report --format ${{ inputs.report-format }} --output "$REPORT_FILE" 2>&1
+        echo "::endgroup::"
+        echo "report-path=$REPORT_FILE" >> "$GITHUB_OUTPUT"
+
+    # ── Print summary to CI logs ───────────────────────────────
+    - name: Print summary
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        # Generate markdown summary for GitHub Actions
+        MD_REPORT="/tmp/wshm-summary.md"
+        wshm report --format md --output "$MD_REPORT" 2>/dev/null
+
+        # GitHub Job Summary (visible in Actions tab)
+        echo "## wshm Report" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        cat "$MD_REPORT" >> "$GITHUB_STEP_SUMMARY"
+
+        # Also print to CI logs
+        echo "──────────────────────────────────────"
+        echo "wshm Summary"
+        echo "──────────────────────────────────────"
+        wshm --offline 2>/dev/null || true
+        echo "──────────────────────────────────────"
+
+    # ── Upload artifact ────────────────────────────────────────
+    - name: Upload report artifact
+      if: inputs.upload-artifact == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: wshm-report
+        path: |
+          ${{ steps.report.outputs.report-path }}
+          .wshm/state.db
+        retention-days: 90
+
+    # ── Cloud storage upload ───────────────────────────────────
+    - name: Upload to cloud storage
+      id: cloud
+      if: inputs.cloud-storage != 'none' && inputs.cloud-bucket != ''
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws-region }}
+        GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcs-key.json
+      run: |
+        TIMESTAMP=$(date +%Y-%m-%d_%H%M%S)
+        REPO_SLUG="${GITHUB_REPOSITORY//\//-}"
+        CLOUD_PATH="${{ inputs.cloud-path }}"
+        if [ -z "$CLOUD_PATH" ]; then
+          CLOUD_PATH="wshm/${REPO_SLUG}"
+        fi
+        REPORT_FILE="${{ steps.report.outputs.report-path }}"
+
+        case "${{ inputs.cloud-storage }}" in
+          s3)
+            # Upload report
+            aws s3 cp "$REPORT_FILE" "s3://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/${TIMESTAMP}/$(basename $REPORT_FILE)"
+            aws s3 cp "$REPORT_FILE" "s3://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/latest/$(basename $REPORT_FILE)"
+            # Upload state.db
+            aws s3 cp .wshm/state.db "s3://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/${TIMESTAMP}/state.db"
+            aws s3 cp .wshm/state.db "s3://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/latest/state.db"
+            echo "url=s3://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/latest/$(basename $REPORT_FILE)" >> "$GITHUB_OUTPUT"
+            echo "Uploaded to S3: s3://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/latest/"
+            ;;
+          r2)
+            R2_ENDPOINT="https://${{ inputs.r2-account-id }}.r2.cloudflarestorage.com"
+            aws s3 cp "$REPORT_FILE" "s3://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/${TIMESTAMP}/$(basename $REPORT_FILE)" --endpoint-url "$R2_ENDPOINT"
+            aws s3 cp "$REPORT_FILE" "s3://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/latest/$(basename $REPORT_FILE)" --endpoint-url "$R2_ENDPOINT"
+            aws s3 cp .wshm/state.db "s3://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/${TIMESTAMP}/state.db" --endpoint-url "$R2_ENDPOINT"
+            aws s3 cp .wshm/state.db "s3://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/latest/state.db" --endpoint-url "$R2_ENDPOINT"
+            echo "url=r2://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/latest/$(basename $REPORT_FILE)" >> "$GITHUB_OUTPUT"
+            echo "Uploaded to R2: ${CLOUD_PATH}/latest/"
+            ;;
+          gcs)
+            echo '${{ inputs.gcs-service-account-key }}' > /tmp/gcs-key.json
+            gcloud auth activate-service-account --key-file=/tmp/gcs-key.json 2>/dev/null
+            gsutil cp "$REPORT_FILE" "gs://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/${TIMESTAMP}/$(basename $REPORT_FILE)"
+            gsutil cp "$REPORT_FILE" "gs://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/latest/$(basename $REPORT_FILE)"
+            gsutil cp .wshm/state.db "gs://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/${TIMESTAMP}/state.db"
+            gsutil cp .wshm/state.db "gs://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/latest/state.db"
+            rm -f /tmp/gcs-key.json
+            echo "url=gs://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/latest/$(basename $REPORT_FILE)" >> "$GITHUB_OUTPUT"
+            echo "Uploaded to GCS: gs://${{ inputs.cloud-bucket }}/${CLOUD_PATH}/latest/"
+            ;;
+        esac
+
+    # ── Commit state ───────────────────────────────────────────
+    - name: Commit state
+      shell: bash
+      run: |
+        git config user.name "wshm[bot]"
+        git config user.email "wshm[bot]@users.noreply.github.com"
+        git add .wshm/state.db
+        git diff --cached --quiet || git commit -m "chore: update wshm state"
+        git push

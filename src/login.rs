@@ -1,0 +1,357 @@
+use anyhow::{Context, Result};
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+use crate::cli::LoginArgs;
+
+/// Credentials file location: `.wshm/credentials`
+/// This file is gitignored and never committed.
+fn credentials_path() -> PathBuf {
+    PathBuf::from(".wshm").join("credentials")
+}
+
+/// Read a line from stdin (for non-sensitive input).
+fn read_line(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
+/// Read a secret from stdin (no echo).
+fn read_secret(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    // Try rpassword-style: disable echo on tty
+    // Fallback: just read normally (CI environments)
+    let input = if atty_is_tty() {
+        disable_echo();
+        let mut s = String::new();
+        io::stdin().read_line(&mut s)?;
+        enable_echo();
+        println!(); // newline after hidden input
+        s
+    } else {
+        let mut s = String::new();
+        io::stdin().read_line(&mut s)?;
+        s
+    };
+    Ok(input.trim().to_string())
+}
+
+fn atty_is_tty() -> bool {
+    unsafe { libc_isatty(0) != 0 }
+}
+
+extern "C" {
+    #[link_name = "isatty"]
+    fn libc_isatty(fd: i32) -> i32;
+}
+
+#[cfg(unix)]
+fn disable_echo() {
+    let _ = std::process::Command::new("stty")
+        .arg("-echo")
+        .status();
+}
+
+#[cfg(unix)]
+fn enable_echo() {
+    let _ = std::process::Command::new("stty")
+        .arg("echo")
+        .status();
+}
+
+#[cfg(not(unix))]
+fn disable_echo() {}
+
+#[cfg(not(unix))]
+fn enable_echo() {}
+
+/// Load existing credentials from .wshm/credentials
+fn load_credentials() -> std::collections::HashMap<String, String> {
+    let path = credentials_path();
+    if !path.exists() {
+        return std::collections::HashMap::new();
+    }
+    let content = fs::read_to_string(&path).unwrap_or_default();
+    let mut map = std::collections::HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            map.insert(key.trim().to_string(), value.trim().to_string());
+        }
+    }
+    map
+}
+
+/// Save credentials to .wshm/credentials
+fn save_credentials(creds: &std::collections::HashMap<String, String>) -> Result<()> {
+    let path = credentials_path();
+    fs::create_dir_all(path.parent().unwrap())?;
+
+    let mut content = String::from("# wshm credentials — DO NOT COMMIT\n# This file is in .gitignore\n\n");
+    let mut keys: Vec<&String> = creds.keys().collect();
+    keys.sort();
+    for key in keys {
+        content.push_str(&format!("{}={}\n", key, creds[key]));
+    }
+
+    fs::write(&path, &content)?;
+
+    // Set restrictive permissions on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
+
+    Ok(())
+}
+
+/// Ensure .wshm/credentials is in .gitignore
+fn ensure_gitignore() {
+    let gitignore = Path::new(".wshm/.gitignore");
+    if gitignore.exists() {
+        let content = fs::read_to_string(gitignore).unwrap_or_default();
+        if content.contains("credentials") {
+            return;
+        }
+        let _ = fs::write(gitignore, format!("{content}\ncredentials\n"));
+    } else {
+        let _ = fs::create_dir_all(".wshm");
+        let _ = fs::write(gitignore, "logs/\ncredentials\n");
+    }
+}
+
+pub fn run(args: &LoginArgs) -> Result<()> {
+    if args.status {
+        return show_status();
+    }
+
+    let do_all = !args.github && !args.ai;
+
+    ensure_gitignore();
+
+    if do_all || args.github {
+        login_github()?;
+    }
+
+    if do_all || args.ai {
+        login_ai()?;
+    }
+
+    println!("\nAll set. Run `wshm daemon --apply` to start.");
+    Ok(())
+}
+
+fn login_github() -> Result<()> {
+    println!("── GitHub Authentication ──\n");
+
+    // Check if gh CLI is available
+    let gh_available = std::process::Command::new("gh")
+        .arg("--version")
+        .output()
+        .is_ok();
+
+    if gh_available {
+        // Check if already logged in
+        let token_output = std::process::Command::new("gh")
+            .args(["auth", "token"])
+            .output();
+
+        if let Ok(output) = token_output {
+            if output.status.success() {
+                let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !token.is_empty() {
+                    // Get username
+                    let user = std::process::Command::new("gh")
+                        .args(["api", "user", "--jq", ".login"])
+                        .output()
+                        .ok()
+                        .and_then(|o| {
+                            if o.status.success() {
+                                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    println!("Already authenticated as {user} via `gh auth`.");
+                    let reauth = read_line("Re-authenticate? [y/N] ")?;
+                    if reauth.to_lowercase() != "y" {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        println!("Launching `gh auth login`...\n");
+        let status = std::process::Command::new("gh")
+            .args(["auth", "login", "--web"])
+            .status()
+            .context("Failed to run gh auth login")?;
+
+        if !status.success() {
+            // Fallback to manual token
+            println!("\ngh auth login failed. Enter a token manually.");
+            return login_github_manual();
+        }
+
+        println!("GitHub authentication successful.");
+    } else {
+        println!("`gh` CLI not found. Enter a GitHub token manually.");
+        println!("Create one at: https://github.com/settings/tokens");
+        println!("Required scopes: repo, read:org\n");
+        login_github_manual()?;
+    }
+
+    Ok(())
+}
+
+fn login_github_manual() -> Result<()> {
+    let token = read_secret("GitHub token: ")?;
+    if token.is_empty() {
+        anyhow::bail!("No token provided");
+    }
+
+    let mut creds = load_credentials();
+    creds.insert("GITHUB_TOKEN".to_string(), token);
+    save_credentials(&creds)?;
+
+    println!("GitHub token saved to .wshm/credentials");
+    Ok(())
+}
+
+fn login_ai() -> Result<()> {
+    println!("\n── AI Provider Authentication ──\n");
+
+    let providers = [
+        ("anthropic", "ANTHROPIC_API_KEY", "https://console.anthropic.com/settings/keys"),
+        ("openai", "OPENAI_API_KEY", "https://platform.openai.com/api-keys"),
+        ("google", "GOOGLE_API_KEY", "https://aistudio.google.com/apikey"),
+        ("mistral", "MISTRAL_API_KEY", "https://console.mistral.ai/api-keys"),
+        ("groq", "GROQ_API_KEY", "https://console.groq.com/keys"),
+        ("deepseek", "DEEPSEEK_API_KEY", "https://platform.deepseek.com/api_keys"),
+        ("xai", "XAI_API_KEY", "https://console.x.ai"),
+        ("ollama", "", ""),
+    ];
+
+    println!("Available providers:");
+    for (i, (name, _, _)) in providers.iter().enumerate() {
+        let marker = if i == 0 { " (default)" } else { "" };
+        println!("  {}: {name}{marker}", i + 1);
+    }
+
+    let choice = read_line("\nProvider [1]: ")?;
+    let idx = if choice.is_empty() {
+        0
+    } else {
+        choice.parse::<usize>().unwrap_or(1).saturating_sub(1)
+    };
+
+    let (name, env_var, url) = providers.get(idx).unwrap_or(&providers[0]);
+
+    if *name == "ollama" {
+        println!("Ollama runs locally — no API key needed.");
+        println!("Make sure Ollama is running: `ollama serve`");
+        return Ok(());
+    }
+
+    println!("\nGet your {name} API key at: {url}\n");
+
+    let key = read_secret(&format!("{env_var}: "))?;
+    if key.is_empty() {
+        anyhow::bail!("No API key provided");
+    }
+
+    let mut creds = load_credentials();
+    creds.insert(env_var.to_string(), key);
+    save_credentials(&creds)?;
+
+    println!("{name} API key saved to .wshm/credentials");
+    Ok(())
+}
+
+fn show_status() -> Result<()> {
+    println!("── Authentication Status ──\n");
+
+    // GitHub
+    let gh_token = std::env::var("GITHUB_TOKEN")
+        .or_else(|_| std::env::var("WSHM_TOKEN"))
+        .ok();
+
+    let gh_cli = std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    let creds = load_credentials();
+    let creds_gh = creds.get("GITHUB_TOKEN");
+
+    print!("GitHub: ");
+    if gh_token.is_some() {
+        println!("authenticated (env var)");
+    } else if gh_cli.is_some() {
+        println!("authenticated (gh CLI)");
+    } else if creds_gh.is_some() {
+        println!("authenticated (.wshm/credentials)");
+    } else {
+        println!("not configured");
+    }
+
+    // AI
+    let ai_vars = [
+        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY",
+        "MISTRAL_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY",
+    ];
+
+    print!("AI:     ");
+    let from_env: Vec<&&str> = ai_vars.iter().filter(|v| std::env::var(v).is_ok()).collect();
+    let from_creds: Vec<&&str> = ai_vars.iter().filter(|v| creds.contains_key(**v)).collect();
+
+    if !from_env.is_empty() {
+        println!("authenticated via {} (env var)", from_env[0]);
+    } else if !from_creds.is_empty() {
+        println!("authenticated via {} (.wshm/credentials)", from_creds[0]);
+    } else {
+        println!("not configured");
+    }
+
+    // Webhook secret
+    print!("Webhook: ");
+    if std::env::var("WSHM_WEBHOOK_SECRET").is_ok() {
+        println!("configured (env var)");
+    } else if creds.contains_key("WSHM_WEBHOOK_SECRET") {
+        println!("configured (.wshm/credentials)");
+    } else {
+        println!("not configured (optional)");
+    }
+
+    Ok(())
+}
+
+/// Load credentials from .wshm/credentials and inject into env vars.
+/// Called at startup before Config::load so that tokens are available.
+pub fn inject_credentials() {
+    let creds = load_credentials();
+    for (key, value) in &creds {
+        // Only set if not already set (env var takes precedence)
+        if std::env::var(key).is_err() {
+            std::env::set_var(key, value);
+        }
+    }
+}

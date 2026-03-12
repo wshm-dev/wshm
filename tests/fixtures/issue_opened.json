@@ -1,0 +1,12 @@
+{
+  "number": 42,
+  "title": "Application crashes when processing empty input",
+  "body": "## Steps to reproduce\n1. Run `wshm triage` with no issues in the cache\n2. Application panics with index out of bounds\n\n## Expected behavior\nShould print 'No issues to triage' and exit cleanly.\n\n## Actual behavior\nPanic at src/pipelines/triage.rs:25",
+  "state": "open",
+  "labels": [],
+  "user": {
+    "login": "reporter"
+  },
+  "created_at": "2026-03-11T10:00:00Z",
+  "updated_at": "2026-03-11T10:00:00Z"
+}
