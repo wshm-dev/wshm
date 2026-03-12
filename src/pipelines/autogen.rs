@@ -524,14 +524,33 @@ fn check_changes() -> Result<bool> {
     Ok(!output.stdout.is_empty())
 }
 
+/// Paths that must never be committed by auto-fix (credentials, state, secrets).
+const EXCLUDED_PATHS: &[&str] = &[
+    ".wshm/",
+    ".env",
+    "credentials",
+    "*.key",
+    "*.pem",
+    "id_rsa",
+    ".claude/",
+];
+
 fn commit_and_push(branch: &str, issue_number: u64) -> Result<()> {
-    // Only add tracked files that were modified (never add untracked files like credentials)
+    // Add all changes including new files (needed for auto-fix that creates files)
     let status = std::process::Command::new("git")
-        .args(["add", "-u"])
+        .args(["add", "-A"])
         .status()
         .context("Failed to git add")?;
     if !status.success() {
         anyhow::bail!("git add failed");
+    }
+
+    // Unstage any sensitive/excluded paths
+    for pattern in EXCLUDED_PATHS {
+        std::process::Command::new("git")
+            .args(["reset", "HEAD", "--", pattern])
+            .output()
+            .ok();
     }
 
     let msg = format!("fix: auto-fix for issue #{issue_number} [wshm]");
