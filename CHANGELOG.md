@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/pszymkowiak/wshm/compare/v0.6.0...v0.7.0) (2026-03-12)
+
+
+### Features
+
+* per-pipeline AI model override ([#30](https://github.com/pszymkowiak/wshm/issues/30)) ([19a2861](https://github.com/pszymkowiak/wshm/commit/19a28611a7f2592480a1abbe4501983a4bb26a0a))
+
 ## [0.3.1](https://github.com/pszymkowiak/wshm/compare/v0.3.0...v0.3.1) (2026-03-12)
 
 
