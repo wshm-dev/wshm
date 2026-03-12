@@ -311,12 +311,10 @@ pub async fn check_and_update(apply: bool, json: bool) -> Result<Option<String>>
         println!("SHA256: {actual_hash}");
     }
 
-    // If running as systemd service, restart
+    // If running as systemd service, exit so systemd restarts us with the new binary
     if std::env::var("INVOCATION_ID").is_ok() {
-        info!("Running under systemd, scheduling restart...");
-        let _ = std::process::Command::new("systemctl")
-            .args(["restart", "wshm"])
-            .spawn();
+        info!("Exiting for systemd restart with new binary...");
+        std::process::exit(0);
     }
 
     Ok(Some(tag))
