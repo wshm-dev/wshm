@@ -6,11 +6,12 @@ use crate::ai::local::LocalClient;
 use crate::ai::prompts::issue_classify;
 use crate::ai::schemas::IssueClassification;
 use crate::ai::AiClient;
-use crate::cli::TriageArgs;
+use crate::cli::{FixArgs, TriageArgs};
 use crate::config::Config;
 use crate::db::issues::Issue;
 use crate::db::Database;
 use crate::github::Client as GhClient;
+use crate::pipelines::autogen;
 
 #[derive(Serialize)]
 struct TriageOutput {
@@ -145,6 +146,31 @@ async fn triage_issue(
                 gh.close_issue(issue.number).await?;
             }
             _ => {}
+        }
+
+        // Auto-fix: if enabled and issue is a simple fix with high confidence
+        if config.triage.auto_fix
+            && classification.is_simple_fix
+            && classification.category == "bug"
+            && classification.confidence >= config.triage.auto_fix_confidence
+        {
+            info!(
+                "Auto-fix triggered for issue #{} (confidence: {:.0}%)",
+                issue.number,
+                classification.confidence * 100.0
+            );
+            let fix_args = FixArgs {
+                issue: issue.number,
+                tool: None,
+                model: None,
+                docker: false,
+                image: None,
+                apply: true,
+            };
+            match autogen::run(config, db, gh, &fix_args).await {
+                Ok(()) => info!("Auto-fix completed for issue #{}", issue.number),
+                Err(e) => tracing::error!("Auto-fix failed for issue #{}: {e:#}", issue.number),
+            }
         }
 
         info!("Applied triage to issue #{}", issue.number);
