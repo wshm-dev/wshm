@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/pszymkowiak/wshm/compare/v0.2.0...v0.3.0) (2026-03-12)
+
+
+### Features
+
+* wire /wshm fix slash command to actually run auto-fix pipeline ([a5c7096](https://github.com/pszymkowiak/wshm/commit/a5c7096f301c6fd86cff63dea1388aee1340863c))
+
+
+### Bug Fixes
+
+* reduce false positives in diff security scanner (nc pattern too broad) ([fffea93](https://github.com/pszymkowiak/wshm/commit/fffea93f9630fc1aa9d965719175043359c82118))
+
 ## [0.2.0](https://github.com/pszymkowiak/wshm/compare/v0.1.0...v0.2.0) (2026-03-12)
 
 
