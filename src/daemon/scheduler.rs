@@ -22,9 +22,10 @@ pub async fn run(state: Arc<DaemonState>) {
 
     if state.config.update.enabled {
         info!(
-            "Auto-update enabled (every {}h)",
+            "Auto-update enabled (every {}h, checking now...)",
             state.config.update.interval_hours
         );
+        update::auto_check_and_update().await;
     }
 
     loop {
