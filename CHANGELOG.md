@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.1](https://github.com/pszymkowiak/wshm/compare/v0.3.0...v0.3.1) (2026-03-12)
+
+
+### Bug Fixes
+
+* don't skip release upload when some build targets fail ([5332dd1](https://github.com/pszymkowiak/wshm/commit/5332dd1d1f6fc4f4604731476a4a2e0a9e887681))
+* ensure auto-fix starts from clean base branch ([9c3f0ce](https://github.com/pszymkowiak/wshm/commit/9c3f0ce82aaabdd76a33c90770727e3e8be88a9f))
+* use git add -A with exclusion list for auto-fix ([7918788](https://github.com/pszymkowiak/wshm/commit/7918788421252dce2d4a93cb9c2caa3ccb2ef329))
+
 ## [0.3.0](https://github.com/pszymkowiak/wshm/compare/v0.2.0...v0.3.0) (2026-03-12)
 
 
