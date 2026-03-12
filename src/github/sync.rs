@@ -46,6 +46,16 @@ pub async fn incremental_sync(gh: &Client, db: &Database, table: &str) -> Result
     Ok(())
 }
 
+/// Force sync issues now (bypass throttle). Used when we know there's a new event.
+pub async fn sync_issues_now(gh: &Client, db: &Database) -> Result<()> {
+    sync_issues(gh, db, None).await
+}
+
+/// Force sync pulls now (bypass throttle). Used when we know there's a new event.
+pub async fn sync_pulls_now(gh: &Client, db: &Database) -> Result<()> {
+    sync_pulls(gh, db).await
+}
+
 async fn sync_issues(gh: &Client, db: &Database, since: Option<&str>) -> Result<()> {
     info!("Syncing issues...");
     let issues = gh.fetch_issues(since).await?;

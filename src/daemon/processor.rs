@@ -75,8 +75,8 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
     let number = event.number;
     info!("Handling issue event: number={number:?}");
 
-    // Sync issues first
-    gh_sync::incremental_sync(&state.gh, &state.db, "issues").await?;
+    // Force sync issues (bypass throttle — we know there's a new event)
+    gh_sync::sync_issues_now(&state.gh, &state.db).await?;
 
     // Run triage pipeline
     let args = TriageArgs {
@@ -109,8 +109,8 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
     let number = event.number;
     info!("Handling pull_request event: number={number:?}");
 
-    // Sync pulls first
-    gh_sync::incremental_sync(&state.gh, &state.db, "pulls").await?;
+    // Force sync pulls (bypass throttle — we know there's a new event)
+    gh_sync::sync_pulls_now(&state.gh, &state.db).await?;
 
     // Run PR analysis pipeline
     let args = PrArgs {
