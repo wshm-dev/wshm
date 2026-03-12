@@ -37,7 +37,7 @@ pub enum Command {
     /// Show ranked merge queue
     Queue(QueueArgs),
 
-    /// Detect and resolve conflicts
+    /// Detect and resolve conficts
     Conflicts(ConflictArgs),
 
     /// Full cycle: sync + triage + analyze + queue + conflicts
