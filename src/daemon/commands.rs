@@ -16,7 +16,7 @@
 use anyhow::Result;
 use tracing::info;
 
-use crate::cli::{PrArgs, ReviewArgs, TriageArgs};
+use crate::cli::{FixArgs, PrArgs, ReviewArgs, TriageArgs};
 use crate::config::Config;
 use crate::db::Database;
 use crate::github::Client as GhClient;
@@ -191,10 +191,24 @@ pub async fn execute(
                 return Ok("This command only works on issues.".into());
             }
             info!("Slash command: fix issue #{number}");
-            Ok(format!(
-                "To auto-fix issue #{number}, run:\n```\nwshm fix --issue {number} --apply\n```\n\
-                 Auto-fix via comment is disabled for safety (requires explicit CLI invocation)."
-            ))
+            if !apply {
+                return Ok(format!(
+                    "Would auto-fix issue #{number}. (dry-run — start daemon with `--apply` to enable)"
+                ));
+            }
+            gh_sync::sync_issues_now(gh, db).await?;
+            let fix_args = FixArgs {
+                issue: number,
+                tool: None,
+                model: None,
+                docker: false,
+                image: None,
+                apply: true,
+            };
+            match pipelines::autogen::run(config, db, gh, &fix_args).await {
+                Ok(()) => Ok(format!("Auto-fix attempted for issue #{number}. Check for a new draft PR.")),
+                Err(e) => Ok(format!("Auto-fix failed for issue #{number}: {e:#}")),
+            }
         }
         SlashCommand::Queue => {
             if !is_pr {
