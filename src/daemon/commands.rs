@@ -299,3 +299,41 @@ pub async fn execute(
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_slash_prefix() {
+        assert!(matches!(parse("/wshm fix", "/wshm"), Some(SlashCommand::Fix)));
+        assert!(matches!(parse("/wshm autofix", "/wshm"), Some(SlashCommand::Fix)));
+        assert!(matches!(parse("/wshm triage", "/wshm"), Some(SlashCommand::Triage)));
+    }
+
+    #[test]
+    fn test_at_prefix() {
+        assert!(matches!(parse("@wshm fix", "/wshm"), Some(SlashCommand::Fix)));
+        assert!(matches!(parse("@wshm autofix", "/wshm"), Some(SlashCommand::Fix)));
+        assert!(matches!(parse("@wshm auto-fix", "/wshm"), Some(SlashCommand::Fix)));
+        assert!(matches!(parse("@wshm triage", "/wshm"), Some(SlashCommand::Triage)));
+    }
+
+    #[test]
+    fn test_at_prefix_with_extra_text() {
+        // "please" after command is ignored
+        assert!(matches!(parse("@wshm fix please", "/wshm"), Some(SlashCommand::Fix)));
+    }
+
+    #[test]
+    fn test_in_multiline_comment() {
+        let comment = "Hey team,\nCan someone look at this?\n\n@wshm fix\n\nThanks!";
+        assert!(matches!(parse(comment, "/wshm"), Some(SlashCommand::Fix)));
+    }
+
+    #[test]
+    fn test_no_command() {
+        assert!(parse("just a regular comment", "/wshm").is_none());
+        assert!(parse("@grok do something", "/wshm").is_none());
+    }
+}
