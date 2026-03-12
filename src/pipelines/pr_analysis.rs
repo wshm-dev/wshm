@@ -41,10 +41,11 @@ pub async fn run(
     args: &PrArgs,
     json: bool,
 ) -> Result<()> {
+    let model = config.model_for("pr");
     let ai = if config.ai.provider == "local" {
-        AiBackend::Local(LocalClient::new(&config.ai.model)?)
+        AiBackend::Local(LocalClient::new(model)?)
     } else {
-        AiBackend::Remote(AiClient::new(config)?)
+        AiBackend::Remote(AiClient::with_model(config, model)?)
     };
 
     let pulls = if let Some(number) = args.pr {

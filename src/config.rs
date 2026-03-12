@@ -98,6 +98,10 @@ pub struct TriageConfig {
     #[serde(default = "default_confidence")]
     pub auto_fix_confidence: f64,
 
+    /// Override AI model for triage (uses [ai].model if not set)
+    #[serde(default)]
+    pub model: Option<String>,
+
     #[serde(default = "default_label_bug")]
     pub labels_bug: String,
 
@@ -120,6 +124,7 @@ impl Default for TriageConfig {
             enabled: true,
             auto_fix: false,
             auto_fix_confidence: default_confidence(),
+            model: None,
             labels_bug: default_label_bug(),
             labels_feature: default_label_feature(),
             labels_duplicate: default_label_duplicate(),
@@ -161,6 +166,10 @@ pub struct PrConfig {
 
     #[serde(default = "default_true")]
     pub risk_labels: bool,
+
+    /// Override AI model for PR analysis (uses [ai].model if not set)
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl Default for PrConfig {
@@ -169,6 +178,7 @@ impl Default for PrConfig {
             enabled: true,
             auto_label: true,
             risk_labels: true,
+            model: None,
         }
     }
 }
@@ -278,6 +288,10 @@ pub struct FixConfig {
     /// Base branch to create fix branches from (default: "main")
     #[serde(default = "default_base_branch")]
     pub base_branch: String,
+
+    /// Override AI model for auto-fix (uses [ai].model if not set)
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl Default for FixConfig {
@@ -290,6 +304,7 @@ impl Default for FixConfig {
             scan_diff: true,
             draft_pr: true,
             base_branch: default_base_branch(),
+            model: None,
         }
     }
 }
@@ -461,6 +476,18 @@ impl Config {
         self.fix.secret_env.clone()
     }
 
+    /// Resolve the AI model for a given pipeline.
+    /// Pipeline-specific model overrides [ai].model.
+    pub fn model_for(&self, pipeline: &str) -> &str {
+        let override_model = match pipeline {
+            "triage" => self.triage.model.as_deref(),
+            "pr" => self.pr.model.as_deref(),
+            "fix" => self.fix.model.as_deref(),
+            _ => None,
+        };
+        override_model.unwrap_or(&self.ai.model)
+    }
+
     pub fn load(cli: &Cli) -> Result<Self> {
         let wshm_dir = PathBuf::from(".wshm");
         let config_path = wshm_dir.join("config.toml");
@@ -530,6 +557,7 @@ model = "claude-sonnet-4-20250514"
 enabled = true
 auto_fix = false
 auto_fix_confidence = 0.85
+# model = "claude-haiku-4-5-20251001"   # override: small model for triage
 labels_bug = "bug"
 labels_feature = "feature"
 labels_duplicate = "duplicate"
@@ -540,6 +568,7 @@ labels_needs_info = "needs-info"
 enabled = true
 auto_label = true
 risk_labels = true
+# model = "claude-sonnet-4-20250514"    # override: default model for PR analysis
 
 [queue]
 enabled = true
@@ -556,6 +585,7 @@ interval_minutes = 5
 full_sync_interval_hours = 24
 
 [fix]
+# model = "claude-sonnet-4-20250514"    # override: capable model for code generation
 # trusted_authors_only = true   # Only auto-fix issues from repo collaborators
 # scan_diff = true               # Scan generated code for suspicious patterns
 # draft_pr = true                # Create PRs as draft (require human review)

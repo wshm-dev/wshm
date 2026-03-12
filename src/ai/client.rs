@@ -24,9 +24,11 @@ pub struct AiClient {
 }
 
 /// Resolve provider configuration from name + optional base_url override.
-fn resolve_provider(config: &Config) -> Result<ProviderConfig> {
+fn resolve_provider(config: &Config, model_override: Option<&str>) -> Result<ProviderConfig> {
     let provider = config.ai.provider.as_str();
-    let model = config.ai.model.clone();
+    let model = model_override
+        .map(String::from)
+        .unwrap_or_else(|| config.ai.model.clone());
     let base_url = config.ai.base_url.clone();
 
     match provider {
@@ -222,7 +224,16 @@ fn env_key(names: &[&str]) -> Result<String> {
 
 impl AiClient {
     pub fn new(config: &Config) -> Result<Self> {
-        let provider = resolve_provider(config)?;
+        let provider = resolve_provider(config, None)?;
+        Ok(Self {
+            http: reqwest::Client::new(),
+            provider,
+        })
+    }
+
+    /// Create an AiClient with a model override (for per-pipeline model config).
+    pub fn with_model(config: &Config, model: &str) -> Result<Self> {
+        let provider = resolve_provider(config, Some(model))?;
         Ok(Self {
             http: reqwest::Client::new(),
             provider,

@@ -42,10 +42,11 @@ pub async fn run(
     args: &TriageArgs,
     json: bool,
 ) -> Result<()> {
+    let model = config.model_for("triage");
     let backend = if config.ai.provider == "local" {
-        AiBackend::Local(LocalClient::new(&config.ai.model)?)
+        AiBackend::Local(LocalClient::new(model)?)
     } else {
-        AiBackend::Remote(AiClient::new(config)?)
+        AiBackend::Remote(AiClient::with_model(config, model)?)
     };
 
     let issues = if let Some(number) = args.issue {
