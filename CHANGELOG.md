@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.0](https://github.com/pszymkowiak/wshm/compare/v0.1.0...v0.2.0) (2026-03-12)
+
+
+### Features
+
+* check for updates on daemon startup ([#9](https://github.com/pszymkowiak/wshm/issues/9)) ([ea699ce](https://github.com/pszymkowiak/wshm/commit/ea699ceadb49a1ca3108bc7e2cc6a421aa4fd6a2))
+* support [@wshm](https://github.com/wshm) prefix in addition to /wshm for slash commands ([7f4d38d](https://github.com/pszymkowiak/wshm/commit/7f4d38df6ba649028a24944aa742da487a2458cc))
+
+
+### Bug Fixes
+
+* auto-fix for issue [#15](https://github.com/pszymkowiak/wshm/issues/15) [wshm] ([#16](https://github.com/pszymkowiak/wshm/issues/16)) ([6ad8b7a](https://github.com/pszymkowiak/wshm/commit/6ad8b7af6f0f03a413b7afb8dc37bb1e803f076c))
+* force sync on event instead of throttled incremental sync ([8a2c708](https://github.com/pszymkowiak/wshm/commit/8a2c708e52f4a94cfca5ee46a76a19de99536648))
+* gitignore credentials and sqlite WAL files ([edc8c18](https://github.com/pszymkowiak/wshm/commit/edc8c18f1c9e8cc89221be25ec27987bd2778b1f))
+* triage comment announces auto-fix when it will be attempted ([39f4783](https://github.com/pszymkowiak/wshm/commit/39f47831dc5ed91b3c5d97b4a2fa42371ebef673))
+* use --dangerously-skip-permissions instead of --yes for claude CLI ([b6f0d0a](https://github.com/pszymkowiak/wshm/commit/b6f0d0a40afcdd115c0e7ca428860b0088c1df57))
+* use git add -u instead of -A to avoid committing secrets ([b89d976](https://github.com/pszymkowiak/wshm/commit/b89d976c239f3eb0225c44eb593c44a3579115c4))
+
 ## 0.1.0 (2026-03-12)
 
 
