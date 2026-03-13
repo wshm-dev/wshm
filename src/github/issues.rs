@@ -72,28 +72,13 @@ impl Client {
 
                 let state = item.get("state").and_then(|v| v.as_str()).unwrap_or("open");
 
-                let labels: Vec<String> = item
-                    .get("labels")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|l| l.get("name").and_then(|n| n.as_str()))
-                            .map(String::from)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
                 all_issues.push(Issue {
                     number: item["number"].as_u64().unwrap_or(0),
                     title: item["title"].as_str().unwrap_or("").to_string(),
                     body: item.get("body").and_then(|v| v.as_str()).map(String::from),
                     state: state.to_string(),
-                    labels,
-                    author: item
-                        .get("user")
-                        .and_then(|u| u.get("login"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
+                    labels: super::extract_labels(item),
+                    author: super::extract_author(item),
                     created_at: item["created_at"].as_str().unwrap_or("").to_string(),
                     updated_at: item["updated_at"].as_str().unwrap_or("").to_string(),
                     reactions_plus1,
@@ -245,7 +230,7 @@ impl Client {
 
 /// Ensure the comment body contains the hidden wshm marker.
 /// If not already present, appends it at the end.
-fn ensure_wshm_marker(body: &str) -> String {
+pub fn ensure_wshm_marker(body: &str) -> String {
     if body.contains(WSHM_COMMENT_MARKER) {
         body.to_string()
     } else {

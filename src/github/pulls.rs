@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::db::pulls::PullRequest;
-use crate::github::issues::WSHM_COMMENT_MARKER;
+use crate::github::issues::ensure_wshm_marker;
 use crate::github::Client;
 
 /// A merged pull request with its merge date
@@ -65,27 +65,12 @@ impl Client {
                     }
                 }
 
-                let labels: Vec<String> = pr
-                    .get("labels")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|l| l.get("name").and_then(|n| n.as_str()))
-                            .map(String::from)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
                 all.push(MergedPullRequest {
                     number: pr["number"].as_u64().unwrap_or(0),
                     title: pr["title"].as_str().unwrap_or("").to_string(),
                     body: pr.get("body").and_then(|v| v.as_str()).map(String::from),
-                    author: pr
-                        .get("user")
-                        .and_then(|u| u.get("login"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    labels,
+                    author: super::extract_author(pr),
+                    labels: super::extract_labels(pr),
                     merged_at,
                     created_at: pr["created_at"].as_str().unwrap_or("").to_string(),
                 });
@@ -130,19 +115,7 @@ impl Client {
             }
 
             for pr in &items {
-                let labels: Vec<String> = pr
-                    .get("labels")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|l| l.get("name").and_then(|n| n.as_str()))
-                            .map(String::from)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
                 let state = pr.get("state").and_then(|v| v.as_str()).unwrap_or("open");
-
                 let mergeable = pr.get("mergeable").and_then(|v| v.as_bool());
 
                 all_pulls.push(PullRequest {
@@ -150,12 +123,8 @@ impl Client {
                     title: pr["title"].as_str().unwrap_or("").to_string(),
                     body: pr.get("body").and_then(|v| v.as_str()).map(String::from),
                     state: state.to_string(),
-                    labels,
-                    author: pr
-                        .get("user")
-                        .and_then(|u| u.get("login"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
+                    labels: super::extract_labels(pr),
+                    author: super::extract_author(pr),
                     head_sha: pr
                         .get("head")
                         .and_then(|h| h.get("sha"))
@@ -364,11 +333,7 @@ impl Client {
     /// Post or update a wshm comment on a PR.
     /// If a wshm comment already exists, it is updated in place (idempotent).
     pub async fn comment_pr(&self, number: u64, body: &str) -> Result<()> {
-        let body_with_marker = if body.contains(WSHM_COMMENT_MARKER) {
-            body.to_string()
-        } else {
-            format!("{body}\n{WSHM_COMMENT_MARKER}")
-        };
+        let body_with_marker = ensure_wshm_marker(body);
 
         // PRs use the issues comments API on GitHub
         if let Some(comment_id) = self.find_wshm_comment(number).await? {

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use serde::Serialize;
 
+use super::truncate;
 use crate::cli::HealthArgs;
 use crate::db::pulls::PullRequest;
 use crate::db::Database;
@@ -216,7 +217,7 @@ fn detect_duplicates(pulls: &[PullRequest]) -> Vec<DuplicateGroup> {
                     number: pr.number,
                     title: pr.title.clone(),
                     author: pr.author.clone().unwrap_or_else(|| "unknown".into()),
-                    score: compute_simple_score(pr),
+                    score: score_pr(pr).0,
                     mergeable: pr.mergeable,
                     updated_at: pr.updated_at.clone(),
                 }
@@ -307,28 +308,38 @@ fn extract_linked_issues(body: &str) -> std::collections::HashSet<u64> {
         .collect()
 }
 
-pub fn compute_simple_score(pr: &PullRequest) -> i32 {
+/// Compute a merge-readiness score for a PR, with optional breakdown strings.
+pub fn score_pr(pr: &PullRequest) -> (i32, Vec<String>) {
     let mut score = 0i32;
+    let mut breakdown = Vec::new();
 
     if pr.ci_status.as_deref() == Some("success") {
         score += 10;
+        breakdown.push("CI:+10".to_string());
     }
     if pr.mergeable == Some(false) {
         score -= 10;
+        breakdown.push("conflict:-10".to_string());
     } else if pr.mergeable == Some(true) {
         score += 2;
+        breakdown.push("mergeable:+2".to_string());
     }
     if let Ok(created) = pr.created_at.parse::<chrono::DateTime<chrono::Utc>>() {
         let days = chrono::Utc::now().signed_duration_since(created).num_days();
-        score += days.min(10) as i32;
+        let age_bonus = days.min(10) as i32;
+        if age_bonus > 0 {
+            score += age_bonus;
+            breakdown.push(format!("age:+{age_bonus}"));
+        }
     }
     if let Some(ref body) = pr.body {
         if body.contains("fixes #") || body.contains("closes #") || body.contains("resolves #") {
             score += 3;
+            breakdown.push("linked:+3".to_string());
         }
     }
 
-    score
+    (score, breakdown)
 }
 
 fn determine_duplicate_reason(
@@ -382,13 +393,5 @@ fn union(parent: &mut Vec<usize>, i: usize, j: usize) {
     let rj = find(parent, j);
     if ri != rj {
         parent[ri] = rj;
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max - 1])
     }
 }

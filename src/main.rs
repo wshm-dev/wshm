@@ -17,6 +17,28 @@ mod vault;
 
 use cli::{Cli, Command};
 
+/// Initialize config + database + GitHub client.
+fn init_core(cli: &Cli) -> Result<(config::Config, db::Database, github::Client)> {
+    let config = config::Config::load(cli)?;
+    let db = db::Database::open(&config)?;
+    let gh = github::Client::new(&config)?;
+    Ok((config, db, gh))
+}
+
+/// Initialize config + database + GitHub client + export manager.
+fn init_full(
+    cli: &Cli,
+) -> Result<(
+    config::Config,
+    db::Database,
+    github::Client,
+    Option<export::ExportManager>,
+)> {
+    let (config, db, gh) = init_core(cli)?;
+    let exporter = export::ExportManager::from_config(&config.export)?;
+    Ok((config, db, gh, exporter))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -40,10 +62,7 @@ async fn main() -> Result<()> {
 
     match &cli.command {
         Some(Command::Sync) => {
-            let config = config::Config::load(&cli)?;
-            let db = db::Database::open(&config)?;
-            let gh = github::Client::new(&config)?;
-            let exporter = export::ExportManager::from_config(&config.export)?;
+            let (config, db, gh, exporter) = init_full(&cli)?;
             github::sync::full_sync(&gh, &db).await?;
             if let Some(ref em) = exporter {
                 em.emit(&export::ExportEvent {
@@ -57,10 +76,7 @@ async fn main() -> Result<()> {
             println!("Sync complete.");
         }
         Some(Command::Triage(args)) => {
-            let config = config::Config::load(&cli)?;
-            let db = db::Database::open(&config)?;
-            let gh = github::Client::new(&config)?;
-            let exporter = export::ExportManager::from_config(&config.export)?;
+            let (config, db, gh, exporter) = init_full(&cli)?;
 
             if !cli.offline {
                 github::sync::incremental_sync(&gh, &db, "issues").await?;
@@ -69,10 +85,7 @@ async fn main() -> Result<()> {
             pipelines::triage::run(&config, &db, &gh, args, cli.json, exporter.as_ref()).await?;
         }
         Some(Command::Pr(args)) => {
-            let config = config::Config::load(&cli)?;
-            let db = db::Database::open(&config)?;
-            let gh = github::Client::new(&config)?;
-            let exporter = export::ExportManager::from_config(&config.export)?;
+            let (config, db, gh, exporter) = init_full(&cli)?;
 
             if !cli.offline {
                 github::sync::incremental_sync(&gh, &db, "pulls").await?;
@@ -82,10 +95,7 @@ async fn main() -> Result<()> {
                 .await?;
         }
         Some(Command::Queue(args)) => {
-            let config = config::Config::load(&cli)?;
-            let db = db::Database::open(&config)?;
-            let gh = github::Client::new(&config)?;
-            let exporter = export::ExportManager::from_config(&config.export)?;
+            let (config, db, gh, exporter) = init_full(&cli)?;
 
             if !cli.offline {
                 github::sync::incremental_sync(&gh, &db, "pulls").await?;
@@ -95,10 +105,7 @@ async fn main() -> Result<()> {
                 .await?;
         }
         Some(Command::Conflicts(args)) => {
-            let config = config::Config::load(&cli)?;
-            let db = db::Database::open(&config)?;
-            let gh = github::Client::new(&config)?;
-            let exporter = export::ExportManager::from_config(&config.export)?;
+            let (config, db, gh, exporter) = init_full(&cli)?;
 
             if !cli.offline {
                 github::sync::incremental_sync(&gh, &db, "pulls").await?;
@@ -115,10 +122,7 @@ async fn main() -> Result<()> {
             .await?;
         }
         Some(Command::Run(args)) => {
-            let config = config::Config::load(&cli)?;
-            let db = db::Database::open(&config)?;
-            let gh = github::Client::new(&config)?;
-            let exporter = export::ExportManager::from_config(&config.export)?;
+            let (config, db, gh, exporter) = init_full(&cli)?;
 
             if !cli.offline {
                 github::sync::incremental_sync(&gh, &db, "issues").await?;
@@ -166,9 +170,7 @@ async fn main() -> Result<()> {
             }
         }
         Some(Command::Review(args)) => {
-            let config = config::Config::load(&cli)?;
-            let db = db::Database::open(&config)?;
-            let gh = github::Client::new(&config)?;
+            let (config, db, gh) = init_core(&cli)?;
 
             if !cli.offline {
                 github::sync::incremental_sync(&gh, &db, "pulls").await?;
@@ -188,10 +190,7 @@ async fn main() -> Result<()> {
             pipelines::pr_health::run(&db, args, cli.json)?;
         }
         Some(Command::Fix(args)) => {
-            let config = config::Config::load(&cli)?;
-            let db = db::Database::open(&config)?;
-            let gh = github::Client::new(&config)?;
-            let exporter = export::ExportManager::from_config(&config.export)?;
+            let (config, db, gh, exporter) = init_full(&cli)?;
 
             if !cli.offline {
                 github::sync::incremental_sync(&gh, &db, "issues").await?;

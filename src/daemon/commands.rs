@@ -219,7 +219,7 @@ pub async fn execute(
             let mut scored: Vec<(u64, String, i32)> = pulls
                 .iter()
                 .map(|pr| {
-                    let score = pipelines::pr_health::compute_simple_score(pr);
+                    let (score, _) = pipelines::pr_health::score_pr(pr);
                     (pr.number, pr.title.clone(), score)
                 })
                 .collect();
@@ -265,7 +265,7 @@ pub async fn execute(
                             })
                             .unwrap_or(0)
                     };
-                    let score = pipelines::pr_health::compute_simple_score(pr);
+                    let (score, _) = pipelines::pr_health::score_pr(pr);
                     let stale = age_days > 14;
                     Ok(format!(
                         "**PR #{number} Health**\n\n\

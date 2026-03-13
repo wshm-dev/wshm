@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 use tracing::info;
 
+use super::truncate;
 use crate::ai::backend::AiBackend;
 use crate::ai::prompts::inline_review;
 use crate::ai::schemas::{InlineComment, InlineReviewResult, ReviewStats};
@@ -424,11 +425,7 @@ fn print_review(
     applied: bool,
 ) {
     let status = if applied { "APPLIED" } else { "DRY-RUN" };
-    let truncated_title = if title.len() > 50 {
-        format!("{}…", &title[..49])
-    } else {
-        title.to_string()
-    };
+    let truncated_title = truncate(title, 50);
 
     println!(
         "  [{status}] #{number} {truncated_title} — {} comments, +{} -{} ({} files)",

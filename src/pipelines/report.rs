@@ -291,37 +291,7 @@ fn gather_data(db: &Database, repo_name: &str) -> Result<ReportData> {
     let queue: Vec<QueueRow> = open_prs
         .iter()
         .map(|pr| {
-            let mut score = 0i32;
-            let mut breakdown_parts = Vec::new();
-
-            if pr.ci_status.as_deref() == Some("success") {
-                score += 10;
-                breakdown_parts.push("CI:+10".to_string());
-            }
-            if pr.mergeable == Some(false) {
-                score -= 10;
-                breakdown_parts.push("conflict:-10".to_string());
-            } else if pr.mergeable == Some(true) {
-                score += 2;
-                breakdown_parts.push("mergeable:+2".to_string());
-            }
-            if let Ok(created) = pr.created_at.parse::<chrono::DateTime<chrono::Utc>>() {
-                let days = chrono::Utc::now().signed_duration_since(created).num_days();
-                let age_bonus = days.min(10) as i32;
-                if age_bonus > 0 {
-                    score += age_bonus;
-                    breakdown_parts.push(format!("age:+{age_bonus}"));
-                }
-            }
-            if let Some(ref body) = pr.body {
-                if body.contains("fixes #")
-                    || body.contains("closes #")
-                    || body.contains("resolves #")
-                {
-                    score += 3;
-                    breakdown_parts.push("linked:+3".to_string());
-                }
-            }
+            let (score, breakdown_parts) = super::pr_health::score_pr(pr);
 
             QueueRow {
                 number: pr.number,
