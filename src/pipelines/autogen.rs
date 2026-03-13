@@ -5,6 +5,7 @@ use tracing::info;
 use crate::cli::FixArgs;
 use crate::config::Config;
 use crate::db::Database;
+use crate::export::{EventKind, ExportEvent, ExportManager};
 use crate::github::Client as GhClient;
 
 /// Pipeline: Auto-generate a PR fix from an issue description.
@@ -25,7 +26,13 @@ use crate::github::Client as GhClient;
 ///   3. Spawn AI tool with issue context as prompt
 ///   4. Commit changes, push branch
 ///   5. Open PR linking to the issue
-pub async fn run(config: &Config, db: &Database, gh: &GhClient, args: &FixArgs) -> Result<()> {
+pub async fn run(
+    config: &Config,
+    db: &Database,
+    gh: &GhClient,
+    args: &FixArgs,
+    exporter: Option<&ExportManager>,
+) -> Result<()> {
     let issue = db.get_issue(args.issue)?.with_context(|| {
         format!(
             "Issue #{} not found in cache. Run `wshm sync` first.",
@@ -179,6 +186,21 @@ pub async fn run(config: &Config, db: &Database, gh: &GhClient, args: &FixArgs) 
                 config.branding.footer("Auto-fixed"),
             );
             gh.comment_issue(issue.number, &comment).await?;
+
+            // Emit export event
+            if let Some(em) = exporter {
+                em.emit(&ExportEvent {
+                    kind: EventKind::FixApplied,
+                    repo: config.repo_slug(),
+                    timestamp: chrono::Utc::now(),
+                    data: serde_json::json!({
+                        "issue_number": issue.number,
+                        "pr_number": pr_number,
+                        "tool": tool.name(),
+                    }),
+                })
+                .await?;
+            }
 
             // ICM: store successful fix for future context
             crate::icm::store(

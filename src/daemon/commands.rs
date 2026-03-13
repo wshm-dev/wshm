@@ -107,7 +107,7 @@ pub async fn execute(
                 issue: Some(number),
                 apply,
             };
-            pipelines::triage::run(config, db, gh, &args, false).await?;
+            pipelines::triage::run(config, db, gh, &args, false, None).await?;
             Ok(format!(
                 "Re-triaged issue #{number}. {}",
                 if apply {
@@ -127,7 +127,7 @@ pub async fn execute(
                 pr: Some(number),
                 apply,
             };
-            pipelines::pr_analysis::run(config, db, gh, &args, false).await?;
+            pipelines::pr_analysis::run(config, db, gh, &args, false, None).await?;
             Ok(format!(
                 "Re-analyzed PR #{number}. {}",
                 if apply {
@@ -201,7 +201,7 @@ pub async fn execute(
                 image: None,
                 apply: true,
             };
-            match pipelines::autogen::run(config, db, gh, &fix_args).await {
+            match pipelines::autogen::run(config, db, gh, &fix_args, None).await {
                 Ok(()) => Ok(format!(
                     "Auto-fix attempted for issue #{number}. Check for a new draft PR."
                 )),

@@ -46,7 +46,9 @@ pub async fn run(state: Arc<DaemonState>) {
                 apply: state.apply,
             };
 
-            match pipelines::triage::run(&state.config, &state.db, &state.gh, &args, false).await {
+            match pipelines::triage::run(&state.config, &state.db, &state.gh, &args, false, None)
+                .await
+            {
                 Ok(()) => info!("Scheduled triage complete"),
                 Err(e) => error!("Scheduled triage failed: {e:#}"),
             }

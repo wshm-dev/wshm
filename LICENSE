@@ -1,18 +1,41 @@
-MIT License
+WSHM SOURCE-AVAILABLE LICENSE v1.0
 
-Copyright (c) 2026 pszymkowiak
+Copyright (c) 2025-2026 pszymkowiak. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+GRANTS
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+You may view the source code and use the compiled binary of this software
+under the following terms:
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+1. INDIVIDUAL AND SMALL TEAM USE. Individuals and organizations with
+   twenty (20) or fewer total personnel (employees, contractors, and
+   agents combined) may use this software free of charge for any purpose,
+   including commercial use.
+
+2. ENTERPRISE USE REQUIRES A LICENSE. Organizations with more than twenty
+   (20) total personnel must obtain a commercial license from pszymkowiak
+   before using this software. Contact: patrick.szymkowiak@rtk-ai.app
+
+RESTRICTIONS
+
+3. NO COPYING OR REDISTRIBUTION. You may not copy, reproduce, distribute,
+   publish, or make available this software or any portion of its source
+   code, in whole or in part, in any form or by any means.
+
+4. NO DERIVATIVE WORKS. You may not modify, adapt, translate, or create
+   derivative works based on this software or its source code.
+
+5. NO SERVICE OFFERING. You may not offer this software, or any
+   functionality derived from it, as a hosted or managed service to
+   third parties.
+
+6. CONTRIBUTIONS. By submitting a contribution (pull request, patch, or
+   other modification) to this project, you irrevocably assign all rights,
+   title, and interest in your contribution to pszymkowiak.
+
+DISCLAIMER
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER

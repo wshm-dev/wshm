@@ -40,6 +40,12 @@ pub struct Config {
     #[serde(default)]
     pub update: UpdateConfig,
 
+    #[serde(default)]
+    pub export: ExportConfig,
+
+    #[serde(default)]
+    pub vault: Option<VaultConfig>,
+
     /// Resolved at runtime, not from config file
     #[serde(skip)]
     pub repo_owner: String,
@@ -463,6 +469,76 @@ fn default_update_interval() -> u32 {
     6
 }
 
+// ── Export config ──────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct ExportConfig {
+    #[serde(default)]
+    pub storage: Option<StorageConfig>,
+
+    #[serde(default)]
+    pub database: Option<DatabaseExportConfig>,
+
+    #[serde(default)]
+    pub webhooks: Vec<WebhookConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct StorageConfig {
+    pub provider: String,
+
+    #[serde(default)]
+    pub bucket: Option<String>,
+
+    #[serde(default)]
+    pub prefix: Option<String>,
+
+    #[serde(default)]
+    pub region: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DatabaseExportConfig {
+    pub provider: String,
+
+    #[serde(default)]
+    pub uri: Option<String>,
+
+    #[serde(default)]
+    pub index: Option<String>,
+
+    #[serde(default)]
+    pub database: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WebhookConfig {
+    pub url: String,
+
+    #[serde(default = "default_webhook_events")]
+    pub events: Vec<String>,
+
+    #[serde(default)]
+    pub secret: Option<String>,
+}
+
+fn default_webhook_events() -> Vec<String> {
+    vec!["*".to_string()]
+}
+
+// ── Vault config ──────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct VaultConfig {
+    pub provider: String,
+
+    #[serde(default)]
+    pub address: Option<String>,
+
+    #[serde(default)]
+    pub mount: Option<String>,
+}
+
 fn default_daemon_bind() -> String {
     "0.0.0.0:3000".to_string()
 }
@@ -603,6 +679,32 @@ full_sync_interval_hours = 24
 # tagline = "AI-powered repo assistant"          # Optional tagline
 # command_prefix = "/wshm"             # Slash command prefix
 # footer_template = "*{action} by [{name}]({url})*"  # Custom footer
+
+# [vault]
+# provider = "hashicorp"               # "hashicorp" | "aws" | "azure" | "gcp"
+# address = "https://vault.example.com"
+# mount = "secret"
+# Auth from env: VAULT_TOKEN, VAULT_ROLE_ID, etc.
+
+# [export.storage]
+# provider = "s3"                      # "s3" | "azure" | "gcs"
+# bucket = "wshm-logs"
+# prefix = "repos/{repo}/"
+# region = "eu-west-1"
+
+# [export.database]
+# provider = "elasticsearch"           # "elasticsearch" | "opensearch" | "postgresql" | "mongodb" | "mysql" | "mariadb"
+# uri = "http://localhost:9200"        # or vault(secret/wshm/elastic-uri)
+# index = "wshm-events"
+
+# [[export.webhooks]]
+# url = "https://hooks.example.com/wshm"
+# events = ["FixApplied", "PrMerged"]
+# secret = "your-hmac-secret"          # or vault(secret/wshm/webhook-hmac)
+
+# [[export.webhooks]]
+# url = "https://slack.example.com/webhook"
+# events = ["*"]
 "#;
 
         fs::write(&config_path, template)?;
@@ -635,6 +737,8 @@ impl Default for Config {
             daemon: DaemonConfig::default(),
             branding: BrandingConfig::default(),
             update: UpdateConfig::default(),
+            export: ExportConfig::default(),
+            vault: None,
             repo_owner: String::new(),
             repo_name: String::new(),
             wshm_dir: PathBuf::from(".wshm"),

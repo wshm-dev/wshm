@@ -10,6 +10,7 @@ use crate::cli::{FixArgs, TriageArgs};
 use crate::config::Config;
 use crate::db::issues::Issue;
 use crate::db::Database;
+use crate::export::{EventKind, ExportEvent, ExportManager};
 use crate::github::Client as GhClient;
 use crate::pipelines::autogen;
 
@@ -41,6 +42,7 @@ pub async fn run(
     gh: &GhClient,
     args: &TriageArgs,
     json: bool,
+    exporter: Option<&ExportManager>,
 ) -> Result<()> {
     let model = config.model_for("triage");
     let backend = if config.ai.provider == "local" {
@@ -87,6 +89,7 @@ pub async fn run(
             issue,
             &existing_issues,
             args.apply,
+            exporter,
         )
         .await
         {
@@ -122,6 +125,7 @@ async fn triage_issue(
     issue: &Issue,
     existing_issues: &[Issue],
     apply: bool,
+    exporter: Option<&ExportManager>,
 ) -> Result<IssueClassification> {
     // ICM: recall past triage decisions and feedback for context
     let icm_context = crate::icm::recall_context(
@@ -215,13 +219,24 @@ async fn triage_issue(
                 image: None,
                 apply: true,
             };
-            match autogen::run(config, db, gh, &fix_args).await {
+            match autogen::run(config, db, gh, &fix_args, exporter).await {
                 Ok(()) => info!("Auto-fix completed for issue #{}", issue.number),
                 Err(e) => tracing::error!("Auto-fix failed for issue #{}: {e:#}", issue.number),
             }
         }
 
         info!("Applied triage to issue #{}", issue.number);
+
+        // Emit export event
+        if let Some(em) = exporter {
+            em.emit(&ExportEvent {
+                kind: EventKind::IssueTriaged,
+                repo: config.repo_slug(),
+                timestamp: chrono::Utc::now(),
+                data: serde_json::to_value(&classification)?,
+            })
+            .await?;
+        }
     }
 
     Ok(classification)

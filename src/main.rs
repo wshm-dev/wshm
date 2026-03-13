@@ -7,11 +7,13 @@ mod cli;
 mod config;
 mod daemon;
 mod db;
+mod export;
 mod github;
 mod icm;
 mod login;
 mod pipelines;
 mod update;
+mod vault;
 
 use cli::{Cli, Command};
 
@@ -41,57 +43,82 @@ async fn main() -> Result<()> {
             let config = config::Config::load(&cli)?;
             let db = db::Database::open(&config)?;
             let gh = github::Client::new(&config)?;
+            let exporter = export::ExportManager::from_config(&config.export)?;
             github::sync::full_sync(&gh, &db).await?;
+            if let Some(ref em) = exporter {
+                em.emit(&export::ExportEvent {
+                    kind: export::EventKind::SyncCompleted,
+                    repo: config.repo_slug(),
+                    timestamp: chrono::Utc::now(),
+                    data: serde_json::json!({"sync_type": "full"}),
+                })
+                .await?;
+            }
             println!("Sync complete.");
         }
         Some(Command::Triage(args)) => {
             let config = config::Config::load(&cli)?;
             let db = db::Database::open(&config)?;
             let gh = github::Client::new(&config)?;
+            let exporter = export::ExportManager::from_config(&config.export)?;
 
             if !cli.offline {
                 github::sync::incremental_sync(&gh, &db, "issues").await?;
             }
 
-            pipelines::triage::run(&config, &db, &gh, args, cli.json).await?;
+            pipelines::triage::run(&config, &db, &gh, args, cli.json, exporter.as_ref()).await?;
         }
         Some(Command::Pr(args)) => {
             let config = config::Config::load(&cli)?;
             let db = db::Database::open(&config)?;
             let gh = github::Client::new(&config)?;
+            let exporter = export::ExportManager::from_config(&config.export)?;
 
             if !cli.offline {
                 github::sync::incremental_sync(&gh, &db, "pulls").await?;
             }
 
-            pipelines::pr_analysis::run(&config, &db, &gh, args, cli.json).await?;
+            pipelines::pr_analysis::run(&config, &db, &gh, args, cli.json, exporter.as_ref())
+                .await?;
         }
         Some(Command::Queue(args)) => {
             let config = config::Config::load(&cli)?;
             let db = db::Database::open(&config)?;
             let gh = github::Client::new(&config)?;
+            let exporter = export::ExportManager::from_config(&config.export)?;
 
             if !cli.offline {
                 github::sync::incremental_sync(&gh, &db, "pulls").await?;
             }
 
-            pipelines::merge_queue::run(&config, &db, &gh, args, cli.json).await?;
+            pipelines::merge_queue::run(&config, &db, &gh, args, cli.json, exporter.as_ref())
+                .await?;
         }
         Some(Command::Conflicts(args)) => {
             let config = config::Config::load(&cli)?;
             let db = db::Database::open(&config)?;
             let gh = github::Client::new(&config)?;
+            let exporter = export::ExportManager::from_config(&config.export)?;
 
             if !cli.offline {
                 github::sync::incremental_sync(&gh, &db, "pulls").await?;
             }
 
-            pipelines::conflict_resolution::run(&config, &db, &gh, args, cli.json).await?;
+            pipelines::conflict_resolution::run(
+                &config,
+                &db,
+                &gh,
+                args,
+                cli.json,
+                exporter.as_ref(),
+            )
+            .await?;
         }
         Some(Command::Run(args)) => {
             let config = config::Config::load(&cli)?;
             let db = db::Database::open(&config)?;
             let gh = github::Client::new(&config)?;
+            let exporter = export::ExportManager::from_config(&config.export)?;
 
             if !cli.offline {
                 github::sync::incremental_sync(&gh, &db, "issues").await?;
@@ -102,20 +129,37 @@ async fn main() -> Result<()> {
                 issue: None,
                 apply: args.apply,
             };
-            pipelines::triage::run(&config, &db, &gh, &triage_args, cli.json).await?;
+            pipelines::triage::run(&config, &db, &gh, &triage_args, cli.json, exporter.as_ref())
+                .await?;
 
             let pr_args = cli::PrArgs {
                 pr: None,
                 apply: args.apply,
             };
-            pipelines::pr_analysis::run(&config, &db, &gh, &pr_args, cli.json).await?;
+            pipelines::pr_analysis::run(&config, &db, &gh, &pr_args, cli.json, exporter.as_ref())
+                .await?;
 
             let queue_args = cli::QueueArgs { apply: args.apply };
-            pipelines::merge_queue::run(&config, &db, &gh, &queue_args, cli.json).await?;
+            pipelines::merge_queue::run(
+                &config,
+                &db,
+                &gh,
+                &queue_args,
+                cli.json,
+                exporter.as_ref(),
+            )
+            .await?;
 
             let conflict_args = cli::ConflictArgs { apply: args.apply };
-            pipelines::conflict_resolution::run(&config, &db, &gh, &conflict_args, cli.json)
-                .await?;
+            pipelines::conflict_resolution::run(
+                &config,
+                &db,
+                &gh,
+                &conflict_args,
+                cli.json,
+                exporter.as_ref(),
+            )
+            .await?;
 
             if !cli.json {
                 println!("Full cycle complete.");
@@ -147,12 +191,13 @@ async fn main() -> Result<()> {
             let config = config::Config::load(&cli)?;
             let db = db::Database::open(&config)?;
             let gh = github::Client::new(&config)?;
+            let exporter = export::ExportManager::from_config(&config.export)?;
 
             if !cli.offline {
                 github::sync::incremental_sync(&gh, &db, "issues").await?;
             }
 
-            pipelines::autogen::run(&config, &db, &gh, args).await?;
+            pipelines::autogen::run(&config, &db, &gh, args, exporter.as_ref()).await?;
         }
         Some(Command::Report(args)) => {
             let config = config::Config::load(&cli)?;

@@ -52,6 +52,18 @@ pub struct InlineReviewResult {
     pub comments: Vec<InlineComment>,
     #[serde(default)]
     pub summary: String,
+    #[serde(default)]
+    pub stats: ReviewStats,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReviewStats {
+    #[serde(default)]
+    pub errors: usize,
+    #[serde(default)]
+    pub warnings: usize,
+    #[serde(default)]
+    pub infos: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,10 +73,18 @@ pub struct InlineComment {
     pub body: String,
     #[serde(default = "default_severity")]
     pub severity: String,
+    #[serde(default = "default_category")]
+    pub category: String,
+    #[serde(default)]
+    pub suggestion: Option<String>,
 }
 
 fn default_severity() -> String {
     "warning".to_string()
+}
+
+fn default_category() -> String {
+    "logic".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

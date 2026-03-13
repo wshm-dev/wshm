@@ -1,9 +1,9 @@
 [package]
 name = "wshm"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "AI-powered GitHub agent for OSS maintainers"
-license = "MIT"
+license = "LicenseRef-WSHM-Source-Available"
 readme = "README.md"
 repository = "https://github.com/pszymkowiak/wshm"
 keywords = ["github", "ai", "triage", "automation"]
@@ -13,6 +13,32 @@ categories = ["command-line-utilities", "development-tools"]
 default = []
 metal = ["llama-cpp-2/metal"]
 cuda = ["llama-cpp-2/cuda"]
+
+# Export sinks (cloud storage)
+export-s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
+export-azure = ["dep:azure_storage_blobs", "dep:azure_storage"]
+export-gcs = ["dep:google-cloud-storage"]
+
+# Export sinks (databases)
+export-elastic = ["dep:elasticsearch"]
+export-opensearch = ["dep:opensearch"]
+export-postgres = ["dep:sqlx"]
+export-mongodb = ["dep:mongodb"]
+export-mysql = ["dep:mysql_async"]
+
+# Vault providers
+vault-hashicorp = ["dep:vaultrs"]
+vault-aws = ["dep:aws-sdk-secretsmanager", "dep:aws-config"]
+vault-azure = ["dep:azure_security_keyvault", "dep:azure_identity"]
+vault-gcp = ["dep:google-cloud-secretmanager-v1"]
+
+# Convenience bundles
+export-all = [
+    "export-s3", "export-azure", "export-gcs",
+    "export-elastic", "export-opensearch", "export-postgres", "export-mongodb",
+    "export-mysql",
+]
+vault-all = ["vault-hashicorp", "vault-aws", "vault-azure", "vault-gcp"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
@@ -43,3 +69,25 @@ tower-http = { version = "0.6", features = ["trace"] }
 flate2 = "1"
 tar = "0.4"
 zip = "2"
+async-trait = "0.1"
+
+# Optional: Export - Cloud Storage
+aws-sdk-s3 = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
+azure_storage_blobs = { version = "0.21", optional = true }
+azure_storage = { version = "0.21", optional = true }
+google-cloud-storage = { version = "1", optional = true }
+
+# Optional: Export - Databases
+elasticsearch = { version = "9.1.0-alpha.1", optional = true }
+opensearch = { version = "2", optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"], optional = true }
+mongodb = { version = "3", optional = true }
+mysql_async = { version = "0.36", optional = true }
+
+# Optional: Vault
+vaultrs = { version = "0.7", optional = true }
+aws-sdk-secretsmanager = { version = "1", optional = true }
+azure_security_keyvault = { version = "0.21", optional = true }
+azure_identity = { version = "0.33", optional = true }
+google-cloud-secretmanager-v1 = { version = "1", optional = true }

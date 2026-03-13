@@ -5,6 +5,7 @@ use tracing::info;
 use crate::cli::ConflictArgs;
 use crate::config::Config;
 use crate::db::Database;
+use crate::export::ExportManager;
 use crate::github::Client as GhClient;
 
 #[derive(Serialize)]
@@ -29,6 +30,7 @@ pub async fn run(
     _gh: &GhClient,
     _args: &ConflictArgs,
     json: bool,
+    _exporter: Option<&ExportManager>,
 ) -> Result<()> {
     let pulls = db.get_open_pulls()?;
 

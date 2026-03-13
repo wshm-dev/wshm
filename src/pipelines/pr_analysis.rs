@@ -10,6 +10,7 @@ use crate::cli::PrArgs;
 use crate::config::Config;
 use crate::db::pulls::PullRequest;
 use crate::db::Database;
+use crate::export::{EventKind, ExportEvent, ExportManager};
 use crate::github::Client as GhClient;
 
 #[derive(Serialize)]
@@ -40,6 +41,7 @@ pub async fn run(
     gh: &GhClient,
     args: &PrArgs,
     json: bool,
+    exporter: Option<&ExportManager>,
 ) -> Result<()> {
     let model = config.model_for("pr");
     let ai = if config.ai.provider == "local" {
@@ -77,7 +79,7 @@ pub async fn run(
 
     for pr in &pulls {
         info!("Analyzing PR #{}: {}", pr.number, pr.title);
-        match analyze_pr(config, &ai, db, gh, pr, args.apply).await {
+        match analyze_pr(config, &ai, db, gh, pr, args.apply, exporter).await {
             Ok(analysis) => {
                 if !json {
                     print_analysis(pr, &analysis, args.apply);
@@ -109,6 +111,7 @@ async fn analyze_pr(
     gh: &GhClient,
     pr: &PullRequest,
     apply: bool,
+    exporter: Option<&ExportManager>,
 ) -> Result<PrAnalysis> {
     // Try to fetch diff (best-effort)
     let diff = match gh.fetch_pr_diff(pr.number).await {
@@ -178,6 +181,17 @@ async fn analyze_pr(
         gh.comment_pr(pr.number, &comment).await?;
 
         info!("Applied analysis to PR #{}", pr.number);
+
+        // Emit export event
+        if let Some(em) = exporter {
+            em.emit(&ExportEvent {
+                kind: EventKind::PrAnalyzed,
+                repo: config.repo_slug(),
+                timestamp: chrono::Utc::now(),
+                data: serde_json::to_value(&analysis)?,
+            })
+            .await?;
+        }
     }
 
     Ok(analysis)

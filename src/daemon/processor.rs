@@ -87,7 +87,7 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
         apply: state.apply,
     };
 
-    pipelines::triage::run(&state.config, &state.db, &state.gh, &args, false).await?;
+    pipelines::triage::run(&state.config, &state.db, &state.gh, &args, false, None).await?;
 
     // Store in ICM if enabled
     if state.config.daemon.icm_enabled {
@@ -121,7 +121,7 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
         apply: state.apply,
     };
 
-    pipelines::pr_analysis::run(&state.config, &state.db, &state.gh, &args, false).await?;
+    pipelines::pr_analysis::run(&state.config, &state.db, &state.gh, &args, false, None).await?;
 
     // Store in ICM if enabled
     if state.config.daemon.icm_enabled {

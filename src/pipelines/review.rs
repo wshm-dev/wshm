@@ -4,7 +4,7 @@ use tracing::info;
 
 use crate::ai::local::LocalClient;
 use crate::ai::prompts::inline_review;
-use crate::ai::schemas::InlineReviewResult;
+use crate::ai::schemas::{InlineComment, InlineReviewResult, ReviewStats};
 use crate::ai::AiClient;
 use crate::cli::ReviewArgs;
 use crate::config::Config;
@@ -35,6 +35,9 @@ impl AiBackend {
         }
     }
 }
+
+/// Minimum number of files to trigger per-file chunking instead of full-diff mode.
+const CHUNK_THRESHOLD_FILES: usize = 2;
 
 pub async fn run(
     config: &Config,
@@ -100,12 +103,20 @@ pub async fn run(
             print_size_warning(pr.number, &size);
         }
 
-        // AI inline review
-        let user_prompt =
-            inline_review::build_user_prompt(&pr.title, pr.body.as_deref().unwrap_or(""), &diff);
+        // Split diff into per-file chunks
+        let file_chunks = inline_review::split_diff_by_file(&diff);
+        let pr_body = pr.body.as_deref().unwrap_or("");
 
-        let result: InlineReviewResult = match ai.review(inline_review::SYSTEM, &user_prompt).await
-        {
+        let result = if file_chunks.len() >= CHUNK_THRESHOLD_FILES {
+            // Per-file review: better context, no truncation issues
+            review_per_file(&ai, &pr.title, pr_body, &file_chunks).await
+        } else {
+            // Small PR: send full diff in one shot
+            let user_prompt = inline_review::build_user_prompt(&pr.title, pr_body, &diff);
+            ai.review(inline_review::SYSTEM, &user_prompt).await
+        };
+
+        let result = match result {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("Failed to review PR #{}: {e:#}", pr.number);
@@ -124,15 +135,16 @@ pub async fn run(
                 .comments
                 .iter()
                 .map(|c| {
-                    let body = format!("**[{}]** {}", c.severity.to_uppercase(), c.body);
+                    let body = format_github_comment(c);
                     (c.path.clone(), c.line, body)
                 })
                 .collect();
 
             let review_body = format!(
-                "{}## 🔎 Automated Code Review\n\n{}\n\n{}\n\n{}",
+                "{}## 🔎 Automated Code Review\n\n{}\n\n{}\n\n{}\n\n{}",
                 config.branding.header(),
                 result.summary,
+                format_stats_summary(&result.stats),
                 format_size_summary(&size),
                 config.branding.footer("Reviewed"),
             );
@@ -165,13 +177,140 @@ pub async fn run(
     Ok(())
 }
 
+/// Review each file separately for better context and fewer truncation issues.
+async fn review_per_file(
+    ai: &AiBackend,
+    pr_title: &str,
+    pr_body: &str,
+    file_chunks: &[(String, String)],
+) -> Result<InlineReviewResult> {
+    let mut all_comments: Vec<InlineComment> = Vec::new();
+    let mut summaries: Vec<String> = Vec::new();
+    let mut stats = ReviewStats::default();
+
+    for (file_path, file_diff) in file_chunks {
+        // Skip non-code files
+        if should_skip_file(file_path) {
+            continue;
+        }
+
+        let user_prompt = inline_review::build_file_prompt(pr_title, pr_body, file_path, file_diff);
+
+        match ai.review(inline_review::SYSTEM, &user_prompt).await {
+            Ok(result) => {
+                stats.errors += result.stats.errors;
+                stats.warnings += result.stats.warnings;
+                stats.infos += result.stats.infos;
+
+                if !result.summary.is_empty()
+                    && result.summary != "No issues found."
+                    && !result.comments.is_empty()
+                {
+                    summaries.push(format!("**{}**: {}", file_path, result.summary));
+                }
+
+                all_comments.extend(result.comments);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to review {file_path}: {e:#}");
+            }
+        }
+    }
+
+    // Recompute stats from actual comments if AI stats seem off
+    if stats.errors + stats.warnings + stats.infos != all_comments.len() {
+        stats = ReviewStats::default();
+        for c in &all_comments {
+            match c.severity.as_str() {
+                "error" => stats.errors += 1,
+                "warning" => stats.warnings += 1,
+                _ => stats.infos += 1,
+            }
+        }
+    }
+
+    let summary = if summaries.is_empty() {
+        "No issues found.".to_string()
+    } else {
+        summaries.join("\n")
+    };
+
+    Ok(InlineReviewResult {
+        comments: all_comments,
+        summary,
+        stats,
+    })
+}
+
+/// Format an inline comment for GitHub, including suggestion blocks.
+fn format_github_comment(c: &InlineComment) -> String {
+    let severity_badge = match c.severity.as_str() {
+        "error" => "🔴 **ERROR**",
+        "warning" => "🟡 **WARNING**",
+        _ => "🔵 **INFO**",
+    };
+
+    let category_badge = match c.category.as_str() {
+        "security" => "🔒 Security",
+        "bug" => "🐛 Bug",
+        "perf" => "⚡ Performance",
+        "race-condition" => "🏁 Race Condition",
+        "resource-leak" => "💧 Resource Leak",
+        "error-handling" => "⚠️ Error Handling",
+        "logic" => "🧠 Logic",
+        other => other,
+    };
+
+    let mut body = format!("{severity_badge} | {category_badge}\n\n{}", c.body);
+
+    if let Some(ref suggestion) = c.suggestion {
+        if !suggestion.is_empty() {
+            body.push_str(&format!("\n\n```suggestion\n{suggestion}\n```"));
+        }
+    }
+
+    body
+}
+
+/// Files to skip during review (generated, config, non-code).
+fn should_skip_file(path: &str) -> bool {
+    let skip_extensions = [
+        ".lock", ".sum", ".min.js", ".min.css", ".map", ".svg", ".png", ".jpg", ".ico", ".woff",
+        ".woff2", ".ttf", ".eot", ".pdf",
+    ];
+
+    let skip_paths = [
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "Cargo.lock",
+        "go.sum",
+        "composer.lock",
+        "Gemfile.lock",
+        "poetry.lock",
+        "Pipfile.lock",
+        ".gitignore",
+        ".gitattributes",
+    ];
+
+    if skip_paths.iter().any(|p| path.ends_with(p)) {
+        return true;
+    }
+
+    if skip_extensions.iter().any(|ext| path.ends_with(ext)) {
+        return true;
+    }
+
+    false
+}
+
 // --- PR Size ---
 
 pub struct DiffSize {
     pub additions: usize,
     pub deletions: usize,
     pub files_changed: usize,
-    pub large_files: Vec<(String, usize)>, // (path, lines_changed)
+    pub large_files: Vec<(String, usize)>,
 }
 
 impl DiffSize {
@@ -196,7 +335,6 @@ pub fn compute_diff_size(diff: &str) -> DiffSize {
 
     for line in diff.lines() {
         if line.starts_with("diff --git") {
-            // Extract filename: diff --git a/path b/path
             if let Some(b_path) = line.split(" b/").last() {
                 current_file = b_path.to_string();
             }
@@ -257,6 +395,43 @@ fn format_size_summary(size: &DiffSize) -> String {
     )
 }
 
+fn format_stats_summary(stats: &ReviewStats) -> String {
+    let total = stats.errors + stats.warnings + stats.infos;
+    if total == 0 {
+        return "✅ **No issues found**".to_string();
+    }
+
+    let mut parts = Vec::new();
+    if stats.errors > 0 {
+        parts.push(format!(
+            "🔴 {} error{}",
+            stats.errors,
+            if stats.errors > 1 { "s" } else { "" }
+        ));
+    }
+    if stats.warnings > 0 {
+        parts.push(format!(
+            "🟡 {} warning{}",
+            stats.warnings,
+            if stats.warnings > 1 { "s" } else { "" }
+        ));
+    }
+    if stats.infos > 0 {
+        parts.push(format!(
+            "🔵 {} info{}",
+            stats.infos,
+            if stats.infos > 1 { "s" } else { "" }
+        ));
+    }
+
+    format!(
+        "**{} issue{} found:** {}",
+        total,
+        if total > 1 { "s" } else { "" },
+        parts.join(" · ")
+    )
+}
+
 fn print_review(
     number: u64,
     title: &str,
@@ -286,8 +461,38 @@ fn print_review(
                 "warning" => "🟡",
                 _ => "🔵",
             };
-            println!("    {} {}:{} — {}", severity_icon, c.path, c.line, c.body);
+            let cat = match c.category.as_str() {
+                "security" => "SEC",
+                "bug" => "BUG",
+                "perf" => "PERF",
+                "race-condition" => "RACE",
+                "resource-leak" => "LEAK",
+                "error-handling" => "ERR",
+                "logic" => "LOGIC",
+                other => other,
+            };
+            println!(
+                "    {} [{}] {}:{} — {}",
+                severity_icon, cat, c.path, c.line, c.body
+            );
+            if let Some(ref suggestion) = c.suggestion {
+                if !suggestion.is_empty() {
+                    // Show first line of suggestion
+                    let first_line = suggestion.lines().next().unwrap_or("");
+                    println!("      💡 {first_line}");
+                }
+            }
         }
+    }
+
+    // Stats
+    let stats = &result.stats;
+    let total = stats.errors + stats.warnings + stats.infos;
+    if total > 0 {
+        println!(
+            "  Stats: {} error(s), {} warning(s), {} info(s)",
+            stats.errors, stats.warnings, stats.infos,
+        );
     }
 
     if !result.summary.is_empty() && result.summary != "No issues found." {
