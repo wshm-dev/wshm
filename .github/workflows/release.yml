@@ -115,7 +115,7 @@ jobs:
       - name: Create checksums
         run: |
           cd release
-          sha256sum * > checksums.txt
+          sha256sum * > checksums-${{ steps.version.outputs.version }}.sha256
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
@@ -143,18 +143,20 @@ jobs:
 
       - name: Download checksums
         run: |
-          gh release download "${{ steps.version.outputs.tag }}" \
+          TAG="${{ steps.version.outputs.tag }}"
+          gh release download "$TAG" \
             --repo pszymkowiak/wshm \
-            --pattern checksums.txt
+            --pattern "checksums-${TAG}.sha256"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Parse checksums
         id: sha
         run: |
-          echo "arm=$(grep aarch64-apple-darwin checksums.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
-          echo "intel=$(grep x86_64-apple-darwin checksums.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
-          echo "linux=$(grep x86_64-unknown-linux-gnu checksums.txt | awk '{print $1}')" >> $GITHUB_OUTPUT
+          CHECKSUMS="checksums-${{ steps.version.outputs.tag }}.sha256"
+          echo "arm=$(grep aarch64-apple-darwin $CHECKSUMS | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "intel=$(grep x86_64-apple-darwin $CHECKSUMS | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "linux=$(grep x86_64-unknown-linux-gnu $CHECKSUMS | awk '{print $1}')" >> $GITHUB_OUTPUT
 
       - name: Update formula
         run: |

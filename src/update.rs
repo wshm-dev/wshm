@@ -60,9 +60,9 @@ async fn fetch_latest_release(
     Ok((tag, html_url))
 }
 
-/// Download checksums.txt from a release.
+/// Download checksums file from a release.
 async fn fetch_checksums(http: &reqwest::Client, tag: &str, token: Option<&str>) -> Result<String> {
-    let url = format!("https://github.com/{REPO}/releases/download/{tag}/checksums.txt");
+    let url = format!("https://github.com/{REPO}/releases/download/{tag}/checksums-{tag}.sha256");
 
     let mut req = http.get(&url).header("User-Agent", "wshm-updater");
     if let Some(t) = token {
@@ -72,9 +72,19 @@ async fn fetch_checksums(http: &reqwest::Client, tag: &str, token: Option<&str>)
     let resp = req
         .send()
         .await
-        .context("Failed to download checksums.txt")?;
+        .context("Failed to download checksums file")?;
     if !resp.status().is_success() {
-        anyhow::bail!("Failed to download checksums.txt ({})", resp.status());
+        // Fallback to legacy checksums.txt for older releases
+        let legacy_url = format!("https://github.com/{REPO}/releases/download/{tag}/checksums.txt");
+        let mut req = http.get(&legacy_url).header("User-Agent", "wshm-updater");
+        if let Some(t) = token {
+            req = req.header("Authorization", format!("Bearer {t}"));
+        }
+        let resp = req.send().await.context("Failed to download checksums")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Failed to download checksums for {tag} ({})", resp.status());
+        }
+        return Ok(resp.text().await?);
     }
 
     Ok(resp.text().await?)
@@ -303,6 +313,9 @@ pub async fn check_and_update(apply: bool, json: bool) -> Result<Option<String>>
     // Replace current binary
     let installed_path = replace_binary(&binary)?;
 
+    // Store binary hash for startup integrity check
+    store_binary_hash(&installed_path)?;
+
     if !json {
         println!(
             "Updated to v{remote_version} ({})",
@@ -326,6 +339,58 @@ pub async fn auto_check_and_update() {
         Ok(Some(tag)) => info!("Auto-updated to {tag}"),
         Ok(None) => info!("Auto-update check: already up-to-date"),
         Err(e) => warn!("Auto-update check failed: {e:#}"),
+    }
+}
+
+// ── Binary integrity ─────────────────────────────────────────
+
+/// Path where we store the expected SHA256 of the installed binary.
+fn integrity_path() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(".wshm-binary.sha256")))
+}
+
+/// Store SHA256 of the binary after a successful update.
+fn store_binary_hash(binary_path: &std::path::Path) -> Result<()> {
+    let data = fs::read(binary_path).context("Failed to read binary for hash")?;
+    let hash = sha256_hex(&data);
+    if let Some(path) = integrity_path() {
+        fs::write(&path, format!("{hash}  wshm\n"))?;
+        info!("Stored binary integrity hash: {hash}");
+    }
+    Ok(())
+}
+
+/// Verify the running binary hasn't been modified since last update.
+/// Returns Ok(true) if valid, Ok(false) if tampered, Err if no hash stored.
+pub fn verify_binary_integrity() -> Result<bool> {
+    let integrity = integrity_path().context("Cannot determine binary path")?;
+    if !integrity.exists() {
+        return Err(anyhow::anyhow!(
+            "No integrity hash stored (first run or manual install)"
+        ));
+    }
+
+    let stored = fs::read_to_string(&integrity)?;
+    let expected = stored
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().next())
+        .context("Invalid integrity file")?;
+
+    let exe = std::env::current_exe().context("Cannot determine current exe")?;
+    let data = fs::read(&exe).context("Cannot read current binary")?;
+    let actual = sha256_hex(&data);
+
+    if actual == expected {
+        Ok(true)
+    } else {
+        warn!(
+            "Binary integrity check FAILED!\n  Expected: {expected}\n  Actual:   {actual}\n  Path: {}",
+            exe.display()
+        );
+        Ok(false)
     }
 }
 

@@ -23,6 +23,16 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Binary integrity check (skip for --help/--version which exit early)
+    match update::verify_binary_integrity() {
+        Ok(true) => tracing::debug!("Binary integrity check passed"),
+        Ok(false) => {
+            eprintln!("⚠️  WARNING: Binary integrity check FAILED — the wshm binary may have been tampered with.");
+            eprintln!("   Run `wshm update --apply` to reinstall from a verified release.");
+        }
+        Err(_) => {} // No hash stored — first run or manual install, skip silently
+    }
+
     // Inject stored credentials from .wshm/credentials into env
     login::inject_credentials();
 
