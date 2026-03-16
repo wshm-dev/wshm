@@ -214,6 +214,12 @@ async fn main() -> Result<()> {
             let db = db::Database::open(&config)?;
             pipelines::dashboard::run(&db, args)?;
         }
+        Some(Command::Context) => {
+            let config = config::Config::load(&cli)?;
+            let db = db::Database::open(&config)?;
+            let slug = config.repo_slug();
+            pipelines::context::run(&db, &slug)?;
+        }
         Some(Command::Model(model_cmd)) => match model_cmd {
             cli::ModelCommand::Pull { name } => {
                 ai::local::pull_model(name)?;

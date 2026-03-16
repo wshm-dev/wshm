@@ -65,6 +65,9 @@ pub enum Command {
     /// Generate metrics dashboard (HTML with charts)
     Dashboard(DashboardArgs),
 
+    /// Export repo context as LLM-ready markdown
+    Context,
+
     /// Authenticate with GitHub and AI provider
     Login(LoginArgs),
 
