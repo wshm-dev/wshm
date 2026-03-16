@@ -184,7 +184,15 @@ async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Re
         None => return Ok(()),
     };
 
-    info!("Slash command on #{number}: {cmd:?}");
+    // Extract commenter username
+    let triggered_by = payload
+        .get("comment")
+        .and_then(|c| c.get("user"))
+        .and_then(|u| u.get("login"))
+        .and_then(|l| l.as_str())
+        .unwrap_or("unknown");
+
+    info!("Slash command on #{number} by {triggered_by}: {cmd:?}");
 
     // Detect if this is a PR (issue_comment fires for both issues and PRs)
     let is_pr = payload
@@ -201,6 +209,7 @@ async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Re
         &state.db,
         &state.gh,
         state.apply,
+        Some(triggered_by),
     )
     .await?;
 

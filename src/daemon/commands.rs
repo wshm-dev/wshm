@@ -98,6 +98,7 @@ pub async fn execute(
     db: &Database,
     gh: &GhClient,
     apply: bool,
+    triggered_by: Option<&str>,
 ) -> Result<String> {
     match cmd {
         SlashCommand::Triage => {
@@ -192,6 +193,18 @@ pub async fn execute(
                     "Would auto-fix issue #{number}. (dry-run — start daemon with `--apply` to enable)"
                 ));
             }
+
+            // Check if the commenter is authorized
+            if !config.fix.allowed_users.is_empty() {
+                let user = triggered_by.unwrap_or("unknown");
+                if !config.fix.allowed_users.iter().any(|u| u == user) {
+                    return Ok(format!(
+                        "User `{user}` is not authorized to trigger auto-fix. Allowed: {}",
+                        config.fix.allowed_users.join(", ")
+                    ));
+                }
+            }
+
             gh_sync::sync_issues_now(gh, db).await?;
             let fix_args = FixArgs {
                 issue: number,
