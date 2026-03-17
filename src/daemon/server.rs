@@ -48,7 +48,8 @@ pub async fn run(
 }
 
 async fn handle_health(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
-    let pending = state.daemon.db.pending_event_count().unwrap_or(0);
+    let pending = state.daemon.db.pending_event_count()
+        .unwrap_or_else(|e| { tracing::warn!("Failed to query pending events: {e}"); 0 });
     Json(json!({
         "status": "ok",
         "apply": state.daemon.apply,
@@ -178,7 +179,8 @@ async fn handle_health_multi(State(state): State<Arc<MultiServerState>>) -> impl
         .repos
         .iter()
         .map(|(slug, ds)| {
-            let pending = ds.db.pending_event_count().unwrap_or(0);
+            let pending = ds.db.pending_event_count()
+                .unwrap_or_else(|e| { tracing::warn!("[{slug}] Failed to query pending events: {e}"); 0 });
             json!({
                 "repo": slug,
                 "apply": ds.apply,

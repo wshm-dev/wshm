@@ -178,7 +178,13 @@ async fn poll_events(
         };
 
         // Store in DB
-        let payload_str = serde_json::to_string(&payload).unwrap_or_default();
+        let payload_str = match serde_json::to_string(&payload) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Failed to serialize poller event payload: {e}");
+                continue;
+            }
+        };
         let event_id =
             match state
                 .db

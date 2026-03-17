@@ -21,7 +21,7 @@ pub struct MergedPullRequest {
 impl Client {
     /// Fetch merged pull requests, optionally filtering to those merged since a given ISO date.
     pub async fn fetch_merged_pulls(&self, since: Option<&str>) -> Result<Vec<MergedPullRequest>> {
-        let mut all = Vec::new();
+        let mut all = Vec::with_capacity(128);
         let mut page = 1u32;
 
         loop {
@@ -86,7 +86,7 @@ impl Client {
     }
 
     pub async fn fetch_pulls(&self) -> Result<Vec<PullRequest>> {
-        let mut all_pulls = Vec::new();
+        let mut all_pulls = Vec::with_capacity(64);
         let mut page = 1u32;
 
         loop {

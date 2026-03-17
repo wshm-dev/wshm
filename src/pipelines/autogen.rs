@@ -145,18 +145,27 @@ pub async fn run(
 
     // Step 4: Run tests if configured
     if let Some(ref test_cmd) = config.fix.test_command {
-        // Validate: reject dangerous shell patterns (backticks, $(), pipes to curl/wget, etc.)
-        let dangerous_patterns = ["$(", "`", "| curl", "| wget", "; rm", "&& rm", ">/dev/", "| sh", "| bash"];
-        if dangerous_patterns.iter().any(|p| test_cmd.contains(p)) {
-            anyhow::bail!("test_command contains suspicious shell pattern — aborting for safety");
+        // Parse test_command as shell words to avoid sh -c injection.
+        // Supports: "cargo test", "bun test --reporter=verbose", etc.
+        let parts: Vec<&str> = test_cmd.split_whitespace().collect();
+        if parts.is_empty() {
+            anyhow::bail!("test_command is empty");
         }
+        let (program, args) = (parts[0], &parts[1..]);
+
+        // Reject commands containing shell metacharacters (defense in depth)
+        let shell_chars = ['|', ';', '&', '$', '`', '>', '<', '(', ')', '{', '}', '!', '\\', '\n'];
+        if test_cmd.chars().any(|c| shell_chars.contains(&c)) {
+            anyhow::bail!("test_command contains shell metacharacters — use simple 'program arg1 arg2' format");
+        }
+
         info!("Running tests: {test_cmd}");
         let max_attempts = config.fix.test_retries + 1;
         let mut last_error = String::new();
 
         for attempt in 1..=max_attempts {
-            let test_output = std::process::Command::new("sh")
-                .args(["-c", test_cmd])
+            let test_output = std::process::Command::new(program)
+                .args(args)
                 .output()
                 .context("Failed to run test command")?;
 
