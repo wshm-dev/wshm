@@ -827,10 +827,14 @@ full_sync_interval_hours = 24
     }
 
     pub fn github_token(&self) -> Result<String> {
-        std::env::var("WSHM_TOKEN")
+        let token = std::env::var("WSHM_TOKEN")
             .or_else(|_| std::env::var("GITHUB_TOKEN"))
             .or_else(|_| gh_auth_token())
-            .context("No GitHub token found. Set GITHUB_TOKEN, WSHM_TOKEN, or authenticate with `gh auth login`")
+            .context("No GitHub token found. Set GITHUB_TOKEN, WSHM_TOKEN, or authenticate with `gh auth login`")?;
+        if token.trim().is_empty() {
+            anyhow::bail!("GitHub token is empty. Check your GITHUB_TOKEN or WSHM_TOKEN environment variable.");
+        }
+        Ok(token)
     }
 }
 

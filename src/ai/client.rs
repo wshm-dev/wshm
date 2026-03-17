@@ -310,7 +310,8 @@ impl AiClient {
         let text = response.text().await?;
 
         if !status.is_success() {
-            anyhow::bail!("Anthropic API error ({status}): {text}");
+            let safe_text = truncate_error_body(&text);
+            anyhow::bail!("Anthropic API error ({status}): {safe_text}");
         }
 
         let resp: serde_json::Value = serde_json::from_str(&text)?;
@@ -354,7 +355,8 @@ impl AiClient {
         let text = response.text().await?;
 
         if !status.is_success() {
-            anyhow::bail!("AI API error ({status}): {text}");
+            let safe_text = truncate_error_body(&text);
+            anyhow::bail!("AI API error ({status}): {safe_text}");
         }
 
         let resp: serde_json::Value = serde_json::from_str(&text)?;
@@ -393,7 +395,8 @@ impl AiClient {
         let text = response.text().await?;
 
         if !status.is_success() {
-            anyhow::bail!("Google Gemini API error ({status}): {text}");
+            let safe_text = truncate_error_body(&text);
+            anyhow::bail!("Google Gemini API error ({status}): {safe_text}");
         }
 
         let resp: serde_json::Value = serde_json::from_str(&text)?;
@@ -426,6 +429,17 @@ fn extract_json(text: &str) -> &str {
         }
     }
     trimmed
+}
+
+/// Truncate API error body to avoid leaking sensitive data in logs.
+/// Keeps first 200 chars which is enough for debugging without exposing tokens.
+fn truncate_error_body(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.len() <= 200 {
+        trimmed.to_string()
+    } else {
+        format!("{}… (truncated)", &trimmed[..200])
+    }
 }
 
 #[cfg(test)]

@@ -42,12 +42,8 @@ fn read_secret(prompt: &str) -> Result<String> {
 }
 
 fn atty_is_tty() -> bool {
-    unsafe { libc_isatty(0) != 0 }
-}
-
-extern "C" {
-    #[link_name = "isatty"]
-    fn libc_isatty(fd: i32) -> i32;
+    use is_terminal::IsTerminal;
+    std::io::stdin().is_terminal()
 }
 
 #[cfg(unix)]
@@ -129,7 +125,12 @@ fn ensure_gitignore() {
     let gitignore = Path::new(".wshm/.gitignore");
     if gitignore.exists() {
         let content = fs::read_to_string(gitignore).unwrap_or_default();
-        if content.contains("credentials") {
+        // Check for exact line match (not substring) to avoid false positives
+        let has_credentials = content.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed == "credentials" || trimmed == "/credentials"
+        });
+        if has_credentials {
             return;
         }
         let _ = fs::write(gitignore, format!("{content}\ncredentials\n"));

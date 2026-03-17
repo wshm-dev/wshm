@@ -6,6 +6,9 @@ pub mod scheduler;
 pub mod server;
 pub mod systemd;
 
+/// Maximum number of webhook events buffered in memory before backpressure.
+const WEBHOOK_CHANNEL_CAPACITY: usize = 256;
+
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,7 +51,7 @@ pub async fn run(config: Config, args: DaemonArgs) -> Result<()> {
     let gh = Arc::new(GhClient::new(&config)?);
     let config = Arc::new(config);
 
-    let (tx, rx) = mpsc::channel::<WebhookEvent>(256);
+    let (tx, rx) = mpsc::channel::<WebhookEvent>(WEBHOOK_CHANNEL_CAPACITY);
 
     let state = Arc::new(DaemonState {
         db: Arc::clone(&db),
@@ -171,7 +174,7 @@ pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
 
     let multi = Arc::new(MultiDaemonState { repos });
 
-    let (tx, rx) = mpsc::channel::<(String, WebhookEvent)>(256);
+    let (tx, rx) = mpsc::channel::<(String, WebhookEvent)>(WEBHOOK_CHANNEL_CAPACITY);
 
     info!(
         "Starting multi-repo daemon on {} ({} repos, apply={}, mode={})",

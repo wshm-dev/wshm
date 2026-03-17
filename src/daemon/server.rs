@@ -65,62 +65,11 @@ async fn handle_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // Reject oversized payloads
-    if body.len() > MAX_WEBHOOK_SIZE {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(json!({"error": "payload too large"})),
-        )
-            .into_response();
-    }
-
-    // Validate HMAC signature if secret is configured
-    if let Some(ref secret) = state.secret {
-        let sig_header = headers
-            .get("x-hub-signature-256")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        if !verify_signature(secret, &body, sig_header) {
-            warn!("Invalid webhook signature");
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "invalid signature"})),
-            )
-                .into_response();
-        }
-    }
-
-    // Parse event type from headers
-    let event_type = match headers.get("x-github-event").and_then(|v| v.to_str().ok()) {
-        Some(e) => e.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "missing x-github-event header"})),
-            )
-                .into_response();
-        }
-    };
-
-    // Parse payload
-    let payload: Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("Failed to parse webhook payload: {e}");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "invalid JSON"})),
-            )
-                .into_response();
-        }
-    };
-
-    let action = payload
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let (event_type, action, payload) =
+        match validate_webhook(state.secret.as_deref(), &headers, &body) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
 
     // Filter: only process relevant events
     if !should_process_event(&event_type, &action) {
@@ -249,56 +198,11 @@ async fn handle_webhook_multi(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // Reject oversized payloads
-    if body.len() > MAX_WEBHOOK_SIZE {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(json!({"error": "payload too large"})),
-        )
-            .into_response();
-    }
-
-    // Validate HMAC signature if global secret is configured
-    if let Some(ref secret) = state.secret {
-        let sig_header = headers
-            .get("x-hub-signature-256")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        if !verify_signature(secret, &body, sig_header) {
-            warn!("Invalid webhook signature");
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "invalid signature"})),
-            )
-                .into_response();
-        }
-    }
-
-    // Parse event type
-    let event_type = match headers.get("x-github-event").and_then(|v| v.to_str().ok()) {
-        Some(e) => e.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "missing x-github-event header"})),
-            )
-                .into_response();
-        }
-    };
-
-    // Parse payload
-    let payload: Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("Failed to parse webhook payload: {e}");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "invalid JSON"})),
-            )
-                .into_response();
-        }
-    };
+    let (event_type, action, payload) =
+        match validate_webhook(state.secret.as_deref(), &headers, &body) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
 
     // Route by repository.full_name
     let repo_slug = match payload
@@ -328,12 +232,6 @@ async fn handle_webhook_multi(
                 .into_response();
         }
     };
-
-    let action = payload
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
 
     // Filter relevant events
     if !should_process_event(&event_type, &action) {
@@ -400,6 +298,72 @@ async fn handle_webhook_multi(
 }
 
 // ── Shared helpers ─────────────────────────────────────────────
+
+/// Common webhook validation: size, signature, event type, payload parsing.
+/// Returns (event_type, action, payload) on success, or an error response.
+fn validate_webhook(
+    secret: Option<&str>,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<(String, String, Value), axum::response::Response> {
+    // Reject oversized payloads
+    if body.len() > MAX_WEBHOOK_SIZE {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({"error": "payload too large"})),
+        )
+            .into_response());
+    }
+
+    // Validate HMAC signature if secret is configured
+    if let Some(secret) = secret {
+        let sig_header = headers
+            .get("x-hub-signature-256")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !verify_signature(secret, body, sig_header) {
+            warn!("Invalid webhook signature");
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "invalid signature"})),
+            )
+                .into_response());
+        }
+    }
+
+    // Parse event type from headers
+    let event_type = match headers.get("x-github-event").and_then(|v| v.to_str().ok()) {
+        Some(e) => e.to_string(),
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "missing x-github-event header"})),
+            )
+                .into_response());
+        }
+    };
+
+    // Parse payload
+    let payload: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Failed to parse webhook payload: {e}");
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid JSON"})),
+            )
+                .into_response());
+        }
+    };
+
+    let action = payload
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok((event_type, action, payload))
+}
 
 fn should_process_event(event_type: &str, action: &str) -> bool {
     match event_type {

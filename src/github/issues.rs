@@ -21,7 +21,7 @@ impl Client {
         state: &str,
         since: Option<&str>,
     ) -> Result<Vec<Issue>> {
-        let mut all_issues = Vec::new();
+        let mut all_issues = Vec::with_capacity(128);
         let mut page = 1u32;
 
         loop {

@@ -70,6 +70,7 @@ flate2 = "1"
 tar = "0.4"
 zip = "2"
 async-trait = "0.1"
+is-terminal = "0.4"
 
 # Optional: Export - Cloud Storage
 aws-sdk-s3 = { version = "1", optional = true }

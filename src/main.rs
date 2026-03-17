@@ -254,6 +254,10 @@ async fn main() -> Result<()> {
             cli::ModelCommand::Remove { name } => {
                 let spec = ai::local::KNOWN_MODELS.iter().find(|m| m.name == name);
                 let filename = spec.map(|s| s.filename).unwrap_or(name.as_str());
+                // Prevent path traversal: reject names containing path separators
+                if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+                    anyhow::bail!("Invalid model name: {name}");
+                }
                 let path = ai::local::models_dir().join(filename);
                 if path.exists() {
                     std::fs::remove_file(&path)?;
