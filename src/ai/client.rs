@@ -420,18 +420,26 @@ pub fn extract_json_from(text: &str) -> &str {
 
 fn extract_json(text: &str) -> &str {
     let trimmed = text.trim();
-    // Handle ```json ... ``` blocks
+    // Handle ```json ... ``` blocks (safe slicing via .get() to avoid panics on UTF-8 boundaries)
     if let Some(start) = trimmed.find("```json") {
         let json_start = start + 7;
-        if let Some(end) = trimmed[json_start..].find("```") {
-            return trimmed[json_start..json_start + end].trim();
+        if let Some(rest) = trimmed.get(json_start..) {
+            if let Some(end) = rest.find("```") {
+                if let Some(block) = trimmed.get(json_start..json_start + end) {
+                    return block.trim();
+                }
+            }
         }
     }
     // Handle ``` ... ``` blocks
     if let Some(start) = trimmed.find("```") {
         let json_start = start + 3;
-        if let Some(end) = trimmed[json_start..].find("```") {
-            return trimmed[json_start..json_start + end].trim();
+        if let Some(rest) = trimmed.get(json_start..) {
+            if let Some(end) = rest.find("```") {
+                if let Some(block) = trimmed.get(json_start..json_start + end) {
+                    return block.trim();
+                }
+            }
         }
     }
     trimmed
@@ -444,7 +452,9 @@ fn truncate_error_body(body: &str) -> String {
     if trimmed.len() <= 200 {
         trimmed.to_string()
     } else {
-        format!("{}… (truncated)", &trimmed[..200])
+        // Find a safe UTF-8 boundary near 200 chars
+        let end = trimmed.char_indices().nth(200).map(|(i, _)| i).unwrap_or(trimmed.len());
+        format!("{}… (truncated)", &trimmed[..end])
     }
 }
 

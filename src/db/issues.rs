@@ -2,6 +2,8 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
+use super::parse_labels_json;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub number: u64,
@@ -93,10 +95,7 @@ pub fn get_issue(conn: &Connection, number: u64) -> Result<Option<Issue>> {
             title: row.get(1)?,
             body: row.get(2)?,
             state: row.get(3)?,
-            labels: serde_json::from_str(&labels_json).unwrap_or_else(|_| {
-                    tracing::warn!("Corrupt labels JSON in DB, defaulting to empty");
-                    Vec::new()
-                }),
+            labels: parse_labels_json(&labels_json),
             author: row.get(5)?,
             created_at: row.get(6)?,
             updated_at: row.get(7)?,
@@ -126,10 +125,7 @@ pub fn get_open_issues(conn: &Connection) -> Result<Vec<Issue>> {
                 title: row.get(1)?,
                 body: row.get(2)?,
                 state: row.get(3)?,
-                labels: serde_json::from_str(&labels_json).unwrap_or_else(|_| {
-                    tracing::warn!("Corrupt labels JSON in DB, defaulting to empty");
-                    Vec::new()
-                }),
+                labels: parse_labels_json(&labels_json),
                 author: row.get(5)?,
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
@@ -159,10 +155,7 @@ pub fn get_untriaged_issues(conn: &Connection) -> Result<Vec<Issue>> {
                 title: row.get(1)?,
                 body: row.get(2)?,
                 state: row.get(3)?,
-                labels: serde_json::from_str(&labels_json).unwrap_or_else(|_| {
-                    tracing::warn!("Corrupt labels JSON in DB, defaulting to empty");
-                    Vec::new()
-                }),
+                labels: parse_labels_json(&labels_json),
                 author: row.get(5)?,
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,

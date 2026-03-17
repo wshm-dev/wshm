@@ -681,11 +681,13 @@ fn ensure_clean_base(base_branch: &str) -> Result<()> {
         .status()
         .context("Failed to reset to origin")?;
 
-    // Pull latest
-    std::process::Command::new("git")
+    // Pull latest (best-effort — may fail if no upstream or offline)
+    if let Err(e) = std::process::Command::new("git")
         .args(["pull", "--ff-only"])
         .status()
-        .ok();
+    {
+        tracing::debug!("git pull --ff-only failed (non-fatal): {e}");
+    }
 
     Ok(())
 }
@@ -767,14 +769,18 @@ fn commit_and_push(branch: &str, issue_number: u64) -> Result<()> {
 }
 
 fn cleanup_branch(base_branch: &str, branch: &str) -> Result<()> {
-    std::process::Command::new("git")
+    if let Err(e) = std::process::Command::new("git")
         .args(["checkout", base_branch])
         .status()
-        .ok();
-    std::process::Command::new("git")
+    {
+        tracing::warn!("Failed to checkout {base_branch} during cleanup: {e}");
+    }
+    if let Err(e) = std::process::Command::new("git")
         .args(["branch", "-D", branch])
         .status()
-        .ok();
+    {
+        tracing::warn!("Failed to delete branch {branch} during cleanup: {e}");
+    }
     Ok(())
 }
 

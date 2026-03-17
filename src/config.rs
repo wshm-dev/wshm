@@ -437,7 +437,13 @@ impl BrandingConfig {
     /// Build a comment header — always shows a clear bot banner.
     pub fn header(&self) -> String {
         let icon = if let Some(ref avatar) = self.avatar_url {
-            format!("<img src=\"{avatar}\" width=\"24\" height=\"24\" align=\"absmiddle\">")
+            // Only allow HTTPS URLs to prevent javascript: or data: URI injection
+            if avatar.starts_with("https://") && !avatar.contains('"') && !avatar.contains('>') {
+                format!("<img src=\"{avatar}\" width=\"24\" height=\"24\" align=\"absmiddle\">")
+            } else {
+                tracing::warn!("Ignoring invalid avatar_url (must be HTTPS, no special chars)");
+                "🧞".to_string()
+            }
         } else {
             "🧞".to_string()
         };

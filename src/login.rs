@@ -68,7 +68,13 @@ fn load_credentials() -> std::collections::HashMap<String, String> {
     if !path.exists() {
         return std::collections::HashMap::new();
     }
-    let content = fs::read_to_string(&path).unwrap_or_default();
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: could not read credentials file {}: {e}", path.display());
+            return std::collections::HashMap::new();
+        }
+    };
     let mut map = std::collections::HashMap::new();
     for line in content.lines() {
         let line = line.trim();

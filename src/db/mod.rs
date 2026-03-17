@@ -13,6 +13,14 @@ use std::sync::Mutex;
 
 use crate::config::Config;
 
+/// Parse labels JSON from DB, logging a warning on corrupt data.
+pub fn parse_labels_json(json_str: &str) -> Vec<String> {
+    serde_json::from_str(json_str).unwrap_or_else(|_| {
+        tracing::warn!("Corrupt labels JSON in DB, defaulting to empty");
+        Vec::new()
+    })
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
 }

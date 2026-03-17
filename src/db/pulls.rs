@@ -130,10 +130,7 @@ pub fn get_pull(conn: &Connection, number: u64) -> Result<Option<PullRequest>> {
             title: row.get(1)?,
             body: row.get(2)?,
             state: row.get(3)?,
-            labels: serde_json::from_str(&labels_json).unwrap_or_else(|_| {
-                    tracing::warn!("Corrupt labels JSON in DB, defaulting to empty");
-                    Vec::new()
-                }),
+            labels: super::parse_labels_json(&labels_json),
             author: row.get(5)?,
             head_sha: row.get(6)?,
             base_sha: row.get(7)?,
@@ -167,10 +164,7 @@ pub fn get_open_pulls(conn: &Connection) -> Result<Vec<PullRequest>> {
                 title: row.get(1)?,
                 body: row.get(2)?,
                 state: row.get(3)?,
-                labels: serde_json::from_str(&labels_json).unwrap_or_else(|_| {
-                    tracing::warn!("Corrupt labels JSON in DB, defaulting to empty");
-                    Vec::new()
-                }),
+                labels: super::parse_labels_json(&labels_json),
                 author: row.get(5)?,
                 head_sha: row.get(6)?,
                 base_sha: row.get(7)?,
@@ -204,10 +198,7 @@ pub fn get_unanalyzed_pulls(conn: &Connection) -> Result<Vec<PullRequest>> {
                 title: row.get(1)?,
                 body: row.get(2)?,
                 state: row.get(3)?,
-                labels: serde_json::from_str(&labels_json).unwrap_or_else(|_| {
-                    tracing::warn!("Corrupt labels JSON in DB, defaulting to empty");
-                    Vec::new()
-                }),
+                labels: super::parse_labels_json(&labels_json),
                 author: row.get(5)?,
                 head_sha: row.get(6)?,
                 base_sha: row.get(7)?,
