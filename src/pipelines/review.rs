@@ -315,26 +315,27 @@ impl DiffSize {
 pub fn compute_diff_size(diff: &str) -> DiffSize {
     let mut additions = 0usize;
     let mut deletions = 0usize;
-    let mut files: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut current_file = String::new();
+    let mut files: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut current_file = "";
 
     for line in diff.lines() {
         if line.starts_with("diff --git") {
             if let Some(b_path) = line.split(" b/").last() {
-                current_file = b_path.to_string();
+                current_file = b_path;
             }
         } else if line.starts_with('+') && !line.starts_with("+++") {
             additions += 1;
-            *files.entry(current_file.clone()).or_default() += 1;
+            *files.entry(current_file).or_default() += 1;
         } else if line.starts_with('-') && !line.starts_with("---") {
             deletions += 1;
-            *files.entry(current_file.clone()).or_default() += 1;
+            *files.entry(current_file).or_default() += 1;
         }
     }
 
     let mut large_files: Vec<(String, usize)> = files
         .into_iter()
         .filter(|(_, lines)| *lines > 100)
+        .map(|(k, v)| (k.to_string(), v))
         .collect();
     large_files.sort_by(|a, b| b.1.cmp(&a.1));
 

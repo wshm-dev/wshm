@@ -120,11 +120,18 @@ fn save_credentials(creds: &std::collections::HashMap<String, String>) -> Result
     Ok(())
 }
 
-/// Ensure .wshm/credentials is in .gitignore
+/// Ensure .wshm/credentials is in .gitignore.
+/// Logs warnings on failure — credentials could leak if gitignore is not set.
 fn ensure_gitignore() {
     let gitignore = Path::new(".wshm/.gitignore");
     if gitignore.exists() {
-        let content = fs::read_to_string(gitignore).unwrap_or_default();
+        let content = match fs::read_to_string(gitignore) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Warning: could not read {}: {e}", gitignore.display());
+                return;
+            }
+        };
         // Check for exact line match (not substring) to avoid false positives
         let has_credentials = content.lines().any(|line| {
             let trimmed = line.trim();
@@ -133,10 +140,17 @@ fn ensure_gitignore() {
         if has_credentials {
             return;
         }
-        let _ = fs::write(gitignore, format!("{content}\ncredentials\n"));
+        if let Err(e) = fs::write(gitignore, format!("{content}\ncredentials\n")) {
+            eprintln!("Warning: could not update {}: {e} — credentials may not be gitignored", gitignore.display());
+        }
     } else {
-        let _ = fs::create_dir_all(".wshm");
-        let _ = fs::write(gitignore, "logs/\ncredentials\n");
+        if let Err(e) = fs::create_dir_all(".wshm") {
+            eprintln!("Warning: could not create .wshm/: {e}");
+            return;
+        }
+        if let Err(e) = fs::write(gitignore, "logs/\ncredentials\n") {
+            eprintln!("Warning: could not create {}: {e} — credentials may not be gitignored", gitignore.display());
+        }
     }
 }
 

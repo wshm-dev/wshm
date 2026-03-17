@@ -136,7 +136,9 @@ pub async fn run(
                     .join("\n"),
                 config.branding.footer("Scanned"),
             );
-            let _ = gh.comment_issue(issue.number, &warning).await;
+            if let Err(e) = gh.comment_issue(issue.number, &warning).await {
+                tracing::warn!("Failed to post security warning on issue #{}: {e}", issue.number);
+            }
 
             return Ok(());
         }
@@ -211,7 +213,9 @@ pub async fn run(
                 last_error.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"),
                 config.branding.footer("Tested"),
             );
-            let _ = gh.comment_issue(issue.number, &comment).await;
+            if let Err(e) = gh.comment_issue(issue.number, &comment).await {
+                tracing::warn!("Failed to post test failure comment on issue #{}: {e}", issue.number);
+            }
             cleanup_branch(base_branch, &branch)?;
             return Ok(());
         }

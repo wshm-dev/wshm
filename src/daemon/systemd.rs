@@ -49,20 +49,11 @@ fn generate_unit(
         env_lines.push_str(&format!("EnvironmentFile=-{}\n", creds_path.display()));
     }
 
-    // Also forward relevant env vars if set (override credentials file)
-    for var in &[
-        "GITHUB_TOKEN",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_OAUTH_TOKEN",
-        "OPENAI_API_KEY",
-        "WSHM_WEBHOOK_SECRET",
-    ] {
-        if let Ok(val) = std::env::var(var) {
-            if !val.is_empty() {
-                env_lines.push_str(&format!("Environment={var}={val}\n"));
-            }
-        }
-    }
+    // Note: We intentionally do NOT inline env var values into the unit file.
+    // Secrets in unit files are world-readable via `systemctl show`.
+    // Instead, use EnvironmentFile to load secrets at runtime.
+    // Users should ensure their credentials are in .wshm/credentials or
+    // create a dedicated /etc/wshm/env file with restrictive permissions (0600).
 
     format!(
         r#"[Unit]
@@ -213,10 +204,18 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
 }
 
 fn is_root() -> bool {
-    unsafe { libc_geteuid() == 0 }
-}
-
-extern "C" {
-    #[link_name = "geteuid"]
-    fn libc_geteuid() -> u32;
+    // Check UID via /proc or id command to avoid unsafe FFI
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok()
+            } else {
+                None
+            }
+        })
+        .map(|uid| uid == 0)
+        .unwrap_or(false)
 }
