@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.0](https://github.com/pszymkowiak/wshm/compare/v0.10.0...v0.11.0) (2026-03-16)
+
+
+### Features
+
+* add `wshm context` command for LLM-ready repo export ([a27a34b](https://github.com/pszymkowiak/wshm/commit/a27a34b3a1eb6f3c0799783061234226dead4bb1))
+
+
+### Bug Fixes
+
+* allowed_users now checks command triggerer, not issue author ([3869e06](https://github.com/pszymkowiak/wshm/commit/3869e0661c686ff8b455dc0c118a9cc467151f85))
+
 ## [0.8.0](https://github.com/pszymkowiak/wshm/compare/v0.7.0...v0.8.0) (2026-03-13)
 
 
