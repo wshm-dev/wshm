@@ -253,11 +253,7 @@ impl Client {
             })
             .collect();
 
-        let event = if comments.is_empty() {
-            "COMMENT"
-        } else {
-            "COMMENT"
-        };
+        let event = "COMMENT";
 
         let review_body = serde_json::json!({
             "body": body,

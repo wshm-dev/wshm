@@ -3,11 +3,13 @@ pub mod context;
 pub mod improve;
 
 /// Truncate a string to `max` chars, appending "…" if truncated.
+/// Uses char boundaries to avoid panics on multi-byte UTF-8 input.
 pub fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max - 1])
+        let end = s.char_indices().nth(max - 1).map(|(i, _)| i).unwrap_or(s.len());
+        format!("{}…", &s[..end])
     }
 }
 

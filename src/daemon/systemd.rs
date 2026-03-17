@@ -16,28 +16,37 @@ fn generate_unit(
     no_server: bool,
     bind: Option<&str>,
 ) -> String {
-    let mut global_args = Vec::<String>::new();
+    let mut args = Vec::<String>::new();
     if let Some(r) = repo {
-        global_args.push(format!("--repo {r}"));
+        // Validate repo format (owner/name only) to prevent injection
+        if !r.chars().all(|c| c.is_alphanumeric() || c == '/' || c == '-' || c == '_' || c == '.') {
+            tracing::warn!("Suspicious repo name: {r} — skipping --repo flag");
+        } else {
+            args.push(format!("--repo {r}"));
+        }
     }
 
-    let mut daemon_args = vec!["daemon".to_string()];
+    args.push("daemon".to_string());
     if apply {
-        daemon_args.push("--apply".into());
+        args.push("--apply".into());
     }
     if poll {
-        daemon_args.push("--poll".into());
-        daemon_args.push(format!("--poll-interval {poll_interval}"));
+        args.push("--poll".into());
+        args.push(format!("--poll-interval {poll_interval}"));
     }
     if no_server {
-        daemon_args.push("--no-server".into());
+        args.push("--no-server".into());
     }
     if let Some(b) = bind {
-        daemon_args.push(format!("--bind {b}"));
+        // Validate bind address format (IP:port) to prevent injection
+        if b.parse::<std::net::SocketAddr>().is_ok() {
+            args.push(format!("--bind {b}"));
+        } else {
+            tracing::warn!("Invalid bind address: {b} — skipping --bind flag");
+        }
     }
 
-    let all_args = [global_args, daemon_args].concat();
-    let exec_start = format!("{wshm_bin} {}", all_args.join(" "));
+    let exec_start = format!("{wshm_bin} {}", args.join(" "));
 
     let mut env_lines = String::new();
     // Pass RUST_LOG
