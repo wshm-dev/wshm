@@ -187,6 +187,7 @@ async fn triage_issue(
                 labels.push(priority_label);
             }
         }
+        let labels = config.filter_labels(labels);
         if !labels.is_empty() {
             gh.label_issue(issue.number, &labels).await?;
             db.update_issue_labels(issue.number, &labels)?;

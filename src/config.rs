@@ -49,6 +49,10 @@ pub struct Config {
     #[serde(default)]
     pub vault: Option<VaultConfig>,
 
+    /// Labels that wshm must never apply (blacklist).
+    #[serde(default)]
+    pub labels_blacklist: Vec<String>,
+
     /// Resolved at runtime, not from config file
     #[serde(skip)]
     pub repo_owner: String,
@@ -744,6 +748,17 @@ impl Config {
         self.fix.secret_env.clone()
     }
 
+    /// Filter out blacklisted labels from a list.
+    pub fn filter_labels(&self, labels: Vec<String>) -> Vec<String> {
+        if self.labels_blacklist.is_empty() {
+            return labels;
+        }
+        labels
+            .into_iter()
+            .filter(|l| !self.labels_blacklist.iter().any(|b| b.eq_ignore_ascii_case(l)))
+            .collect()
+    }
+
     /// Resolve the AI model for a given pipeline.
     /// Pipeline-specific model overrides [ai].model.
     pub fn model_for(&self, pipeline: &str) -> &str {
@@ -861,6 +876,9 @@ full_sync_interval_hours = 24
 # draft_pr = true                # Create PRs as draft (require human review)
 # base_branch = "main"           # Base branch for fix PRs (e.g. "develop")
 
+# Labels that wshm must never apply (case-insensitive)
+# labels_blacklist = ["do-not-touch", "manual-only", "security"]
+
 # [assign]
 # enabled = true
 #
@@ -957,6 +975,7 @@ impl Default for Config {
             update: UpdateConfig::default(),
             export: ExportConfig::default(),
             vault: None,
+            labels_blacklist: Vec::new(),
             repo_owner: String::new(),
             repo_name: String::new(),
             wshm_dir: PathBuf::from(".wshm"),

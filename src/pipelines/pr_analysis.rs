@@ -154,8 +154,9 @@ async fn analyze_pr(
     );
 
     if apply {
-        if !analysis.suggested_labels.is_empty() {
-            gh.label_pr(pr.number, &analysis.suggested_labels).await?;
+        let labels = config.filter_labels(analysis.suggested_labels.clone());
+        if !labels.is_empty() {
+            gh.label_pr(pr.number, &labels).await?;
         }
 
         // Auto-assign PR

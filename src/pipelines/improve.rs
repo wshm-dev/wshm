@@ -161,6 +161,8 @@ pub async fn run(
                 labels.push(effort_label);
             }
 
+            let labels = config.filter_labels(labels);
+
             match gh
                 .create_issue(&suggestion.title, &body, &labels)
                 .await
