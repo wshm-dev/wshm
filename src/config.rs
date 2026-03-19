@@ -586,6 +586,9 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub ai: Option<AiConfig>,
 
+    #[serde(default)]
+    pub update: UpdateConfig,
+
     pub repos: Vec<RepoEntry>,
 }
 

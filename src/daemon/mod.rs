@@ -231,6 +231,23 @@ pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
         None
     };
 
+    // Spawn a single global auto-update task (not per-repo)
+    let update_handle = if global.update.enabled {
+        let interval_hours = global.update.interval_hours;
+        info!("Auto-update enabled (every {interval_hours}h, checking now...)");
+        Some(tokio::spawn(async move {
+            // Check immediately on startup
+            crate::update::auto_check_and_update().await;
+            let interval = std::time::Duration::from_secs(interval_hours as u64 * 3600);
+            loop {
+                tokio::time::sleep(interval).await;
+                crate::update::auto_check_and_update().await;
+            }
+        }))
+    } else {
+        None
+    };
+
     info!(
         "Multi-repo daemon running ({} repos). Press Ctrl+C to stop.",
         multi.repos.len()
@@ -240,6 +257,9 @@ pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
     info!("Shutdown signal received, stopping...");
 
     if let Some(h) = server_handle {
+        h.abort();
+    }
+    if let Some(h) = update_handle {
         h.abort();
     }
     for h in poller_handles {
