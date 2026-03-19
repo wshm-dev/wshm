@@ -107,6 +107,7 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
     let args = TriageArgs {
         issue: number,
         apply: state.apply,
+        retriage: false,
     };
 
     pipelines::triage::run(&state.config, &state.db, &state.gh, &args, false, None).await?;

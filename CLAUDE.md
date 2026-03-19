@@ -207,6 +207,8 @@ wshm                           # show status (from cache, instant)
 wshm sync                      # force full sync from GitHub
 wshm triage [--issue <N>]      # classify issues [or single issue]
 wshm triage --apply            # classify + label + comment
+wshm triage --retriage         # re-evaluate stale triage results
+wshm triage --retriage --apply # re-evaluate + update labels if changed
 wshm pr analyze [--pr <N>]     # analyze PRs [or single PR]
 wshm pr analyze --apply        # analyze + label + comment
 wshm queue                     # show ranked merge queue
@@ -247,6 +249,7 @@ labels_feature = "feature"
 labels_duplicate = "duplicate"
 labels_wontfix = "wontfix"
 labels_needs_info = "needs-info"
+retriage_interval_hours = 0      # re-evaluate triaged issues every N hours (0 = disabled)
 
 [pr]
 enabled = true

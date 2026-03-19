@@ -107,6 +107,7 @@ pub async fn execute(
             let args = TriageArgs {
                 issue: Some(number),
                 apply,
+                retriage: false,
             };
             pipelines::triage::run(config, db, gh, &args, false, None).await?;
             Ok(format!(

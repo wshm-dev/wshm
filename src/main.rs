@@ -132,6 +132,7 @@ async fn main() -> Result<()> {
             let triage_args = cli::TriageArgs {
                 issue: None,
                 apply: args.apply,
+                retriage: false,
             };
             pipelines::triage::run(&config, &db, &gh, &triage_args, cli.json, exporter.as_ref())
                 .await?;

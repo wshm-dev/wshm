@@ -148,6 +148,10 @@ pub struct TriageArgs {
     /// Actually perform actions (dry-run by default)
     #[arg(long)]
     pub apply: bool,
+
+    /// Re-evaluate previously triaged issues (stale results)
+    #[arg(long)]
+    pub retriage: bool,
 }
 
 #[derive(clap::Args)]

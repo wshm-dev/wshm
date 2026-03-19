@@ -32,6 +32,8 @@ pub async fn run(
     let model = config.model_for("triage");
     let backend = AiBackend::from_config(config, model)?;
 
+    let is_retriage = args.retriage;
+
     let issues = if let Some(number) = args.issue {
         match db.get_issue(number)? {
             Some(issue) => vec![issue],
@@ -44,6 +46,30 @@ pub async fn run(
                 return Ok(());
             }
         }
+    } else if is_retriage {
+        // Re-triage: fetch issues whose triage result is stale
+        let max_age = if config.triage.retriage_interval_hours > 0 {
+            config.triage.retriage_interval_hours
+        } else {
+            24 // fallback when called manually with --retriage but no interval configured
+        };
+        let stale = db.get_stale_triage_results(max_age)?;
+        if stale.is_empty() {
+            if json {
+                println!("[]");
+            } else {
+                println!("No stale triage results to re-evaluate.");
+            }
+            return Ok(());
+        }
+        // Fetch the full Issue objects for stale results
+        let mut issues = Vec::with_capacity(stale.len());
+        for row in &stale {
+            if let Some(issue) = db.get_issue(row.issue_number)? {
+                issues.push(issue);
+            }
+        }
+        issues
     } else {
         db.get_untriaged_issues()?
     };
@@ -51,10 +77,16 @@ pub async fn run(
     if issues.is_empty() {
         if json {
             println!("[]");
+        } else if is_retriage {
+            println!("No issues to re-triage.");
         } else {
             println!("No issues to triage.");
         }
         return Ok(());
+    }
+
+    if is_retriage {
+        info!("Re-triaging {} previously triaged issues", issues.len());
     }
 
     let existing_issues = db.get_open_issues()?;

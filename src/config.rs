@@ -122,6 +122,10 @@ pub struct TriageConfig {
 
     #[serde(default = "default_label_needs_info")]
     pub labels_needs_info: String,
+
+    /// Re-triage interval in hours (0 = disabled). Re-evaluates previously triaged issues.
+    #[serde(default)]
+    pub retriage_interval_hours: u32,
 }
 
 impl Default for TriageConfig {
@@ -136,6 +140,7 @@ impl Default for TriageConfig {
             labels_duplicate: default_label_duplicate(),
             labels_wontfix: default_label_wontfix(),
             labels_needs_info: default_label_needs_info(),
+            retriage_interval_hours: 0,
         }
     }
 }
@@ -755,6 +760,7 @@ labels_feature = "feature"
 labels_duplicate = "duplicate"
 labels_wontfix = "wontfix"
 labels_needs_info = "needs-info"
+# retriage_interval_hours = 24   # re-evaluate triaged issues every 24h (0 = disabled)
 
 [pr]
 enabled = true

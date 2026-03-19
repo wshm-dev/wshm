@@ -84,6 +84,38 @@ impl Database {
         })
     }
 
+    /// Get open issues whose triage result is older than `max_age_hours`.
+    pub fn get_stale_triage_results(&self, max_age_hours: u32) -> Result<Vec<TriageResultRow>> {
+        self.with_conn(|conn| {
+            let cutoff = chrono::Utc::now() - chrono::Duration::hours(max_age_hours as i64);
+            let cutoff_str = cutoff.to_rfc3339();
+
+            let mut stmt = conn.prepare(
+                "SELECT t.issue_number, t.category, t.confidence, t.priority, t.summary, t.is_simple_fix, t.acted_at
+                 FROM triage_results t
+                 JOIN issues i ON t.issue_number = i.number
+                 WHERE i.state = 'open' AND t.acted_at < ?1
+                 ORDER BY t.acted_at ASC",
+            )?;
+
+            let rows = stmt
+                .query_map(rusqlite::params![cutoff_str], |row| {
+                    Ok(TriageResultRow {
+                        issue_number: row.get(0)?,
+                        category: row.get(1)?,
+                        confidence: row.get(2)?,
+                        priority: row.get(3)?,
+                        summary: row.get(4)?,
+                        is_simple_fix: row.get(5)?,
+                        acted_at: row.get(6)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+
+            Ok(rows)
+        })
+    }
+
     pub fn is_triaged(&self, issue_number: u64) -> Result<bool> {
         self.with_conn(|conn| {
             let count: i64 = conn.query_row(
