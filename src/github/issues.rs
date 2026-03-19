@@ -104,6 +104,29 @@ impl Client {
         Ok(())
     }
 
+    /// Add assignees to an issue or PR (GitHub uses the same endpoint).
+    pub async fn add_assignees(&self, number: u64, assignees: &[String]) -> Result<()> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/issues/{number}/assignees",
+            self.owner, self.repo
+        );
+        let body = serde_json::json!({ "assignees": assignees });
+
+        let response = self
+            .octocrab
+            ._post(&url, Some(&body))
+            .await
+            .with_context(|| format!("Failed to assign {assignees:?} to #{number}"))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let resp_body = self.octocrab.body_to_string(response).await?;
+            anyhow::bail!("Failed to assign #{number}: {status} {resp_body}");
+        }
+
+        Ok(())
+    }
+
     /// Post or update a wshm comment on an issue.
     /// If a wshm comment already exists, it is updated in place (idempotent).
     pub async fn comment_issue(&self, number: u64, body: &str) -> Result<()> {

@@ -32,6 +32,9 @@ pub struct Config {
     pub fix: FixConfig,
 
     #[serde(default)]
+    pub assign: AssignConfig,
+
+    #[serde(default)]
     pub daemon: DaemonConfig,
 
     #[serde(default)]
@@ -265,6 +268,71 @@ impl Default for SyncConfig {
 
 fn default_sync_interval() -> u32 {
     5
+}
+
+// ── Assign config ─────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct AssignConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Assignees for issues (weighted random selection)
+    #[serde(default)]
+    pub issues: Vec<Assignee>,
+
+    /// Assignees for PRs (weighted random selection)
+    #[serde(default)]
+    pub prs: Vec<Assignee>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Assignee {
+    pub user: String,
+
+    /// Weight for selection (higher = more likely). Doesn't need to sum to 100.
+    #[serde(default = "default_weight")]
+    pub weight: u32,
+}
+
+fn default_weight() -> u32 {
+    1
+}
+
+impl AssignConfig {
+    /// Pick an assignee from a list using weighted random selection.
+    pub fn pick(assignees: &[Assignee]) -> Option<&str> {
+        if assignees.is_empty() {
+            return None;
+        }
+        let total: u32 = assignees.iter().map(|a| a.weight).sum();
+        if total == 0 {
+            return None;
+        }
+        let mut roll = rand_u32() % total;
+        for a in assignees {
+            if roll < a.weight {
+                return Some(&a.user);
+            }
+            roll -= a.weight;
+        }
+        // Fallback (shouldn't happen)
+        Some(&assignees[0].user)
+    }
+}
+
+/// Simple random u32 without pulling in the `rand` crate.
+fn rand_u32() -> u32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .hash(&mut hasher);
+    std::thread::current().id().hash(&mut hasher);
+    hasher.finish() as u32
 }
 fn default_full_sync_interval() -> u32 {
     24
@@ -793,6 +861,25 @@ full_sync_interval_hours = 24
 # draft_pr = true                # Create PRs as draft (require human review)
 # base_branch = "main"           # Base branch for fix PRs (e.g. "develop")
 
+# [assign]
+# enabled = true
+#
+# [[assign.issues]]
+# user = "alice"
+# weight = 70
+#
+# [[assign.issues]]
+# user = "bob"
+# weight = 30
+#
+# [[assign.prs]]
+# user = "alice"
+# weight = 50
+#
+# [[assign.prs]]
+# user = "bob"
+# weight = 50
+
 # [update]
 # enabled = false                        # Enable automatic update checks in daemon mode
 # interval_hours = 6                     # Check interval
@@ -864,6 +951,7 @@ impl Default for Config {
             conflicts: ConflictConfig::default(),
             sync: SyncConfig::default(),
             fix: FixConfig::default(),
+            assign: AssignConfig::default(),
             daemon: DaemonConfig::default(),
             branding: BrandingConfig::default(),
             update: UpdateConfig::default(),

@@ -158,6 +158,14 @@ async fn analyze_pr(
             gh.label_pr(pr.number, &analysis.suggested_labels).await?;
         }
 
+        // Auto-assign PR
+        if config.assign.enabled {
+            if let Some(assignee) = crate::config::AssignConfig::pick(&config.assign.prs) {
+                info!("Auto-assigning PR #{} to {assignee}", pr.number);
+                gh.add_assignees(pr.number, &[assignee.to_string()]).await?;
+            }
+        }
+
         let comment = format_analysis_comment(&analysis, config);
         gh.comment_pr(pr.number, &comment).await?;
 

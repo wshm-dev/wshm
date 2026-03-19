@@ -192,6 +192,14 @@ async fn triage_issue(
             db.update_issue_labels(issue.number, &labels)?;
         }
 
+        // Auto-assign issue
+        if config.assign.enabled {
+            if let Some(assignee) = crate::config::AssignConfig::pick(&config.assign.issues) {
+                info!("Auto-assigning issue #{} to {assignee}", issue.number);
+                gh.add_assignees(issue.number, &[assignee.to_string()]).await?;
+            }
+        }
+
         // Post triage comment
         let comment = format_triage_comment(&classification, config);
         gh.comment_issue(issue.number, &comment).await?;
