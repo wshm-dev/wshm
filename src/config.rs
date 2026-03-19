@@ -498,7 +498,7 @@ impl Default for BrandingConfig {
         Self {
             name: default_bot_name(),
             url: default_bot_url(),
-            avatar_url: Some("https://raw.githubusercontent.com/pszymkowiak/wshm-tools/main/assets/wizard-anim.gif".to_string()),
+            avatar_url: Some("https://raw.githubusercontent.com/pszymkowiak/wshm-tools/main/assets/wizard-icon.png".to_string()),
             tagline: None,
             command_prefix: default_command_prefix(),
             footer_template: None,
