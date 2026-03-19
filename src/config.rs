@@ -532,7 +532,7 @@ impl BrandingConfig {
         let icon = if let Some(ref avatar) = self.avatar_url {
             // Only allow HTTPS URLs to prevent javascript: or data: URI injection
             if avatar.starts_with("https://") && !avatar.contains('"') && !avatar.contains('>') {
-                format!("<img src=\"{avatar}\" width=\"24\" height=\"24\" align=\"absmiddle\">")
+                format!("<img src=\"{avatar}\" width=\"40\" height=\"40\">")
             } else {
                 tracing::warn!("Ignoring invalid avatar_url (must be HTTPS, no special chars)");
                 "[w]".to_string()
