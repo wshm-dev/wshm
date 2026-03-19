@@ -1,7 +1,10 @@
 <p align="center">
-  <h1 align="center">🧞 wshm</h1>
-  <p align="center"><strong>Your repo's wish is my command.</strong></p>
-  <p align="center">AI-powered GitHub agent for repository maintenance.<br>Triage issues, review PRs, auto-fix bugs, manage merge queues — all from a single binary.</p>
+  <img src="assets/hero.svg" alt="wshm — Your repo's wish is my command" width="100%"/>
+</p>
+
+<p align="center">
+  <strong>AI-powered GitHub agent for repository maintenance.</strong><br>
+  Triage issues, review PRs, auto-fix bugs, manage merge queues — all from a single binary.
 </p>
 
 <p align="center">

@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d1117"/>
+      <stop offset="100%" style="stop-color:#161b22"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#7c3aed"/>
+      <stop offset="100%" style="stop-color:#2563eb"/>
+    </linearGradient>
+    <filter id="blur">
+      <feGaussianBlur stdDeviation="20"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="400" fill="url(#bg)"/>
+
+  <!-- Glow effect -->
+  <ellipse cx="600" cy="200" rx="300" ry="150" fill="url(#glow)" opacity="0.1" filter="url(#blur)"/>
+
+  <!-- Terminal lines -->
+  <g opacity="0.15" font-family="monospace" font-size="13" fill="#8b949e">
+    <text x="80" y="80">$ wshm triage --apply</text>
+    <text x="80" y="100">[APPLIED] #42 → bug (confidence: 94%, priority: high)</text>
+    <text x="80" y="130">$ wshm pr analyze --apply</text>
+    <text x="80" y="150">[APPLIED] #18 → feature (risk: low, type: feature)</text>
+    <text x="80" y="180">$ wshm queue</text>
+    <text x="80" y="200">  #18 score=28 ✓ CI ✓ approved</text>
+    <text x="80" y="230">$ wshm conflicts scan</text>
+    <text x="80" y="250">  All PRs clean. No conflicts detected.</text>
+    <text x="80" y="280">$ wshm run --apply</text>
+    <text x="80" y="300">  ✓ sync ✓ triage ✓ analyze ✓ queue ✓ conflicts</text>
+  </g>
+
+  <!-- Genie emoji -->
+  <text x="600" y="160" font-size="80" text-anchor="middle" dominant-baseline="middle">🧞</text>
+
+  <!-- Title -->
+  <text x="600" y="230" font-family="system-ui, -apple-system, sans-serif" font-size="48" font-weight="bold" fill="white" text-anchor="middle">wshm</text>
+
+  <!-- Subtitle -->
+  <text x="600" y="265" font-family="system-ui, -apple-system, sans-serif" font-size="18" fill="#8b949e" text-anchor="middle">Your repo's wish is my command.</text>
+
+  <!-- Tags -->
+  <g font-family="monospace" font-size="12">
+    <rect x="370" y="285" width="80" height="24" rx="12" fill="#7c3aed" opacity="0.2"/>
+    <text x="410" y="301" fill="#a78bfa" text-anchor="middle">triage</text>
+
+    <rect x="460" y="285" width="80" height="24" rx="12" fill="#2563eb" opacity="0.2"/>
+    <text x="500" y="301" fill="#60a5fa" text-anchor="middle">review</text>
+
+    <rect x="550" y="285" width="80" height="24" rx="12" fill="#059669" opacity="0.2"/>
+    <text x="590" y="301" fill="#34d399" text-anchor="middle">auto-fix</text>
+
+    <rect x="640" y="285" width="100" height="24" rx="12" fill="#d97706" opacity="0.2"/>
+    <text x="690" y="301" fill="#fbbf24" text-anchor="middle">merge queue</text>
+
+    <rect x="750" y="285" width="80" height="24" rx="12" fill="#dc2626" opacity="0.2"/>
+    <text x="790" y="301" fill="#f87171" text-anchor="middle">conflicts</text>
+  </g>
+
+  <!-- Bottom accent line -->
+  <rect x="400" y="330" width="400" height="2" rx="1" fill="url(#glow)" opacity="0.5"/>
+</svg>
