@@ -109,7 +109,7 @@ pub async fn execute(
                 apply,
                 retriage: false,
             };
-            pipelines::triage::run(config, db, gh, &args, false, None).await?;
+            pipelines::triage::run(config, db, gh, &args, pipelines::triage::OutputFormat::Text, None).await?;
             Ok(format!(
                 "Re-triaged issue #{number}. {}",
                 if apply {

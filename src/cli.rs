@@ -18,6 +18,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// CSV output for spreadsheets
+    #[arg(long, global = true)]
+    pub csv: bool,
+
     /// Override detected repo (owner/repo)
     #[arg(long, global = true)]
     pub repo: Option<String>,

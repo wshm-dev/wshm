@@ -55,7 +55,7 @@ pub async fn run(state: Arc<DaemonState>) {
                 retriage: false,
             };
 
-            match pipelines::triage::run(&state.config, &state.db, &state.gh, &args, false, None)
+            match pipelines::triage::run(&state.config, &state.db, &state.gh, &args, pipelines::triage::OutputFormat::Text, None)
                 .await
             {
                 Ok(()) => info!("Scheduled triage complete"),
@@ -77,7 +77,7 @@ pub async fn run(state: Arc<DaemonState>) {
                 retriage: true,
             };
 
-            match pipelines::triage::run(&state.config, &state.db, &state.gh, &args, false, None)
+            match pipelines::triage::run(&state.config, &state.db, &state.gh, &args, pipelines::triage::OutputFormat::Text, None)
                 .await
             {
                 Ok(()) => info!("Scheduled retriage complete"),

@@ -141,7 +141,7 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
         retriage: false,
     };
 
-    pipelines::triage::run(&state.config, &state.db, &state.gh, &args, false, None).await?;
+    pipelines::triage::run(&state.config, &state.db, &state.gh, &args, pipelines::triage::OutputFormat::Text, None).await?;
 
     // Store in ICM if enabled
     if state.config.daemon.icm_enabled {

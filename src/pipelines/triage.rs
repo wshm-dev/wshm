@@ -21,14 +21,23 @@ struct TriageOutput {
     classification: IssueClassification,
 }
 
+/// Output format for triage results.
+#[derive(Clone, Copy, PartialEq)]
+pub enum OutputFormat {
+    Text,
+    Json,
+    Csv,
+}
+
 pub async fn run(
     config: &Config,
     db: &Database,
     gh: &GhClient,
     args: &TriageArgs,
-    json: bool,
+    format: OutputFormat,
     exporter: Option<&ExportManager>,
 ) -> Result<()> {
+    let json = format == OutputFormat::Json;
     let model = config.model_for("triage");
     let backend = AiBackend::from_config(config, model)?;
 
@@ -123,8 +132,29 @@ pub async fn run(
         }
     }
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&results)?);
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&results)?);
+        }
+        OutputFormat::Csv => {
+            println!("issue,title,category,confidence,priority,labels,simple_fix,relevant_files,summary");
+            for r in &results {
+                let c = &r.classification;
+                println!(
+                    "{},\"{}\",{},{:.0}%,{},\"{}\",{},\"{}\",\"{}\"",
+                    r.issue_number,
+                    r.title.replace('"', "\"\""),
+                    c.category,
+                    c.confidence * 100.0,
+                    c.priority.as_deref().unwrap_or("unset"),
+                    c.suggested_labels.join(";"),
+                    c.is_simple_fix,
+                    c.relevant_files.join(";"),
+                    c.summary.replace('"', "\"\""),
+                );
+            }
+        }
+        OutputFormat::Text => {}
     }
 
     Ok(())
@@ -369,11 +399,42 @@ fn format_triage_comment(c: &IssueClassification, config: &Config) -> String {
 }
 
 fn print_classification(issue: &Issue, c: &IssueClassification, applied: bool) {
-    let status = if applied { "APPLIED" } else { "DRY-RUN" };
+    let status = if applied {
+        "\x1b[32mAPPLIED\x1b[0m"
+    } else {
+        "\x1b[33mDRY-RUN\x1b[0m"
+    };
+
+    let cat_color = match c.category.as_str() {
+        "bug" => "\x1b[31m",        // red
+        "feature" => "\x1b[36m",    // cyan
+        "duplicate" => "\x1b[90m",  // gray
+        "wontfix" => "\x1b[90m",    // gray
+        "needs-info" => "\x1b[33m", // yellow
+        _ => "\x1b[37m",            // white
+    };
+
+    let pri_color = match c.priority.as_deref() {
+        Some("critical") => "\x1b[31;1m",
+        Some("high") => "\x1b[33;1m",
+        Some("medium") => "\x1b[33m",
+        Some("low") => "\x1b[32m",
+        _ => "\x1b[37m",
+    };
+
+    let labels = if c.suggested_labels.is_empty() {
+        String::new()
+    } else {
+        let colored: Vec<String> = c.suggested_labels.iter()
+            .map(|l| format!("\x1b[35m{l}\x1b[0m"))
+            .collect();
+        format!(" [{}]", colored.join(", "))
+    };
+
     println!(
-        "[{status}] #{} {} → {} (confidence: {:.0}%, priority: {})",
+        "[{status}] #{} {} → {cat_color}{}\x1b[0m ({:.0}%, {pri_color}{}\x1b[0m){labels}",
         issue.number,
-        issue.title,
+        crate::pipelines::truncate(&issue.title, 60),
         c.category,
         c.confidence * 100.0,
         c.priority.as_deref().unwrap_or("unset"),

@@ -2,6 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use crate::pipelines::triage::OutputFormat;
+
 mod ai;
 mod cli;
 mod config;
@@ -16,6 +18,16 @@ mod update;
 mod vault;
 
 use cli::{Cli, Command};
+
+fn triage_format(cli: &Cli) -> OutputFormat {
+    if cli.csv {
+        OutputFormat::Csv
+    } else if cli.json {
+        OutputFormat::Json
+    } else {
+        OutputFormat::Text
+    }
+}
 
 /// Initialize config + database + GitHub client.
 fn init_core(cli: &Cli) -> Result<(config::Config, db::Database, github::Client)> {
@@ -82,7 +94,7 @@ async fn main() -> Result<()> {
                 github::sync::incremental_sync(&gh, &db, "issues").await?;
             }
 
-            pipelines::triage::run(&config, &db, &gh, args, cli.json, exporter.as_ref()).await?;
+            pipelines::triage::run(&config, &db, &gh, args, triage_format(&cli), exporter.as_ref()).await?;
         }
         Some(Command::Pr(args)) => {
             let (config, db, gh, exporter) = init_full(&cli)?;
@@ -134,7 +146,7 @@ async fn main() -> Result<()> {
                 apply: args.apply,
                 retriage: false,
             };
-            pipelines::triage::run(&config, &db, &gh, &triage_args, cli.json, exporter.as_ref())
+            pipelines::triage::run(&config, &db, &gh, &triage_args, triage_format(&cli), exporter.as_ref())
                 .await?;
 
             let pr_args = cli::PrArgs {
