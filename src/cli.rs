@@ -88,6 +88,9 @@ pub enum Command {
     /// Start persistent daemon with webhook server
     Daemon(DaemonArgs),
 
+    /// Revert all wshm actions (remove comments, labels, clear results)
+    Revert(RevertArgs),
+
     /// Interactive TUI dashboard
     Tui,
 }
@@ -299,6 +302,13 @@ pub struct ImproveArgs {
     /// Automatically trigger auto-fix on created issues
     #[arg(long)]
     pub auto_fix: bool,
+}
+
+#[derive(clap::Args)]
+pub struct RevertArgs {
+    /// Actually remove comments and labels (dry-run by default)
+    #[arg(long)]
+    pub apply: bool,
 }
 
 #[derive(Subcommand)]

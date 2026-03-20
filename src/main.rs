@@ -312,6 +312,15 @@ async fn main() -> Result<()> {
                 println!("Created .wshm/config.toml template.");
             }
         },
+        Some(Command::Revert(args)) => {
+            let (config, db, gh, _) = init_full(&cli)?;
+
+            if !cli.offline {
+                github::sync::full_sync(&gh, &db).await?;
+            }
+
+            pipelines::revert::run(&db, &gh, args.apply).await?;
+        }
         Some(Command::Tui) => {
             let config = config::Config::load(&cli)?;
             let db = db::Database::open(&config)?;

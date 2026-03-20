@@ -50,6 +50,7 @@ pub mod merge_queue;
 pub mod pr_analysis;
 pub mod pr_health;
 pub mod report;
+pub mod revert;
 pub mod review;
 pub mod status;
 pub mod triage;

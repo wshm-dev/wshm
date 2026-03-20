@@ -196,6 +196,28 @@ impl Client {
         Ok(None)
     }
 
+    /// Delete a comment by ID.
+    pub async fn delete_comment(&self, comment_id: u64) -> Result<()> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/issues/comments/{comment_id}",
+            self.owner, self.repo
+        );
+
+        let response = self
+            .octocrab
+            ._delete(&url, None::<&()>)
+            .await
+            .with_context(|| format!("Failed to delete comment {comment_id}"))?;
+
+        let status = response.status();
+        if !status.is_success() && status.as_u16() != 404 {
+            let resp_body = self.octocrab.body_to_string(response).await?;
+            anyhow::bail!("Failed to delete comment {comment_id}: {status} {resp_body}");
+        }
+
+        Ok(())
+    }
+
     /// Update an existing comment by ID.
     pub async fn update_comment(&self, comment_id: u64, body: &str) -> Result<()> {
         let url = format!(
