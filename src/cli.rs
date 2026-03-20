@@ -87,6 +87,9 @@ pub enum Command {
 
     /// Start persistent daemon with webhook server
     Daemon(DaemonArgs),
+
+    /// Interactive TUI dashboard
+    Tui,
 }
 
 #[derive(clap::Args)]

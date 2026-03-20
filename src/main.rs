@@ -14,6 +14,7 @@ mod github;
 mod icm;
 mod login;
 mod pipelines;
+mod tui;
 mod update;
 mod vault;
 
@@ -311,6 +312,11 @@ async fn main() -> Result<()> {
                 println!("Created .wshm/config.toml template.");
             }
         },
+        Some(Command::Tui) => {
+            let config = config::Config::load(&cli)?;
+            let db = db::Database::open(&config)?;
+            tui::run(&config, &db).await?;
+        }
         None => {
             let config = config::Config::load(&cli)?;
             let db = db::Database::open(&config)?;
