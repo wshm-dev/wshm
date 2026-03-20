@@ -37,12 +37,24 @@ pub struct IssueRow {
     pub triage: Option<TriageResultRow>,
 }
 
+/// Age bucket for issues/PRs drift analysis.
+pub struct AgeBucket {
+    pub label: &'static str,
+    pub issue_count: usize,
+    pub pr_count: usize,
+}
+
 pub struct Stats {
     pub by_category: Vec<(String, usize)>,
     pub by_priority: Vec<(String, usize)>,
     pub avg_confidence: f64,
     pub total_triaged: usize,
     pub recent_triages: Vec<TriageResultRow>,
+    pub age_buckets: Vec<AgeBucket>,
+    pub oldest_issue_days: u64,
+    pub oldest_pr_days: u64,
+    pub avg_issue_age_days: u64,
+    pub avg_pr_age_days: u64,
 }
 
 pub struct App {
@@ -77,6 +89,11 @@ impl App {
                 avg_confidence: 0.0,
                 total_triaged: 0,
                 recent_triages: Vec::new(),
+                age_buckets: Vec::new(),
+                oldest_issue_days: 0,
+                oldest_pr_days: 0,
+                avg_issue_age_days: 0,
+                avg_pr_age_days: 0,
             },
         };
         app.refresh(db)?;
@@ -147,6 +164,43 @@ impl App {
         recent.sort_by(|a, b| b.acted_at.cmp(&a.acted_at));
         recent.truncate(20);
         self.stats.recent_triages = recent;
+
+        // Age analysis
+        let now = chrono::Utc::now();
+        let issue_ages: Vec<u64> = self.issues.iter()
+            .filter_map(|r| {
+                r.issue.created_at.parse::<chrono::DateTime<chrono::Utc>>().ok()
+                    .map(|dt| now.signed_duration_since(dt).num_days().max(0) as u64)
+            })
+            .collect();
+        let pr_ages: Vec<u64> = self.pulls.iter()
+            .filter_map(|pr| {
+                pr.created_at.parse::<chrono::DateTime<chrono::Utc>>().ok()
+                    .map(|dt| now.signed_duration_since(dt).num_days().max(0) as u64)
+            })
+            .collect();
+
+        self.stats.oldest_issue_days = issue_ages.iter().copied().max().unwrap_or(0);
+        self.stats.oldest_pr_days = pr_ages.iter().copied().max().unwrap_or(0);
+        self.stats.avg_issue_age_days = if issue_ages.is_empty() { 0 } else { issue_ages.iter().sum::<u64>() / issue_ages.len() as u64 };
+        self.stats.avg_pr_age_days = if pr_ages.is_empty() { 0 } else { pr_ages.iter().sum::<u64>() / pr_ages.len() as u64 };
+
+        // Age buckets
+        let bucket_defs: &[(&str, u64, u64)] = &[
+            ("<1d", 0, 1),
+            ("1-7d", 1, 7),
+            ("7-30d", 7, 30),
+            ("30-90d", 30, 90),
+            ("90-180d", 90, 180),
+            ("180d+", 180, u64::MAX),
+        ];
+        self.stats.age_buckets = bucket_defs.iter().map(|&(label, min, max)| {
+            AgeBucket {
+                label,
+                issue_count: issue_ages.iter().filter(|&&d| d >= min && d < max).count(),
+                pr_count: pr_ages.iter().filter(|&&d| d >= min && d < max).count(),
+            }
+        }).collect();
     }
 
     pub fn next_tab(&mut self) {

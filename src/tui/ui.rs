@@ -293,29 +293,42 @@ fn draw_stats_tab(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area);
 
-    // Left panel: category + priority breakdowns
+    // Left panel: summary + category + priority + age
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Summary line
+            Constraint::Length(5),  // Summary + age stats
             Constraint::Min(5),    // Category breakdown
             Constraint::Min(5),    // Priority breakdown
+            Constraint::Length(10), // Age buckets
         ])
         .split(chunks[0]);
 
-    // Summary
-    let summary = Paragraph::new(Line::from(vec![
-        Span::styled(
-            format!(" Triaged: {} ", app.stats.total_triaged),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("Avg confidence: {:.0}%", app.stats.avg_confidence * 100.0),
-            Style::default().fg(Color::Cyan),
-        ),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title(" Summary "));
+    // Summary + age overview
+    let drift_color = |days: u64| -> Color {
+        if days > 180 { Color::Red }
+        else if days > 90 { Color::Yellow }
+        else { Color::Green }
+    };
+
+    let summary = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(format!(" Triaged: {} ", app.stats.total_triaged), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled(format!("Avg confidence: {:.0}%", app.stats.avg_confidence * 100.0), Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            Span::raw(" Issues: oldest "),
+            Span::styled(format!("{}d", app.stats.oldest_issue_days), Style::default().fg(drift_color(app.stats.oldest_issue_days))),
+            Span::raw(format!("  avg {}d", app.stats.avg_issue_age_days)),
+        ]),
+        Line::from(vec![
+            Span::raw(" PRs:    oldest "),
+            Span::styled(format!("{}d", app.stats.oldest_pr_days), Style::default().fg(drift_color(app.stats.oldest_pr_days))),
+            Span::raw(format!("  avg {}d", app.stats.avg_pr_age_days)),
+        ]),
+    ])
+    .block(Block::default().borders(Borders::ALL).title(" Summary & Drift "));
     f.render_widget(summary, left_chunks[0]);
 
     // Category breakdown with bar chart
@@ -369,6 +382,42 @@ fn draw_stats_tab(f: &mut Frame, app: &App, area: Rect) {
     )
     .block(Block::default().borders(Borders::ALL).title(" By Priority "));
     f.render_widget(pri_table, left_chunks[2]);
+
+    // Age buckets
+    let max_age_count = app.stats.age_buckets.iter()
+        .map(|b| b.issue_count.max(b.pr_count))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
+    let age_rows: Vec<Row> = app.stats.age_buckets.iter().map(|b| {
+        let issue_bar_len = (b.issue_count as f64 / max_age_count as f64 * 12.0) as usize;
+        let pr_bar_len = (b.pr_count as f64 / max_age_count as f64 * 12.0) as usize;
+        Row::new(vec![
+            Cell::from(b.label),
+            Cell::from(format!("{:>3}", b.issue_count)),
+            Cell::from("█".repeat(issue_bar_len)).style(Style::default().fg(Color::Cyan)),
+            Cell::from(format!("{:>3}", b.pr_count)),
+            Cell::from("█".repeat(pr_bar_len)).style(Style::default().fg(Color::Magenta)),
+        ])
+    }).collect();
+
+    let age_table = Table::new(
+        age_rows,
+        [
+            Constraint::Length(8),
+            Constraint::Length(4),
+            Constraint::Length(13),
+            Constraint::Length(4),
+            Constraint::Length(13),
+        ],
+    )
+    .header(
+        Row::new(vec!["Age", "Iss", "", "PRs", ""])
+            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    )
+    .block(Block::default().borders(Borders::ALL).title(" Age Distribution "));
+    f.render_widget(age_table, left_chunks[3]);
 
     // Right panel: recent triages
     let header = Row::new(vec!["#", "Category", "Conf", "Priority", "When"])
