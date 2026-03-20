@@ -118,6 +118,7 @@ fn draw_issues(f: &mut Frame, app: &App, area: Rect) {
         sort_header(app, "Cat(c)", SortField::Category),
         sort_header(app, "Conf(o)", SortField::Confidence),
         sort_header(app, "Pri(p)", SortField::Priority),
+        sort_header(app, "Age(a)", SortField::Age),
         "PRs".to_string(),
         "Labels".to_string(),
     ])
@@ -163,6 +164,26 @@ fn draw_issues(f: &mut Frame, app: &App, area: Rect) {
                 )
             };
 
+            let age_days = r.issue.created_at
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .ok()
+                .map(|dt| chrono::Utc::now().signed_duration_since(dt).num_days().max(0) as u64)
+                .unwrap_or(0);
+            let age_style = if age_days == 0 {
+                Style::default().fg(Color::Green)
+            } else if age_days <= 3 {
+                Style::default().fg(Color::Green)
+            } else if age_days <= 10 {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Red)
+            };
+            let age_text = if age_days == 0 {
+                "today".to_string()
+            } else {
+                format!("{}d", age_days)
+            };
+
             let pr_cell = if r.linked_prs.is_empty() {
                 Cell::from("-").style(Style::default().fg(Color::DarkGray))
             } else {
@@ -176,6 +197,7 @@ fn draw_issues(f: &mut Frame, app: &App, area: Rect) {
                 cat,
                 conf,
                 pri,
+                Cell::from(age_text).style(age_style),
                 pr_cell,
                 labels,
             ])
@@ -184,12 +206,13 @@ fn draw_issues(f: &mut Frame, app: &App, area: Rect) {
 
     let widths = [
         Constraint::Length(7),
-        Constraint::Min(30),
-        Constraint::Length(12),
+        Constraint::Min(25),
+        Constraint::Length(10),
         Constraint::Length(6),
         Constraint::Length(10),
+        Constraint::Length(7),
         Constraint::Length(10),
-        Constraint::Min(15),
+        Constraint::Min(12),
     ];
 
     let table = Table::new(rows, widths)
