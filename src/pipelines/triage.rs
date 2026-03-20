@@ -200,23 +200,27 @@ async fn triage_issue(
     let classification: IssueClassification =
         ai.complete(issue_classify::SYSTEM, &user_prompt).await?;
 
-    // Store result in DB
-    db.upsert_triage_result(&classification, issue.number)?;
+    // Only persist triage result and ICM context when applying
+    if apply {
+        db.upsert_triage_result(&classification, issue.number)?;
+    }
 
-    // ICM: store triage decision for future context
-    crate::icm::store(
-        &format!("triage-{}", config.repo_slug()),
-        &format!(
-            "Issue #{} '{}' → {} (confidence: {:.0}%, priority: {})",
-            issue.number,
-            issue.title,
-            classification.category,
-            classification.confidence * 100.0,
-            classification.priority.as_deref().unwrap_or("unset"),
-        ),
-        "low",
-        &["triage", &classification.category],
-    );
+    // ICM: store triage decision for future context (only when applying)
+    if apply {
+        crate::icm::store(
+            &format!("triage-{}", config.repo_slug()),
+            &format!(
+                "Issue #{} '{}' → {} (confidence: {:.0}%, priority: {})",
+                issue.number,
+                issue.title,
+                classification.category,
+                classification.confidence * 100.0,
+                classification.priority.as_deref().unwrap_or("unset"),
+            ),
+            "low",
+            &["triage", &classification.category],
+        );
+    }
 
     if apply && classification.confidence >= config.triage.auto_fix_confidence {
         // Build new label set
