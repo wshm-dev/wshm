@@ -59,6 +59,11 @@ pub async fn run(
     let mut results: Vec<PrAnalysisOutput> = Vec::with_capacity(pulls.len());
 
     for pr in &pulls {
+        if config.prs_blacklist.contains(&pr.number) {
+            info!("Skipping blacklisted PR #{}", pr.number);
+            continue;
+        }
+
         info!("Analyzing PR #{}: {}", pr.number, pr.title);
         match analyze_pr(config, &ai, db, gh, pr, args.apply, exporter).await {
             Ok(analysis) => {

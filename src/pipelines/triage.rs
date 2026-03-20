@@ -103,6 +103,12 @@ pub async fn run(
     let mut results: Vec<TriageOutput> = Vec::with_capacity(issues.len());
 
     for issue in &issues {
+        // Skip blacklisted issues
+        if config.issues_blacklist.contains(&issue.number) {
+            info!("Skipping blacklisted issue #{}", issue.number);
+            continue;
+        }
+
         info!("Triaging issue #{}: {}", issue.number, issue.title);
         match triage_issue(
             config,

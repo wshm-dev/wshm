@@ -53,6 +53,14 @@ pub struct Config {
     #[serde(default)]
     pub labels_blacklist: Vec<String>,
 
+    /// Issue numbers to never triage or touch.
+    #[serde(default)]
+    pub issues_blacklist: Vec<u64>,
+
+    /// PR numbers to never analyze or touch.
+    #[serde(default)]
+    pub prs_blacklist: Vec<u64>,
+
     /// Label definitions with conditions. Fed to AI for better label selection.
     #[serde(default)]
     pub labels: Vec<LabelDef>,
@@ -952,6 +960,10 @@ full_sync_interval_hours = 24
 # Labels that wshm must never apply (case-insensitive)
 # labels_blacklist = ["do-not-touch", "manual-only", "security"]
 
+# Issues/PRs that wshm must never touch
+# issues_blacklist = [755, 123]
+# prs_blacklist = [42]
+
 # Label definitions (fed to AI for better label selection)
 # [[labels]]
 # name = "bug"
@@ -1101,6 +1113,8 @@ impl Default for Config {
             export: ExportConfig::default(),
             vault: None,
             labels_blacklist: Vec::new(),
+            issues_blacklist: Vec::new(),
+            prs_blacklist: Vec::new(),
             labels: Vec::new(),
             repo_owner: String::new(),
             repo_name: String::new(),
