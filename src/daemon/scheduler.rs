@@ -85,6 +85,11 @@ pub async fn run(state: Arc<DaemonState>) {
             }
         }
 
+        // Cleanup old webhook events (keep 7 days)
+        if let Err(e) = state.db.cleanup_old_events(7) {
+            error!("Event cleanup failed: {e:#}");
+        }
+
         // Auto-update check
         if state.config.update.enabled && last_update_check.elapsed() >= update_interval {
             last_update_check = Instant::now();

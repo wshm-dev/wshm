@@ -30,6 +30,10 @@ impl Client {
 
     /// Check if a user is a collaborator (write access or above) on the repo.
     pub async fn is_collaborator(&self, username: &str) -> Result<bool> {
+        // Validate username to prevent URL path injection
+        if !username.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            anyhow::bail!("Invalid GitHub username: {username}");
+        }
         let url = format!(
             "https://api.github.com/repos/{}/{}/collaborators/{}/permission",
             self.owner, self.repo, username
@@ -47,9 +51,15 @@ impl Client {
                 debug!("User {username} permission: {permission}");
                 Ok(matches!(permission, "admin" | "write" | "maintain"))
             }
-            Err(_) => {
-                // 404 = not a collaborator
-                Ok(false)
+            Err(e) => {
+                let err_str = format!("{e}");
+                if err_str.contains("404") {
+                    // 404 = not a collaborator
+                    Ok(false)
+                } else {
+                    tracing::warn!("Failed to check collaborator status for {username}: {e}");
+                    Err(anyhow::anyhow!("Failed to check collaborator status for {username}: {e}"))
+                }
             }
         }
     }

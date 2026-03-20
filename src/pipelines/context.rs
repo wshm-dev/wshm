@@ -75,7 +75,8 @@ pub fn build_context(db: &Database, slug: &str) -> Result<String> {
                 let trimmed = body.trim();
                 if !trimmed.is_empty() {
                     let truncated = if trimmed.len() > 500 {
-                        format!("{}…", &trimmed[..500])
+                        let end = crate::ai::prompts::truncate_utf8(trimmed, 500);
+                        format!("{}…", &trimmed[..end])
                     } else {
                         trimmed.to_string()
                     };

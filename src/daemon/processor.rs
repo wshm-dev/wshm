@@ -11,7 +11,8 @@ use crate::github::sync as gh_sync;
 use crate::pipelines;
 
 /// Tracks which issue/PR numbers are currently being processed to prevent concurrent duplicates.
-type InFlight = Arc<Mutex<HashSet<u64>>>;
+/// Key is (repo_slug, number) for multi-repo isolation, or ("", number) for single-repo.
+type InFlight = Arc<Mutex<HashSet<(String, u64)>>>;
 
 #[derive(Debug, Clone)]
 pub struct WebhookEvent {
@@ -30,7 +31,7 @@ pub async fn run(state: Arc<DaemonState>, mut rx: mpsc::Receiver<WebhookEvent>) 
         let state = Arc::clone(&state);
         let in_flight = Arc::clone(&in_flight);
         tokio::spawn(async move {
-            process_guarded(&state, &event, &in_flight).await;
+            process_guarded(&state, &event, &in_flight, "").await;
         });
     }
 
@@ -54,20 +55,22 @@ pub async fn run_multi(
             }
         };
         let in_flight = Arc::clone(&in_flight);
+        let slug = slug.clone();
         tokio::spawn(async move {
-            process_guarded(&state, &event, &in_flight).await;
+            process_guarded(&state, &event, &in_flight, &slug).await;
         });
     }
 
     info!("Multi-repo event processor stopped");
 }
 
-/// Guard against concurrent processing of the same issue/PR number.
-async fn process_guarded(state: &DaemonState, event: &WebhookEvent, in_flight: &InFlight) {
+/// Guard against concurrent processing of the same (repo, issue/PR number).
+async fn process_guarded(state: &DaemonState, event: &WebhookEvent, in_flight: &InFlight, slug: &str) {
     if let Some(number) = event.number {
+        let key = (slug.to_string(), number);
         {
             let mut set = in_flight.lock().await;
-            if !set.insert(number) {
+            if !set.insert(key.clone()) {
                 warn!("Skipping event id={} for #{number} (already in-flight)", event.id);
                 return;
             }
@@ -75,7 +78,7 @@ async fn process_guarded(state: &DaemonState, event: &WebhookEvent, in_flight: &
         process_event(state, event).await;
         {
             let mut set = in_flight.lock().await;
-            set.remove(&number);
+            set.remove(&key);
         }
     } else {
         process_event(state, event).await;

@@ -47,7 +47,8 @@ async fn fetch_latest_release(
     let body = resp.text().await?;
 
     if !status.is_success() {
-        let safe_body = if body.len() > 200 { &body[..200] } else { &body };
+        let end = crate::ai::prompts::truncate_utf8(&body, 200);
+        let safe_body = &body[..end];
         anyhow::bail!("GitHub API error ({status}): {safe_body}");
     }
 

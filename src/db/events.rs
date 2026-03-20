@@ -58,6 +58,19 @@ impl Database {
         })
     }
 
+    /// Delete processed events older than `days` days.
+    pub fn cleanup_old_events(&self, days: u32) -> Result<u64> {
+        self.with_conn(|conn| {
+            let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+            let cutoff_str = cutoff.to_rfc3339();
+            let deleted = conn.execute(
+                "DELETE FROM webhook_events WHERE status IN ('done', 'failed') AND received_at < ?1",
+                params![cutoff_str],
+            )?;
+            Ok(deleted as u64)
+        })
+    }
+
     pub fn get_pending_events(&self) -> Result<Vec<WebhookEventRow>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(

@@ -90,6 +90,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_pulls_state ON pull_requests(state);
         CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_number);
         CREATE INDEX IF NOT EXISTS idx_webhook_status ON webhook_events(status);
+        CREATE INDEX IF NOT EXISTS idx_triage_acted_at ON triage_results(acted_at);
         ",
     )?;
 

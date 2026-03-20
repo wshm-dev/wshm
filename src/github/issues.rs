@@ -221,8 +221,9 @@ impl Client {
     }
 
     pub async fn remove_label(&self, number: u64, label: &str) -> Result<()> {
+        let encoded_label = urlencoding::encode(label);
         let url = format!(
-            "https://api.github.com/repos/{}/{}/issues/{number}/labels/{label}",
+            "https://api.github.com/repos/{}/{}/issues/{number}/labels/{encoded_label}",
             self.owner, self.repo
         );
 
