@@ -155,9 +155,23 @@ url = "https://my-project.dev"
 
 ## Supported AI Providers
 
+wshm works with **any AI provider** — bring your own API key or use your existing Claude subscription.
+
+### Claude subscription (no API key needed)
+
+| Plan | Auth | Command |
+|------|------|---------|
+| **Claude Max** | OAuth | `wshm login --claude` |
+| **Claude Pro** | OAuth | `wshm login --claude` |
+| **Claude Team** | OAuth | `wshm login --claude` |
+
+Uses your existing Anthropic subscription directly. No API key, no extra cost, no token billing. wshm authenticates via the Claude CLI OAuth flow and uses your subscription's included usage.
+
+### API providers
+
 | Provider | Env Variable | Local |
 |----------|-------------|-------|
-| Anthropic | `ANTHROPIC_API_KEY` | — |
+| Anthropic API | `ANTHROPIC_API_KEY` | — |
 | OpenAI | `OPENAI_API_KEY` | — |
 | Google | `GOOGLE_API_KEY` | — |
 | Mistral | `MISTRAL_API_KEY` | — |
@@ -171,6 +185,8 @@ url = "https://my-project.dev"
 | OpenRouter | `OPENROUTER_API_KEY` | — |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` | — |
 | Ollama | — | yes |
+
+Priority: Claude OAuth (Max/Pro/Team) > API key > claude CLI.
 
 ## CLI
 
