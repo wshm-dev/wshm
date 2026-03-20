@@ -822,7 +822,13 @@ impl Config {
         }
         labels
             .into_iter()
-            .filter(|l| !self.labels_blacklist.iter().any(|b| b.eq_ignore_ascii_case(l)))
+            .filter(|l| {
+                let normalized = l.replace('_', " ").to_lowercase();
+                !self.labels_blacklist.iter().any(|b| {
+                    let b_normalized = b.replace('_', " ").to_lowercase();
+                    b_normalized == normalized
+                })
+            })
             .collect()
     }
 
