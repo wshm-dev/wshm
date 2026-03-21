@@ -89,6 +89,41 @@ pub fn parse(comment_body: &str, prefix: &str) -> Option<SlashCommand> {
     None
 }
 
+/// Check if a user is authorized to run slash commands (collaborator or in allowed_users).
+async fn authorize_command(
+    gh: &GhClient,
+    config: &Config,
+    triggered_by: Option<&str>,
+    cmd_name: &str,
+) -> Result<Option<String>> {
+    let user = triggered_by.unwrap_or("unknown");
+
+    // allowed_users whitelist (if configured)
+    if !config.fix.allowed_users.is_empty() {
+        if config.fix.allowed_users.iter().any(|u| u == user) {
+            return Ok(None); // authorized
+        }
+        return Ok(Some(format!(
+            "User `{user}` is not authorized to run `{cmd_name}`. Allowed: {}",
+            config.fix.allowed_users.join(", ")
+        )));
+    }
+
+    // Default: collaborator check
+    match gh.is_collaborator(user).await {
+        Ok(true) => Ok(None), // authorized
+        Ok(false) => Ok(Some(format!(
+            "User `{user}` is not a repo collaborator. Only collaborators can run `{cmd_name}`."
+        ))),
+        Err(e) => {
+            tracing::warn!("Failed to check collaborator status for {user}: {e}");
+            Ok(Some(format!(
+                "Could not verify authorization for `{user}`. Please try again later."
+            )))
+        }
+    }
+}
+
 /// Execute a slash command and return a response comment body.
 pub async fn execute(
     cmd: &SlashCommand,
@@ -100,6 +135,14 @@ pub async fn execute(
     apply: bool,
     triggered_by: Option<&str>,
 ) -> Result<String> {
+    // Authorize all commands except Help and Unknown
+    if !matches!(cmd, SlashCommand::Help | SlashCommand::Unknown(_)) {
+        let cmd_name = format!("{:?}", cmd);
+        if let Some(deny_msg) = authorize_command(gh, config, triggered_by, &cmd_name).await? {
+            return Ok(deny_msg);
+        }
+    }
+
     match cmd {
         SlashCommand::Triage => {
             info!("Slash command: triage issue #{number}");
@@ -195,33 +238,7 @@ pub async fn execute(
                 ));
             }
 
-            // Check if the commenter is authorized
-            let user = triggered_by.unwrap_or("unknown");
-            if !config.fix.allowed_users.is_empty() {
-                if !config.fix.allowed_users.iter().any(|u| u == user) {
-                    return Ok(format!(
-                        "User `{user}` is not authorized to trigger auto-fix. Allowed: {}",
-                        config.fix.allowed_users.join(", ")
-                    ));
-                }
-            } else if config.fix.trusted_authors_only {
-                // Fallback: check if the commenter (not the issue author) is a collaborator
-                match gh.is_collaborator(user).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        return Ok(format!(
-                            "User `{user}` is not a repo collaborator. Only collaborators can trigger auto-fix."
-                        ));
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to check collaborator status for {user}: {e}");
-                        return Ok(format!(
-                            "Could not verify authorization for `{user}`. Please try again later."
-                        ));
-                    }
-                }
-            }
-
+            // Auth already checked globally above. Proceed to fix.
             gh_sync::sync_issues_now(gh, db).await?;
             let fix_args = FixArgs {
                 issue: number,

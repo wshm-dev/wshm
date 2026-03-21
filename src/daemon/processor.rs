@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tracing::{error, info, warn};
+
+/// Maximum concurrent event processing tasks.
+const MAX_CONCURRENT_TASKS: usize = 5;
 
 use super::commands;
 use super::memory;
@@ -24,13 +27,16 @@ pub struct WebhookEvent {
 }
 
 pub async fn run(state: Arc<DaemonState>, mut rx: mpsc::Receiver<WebhookEvent>) {
-    info!("Event processor started");
+    info!("Event processor started (max {MAX_CONCURRENT_TASKS} concurrent)");
     let in_flight: InFlight = Arc::new(Mutex::new(HashSet::new()));
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_TASKS));
 
     while let Some(event) = rx.recv().await {
         let state = Arc::clone(&state);
         let in_flight = Arc::clone(&in_flight);
+        let permit = Arc::clone(&semaphore);
         tokio::spawn(async move {
+            let _permit = permit.acquire().await;
             process_guarded(&state, &event, &in_flight, "").await;
         });
     }
@@ -43,8 +49,9 @@ pub async fn run_multi(
     multi: Arc<MultiDaemonState>,
     mut rx: mpsc::Receiver<(String, WebhookEvent)>,
 ) {
-    info!("Multi-repo event processor started");
+    info!("Multi-repo event processor started (max {MAX_CONCURRENT_TASKS} concurrent)");
     let in_flight: InFlight = Arc::new(Mutex::new(HashSet::new()));
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_TASKS));
 
     while let Some((slug, event)) = rx.recv().await {
         let state = match multi.repos.get(&slug) {
@@ -56,7 +63,9 @@ pub async fn run_multi(
         };
         let in_flight = Arc::clone(&in_flight);
         let slug = slug.clone();
+        let permit = Arc::clone(&semaphore);
         tokio::spawn(async move {
+            let _permit = permit.acquire().await;
             process_guarded(&state, &event, &in_flight, &slug).await;
         });
     }
@@ -209,6 +218,18 @@ async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Re
         .and_then(|c| c.get("body"))
         .and_then(|b| b.as_str())
         .unwrap_or("");
+
+    // Ignore our own comments (prevent infinite loops)
+    let sender = payload
+        .get("sender")
+        .and_then(|s| s.get("login"))
+        .and_then(|l| l.as_str())
+        .unwrap_or("");
+    let comment_marker = &state.config.branding.comment_marker();
+    if comment_body.contains(comment_marker) || sender == "github-actions[bot]" {
+        info!("Ignoring self-comment on #{number} by {sender}");
+        return Ok(());
+    }
 
     // Check if this is a slash command
     let cmd = match commands::parse(comment_body, &state.config.branding.command_prefix) {

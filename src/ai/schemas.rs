@@ -8,9 +8,19 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+/// Clamp confidence to 0.0-1.0 range to prevent AI manipulation.
+fn clamp_confidence<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = f64::deserialize(deserializer)?;
+    Ok(v.clamp(0.0, 1.0))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueClassification {
     pub category: String,
+    #[serde(deserialize_with = "clamp_confidence")]
     pub confidence: f64,
     pub priority: Option<String>,
     pub summary: String,

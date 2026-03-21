@@ -372,6 +372,9 @@ fn format_triage_comment(c: &IssueClassification, config: &Config) -> String {
     let header = config.branding.header();
     let footer = config.branding.footer("Triaged");
 
+    // Sanitize summary: truncate to prevent data exfiltration via prompt injection
+    let summary = crate::pipelines::truncate(&c.summary, 500);
+
     let relevant_files = if c.relevant_files.is_empty() {
         String::new()
     } else {
@@ -394,7 +397,7 @@ fn format_triage_comment(c: &IssueClassification, config: &Config) -> String {
             .replace("{category}", &c.category)
             .replace("{priority}", priority)
             .replace("{confidence}", &confidence)
-            .replace("{summary}", &c.summary)
+            .replace("{summary}", &summary)
             .replace("{category_emoji}", cat_emoji)
             .replace("{priority_emoji}", pri_emoji)
             .replace("{relevant_files}", &relevant_files)
@@ -414,7 +417,7 @@ fn format_triage_comment(c: &IssueClassification, config: &Config) -> String {
          | 🎯 **Confidence** | {confidence}% |\n\n\
          ### Summary\n\n\
          {}\n",
-        c.category, c.summary,
+        c.category, summary,
     ));
 
     if c.is_simple_fix {
