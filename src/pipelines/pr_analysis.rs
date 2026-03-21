@@ -162,7 +162,11 @@ async fn analyze_pr(
         &format!("pr-analysis-{}", config.repo_slug()),
         &format!(
             "PR #{} '{}' → {} (risk: {}, type: {})",
-            pr.number, pr.title, analysis.summary, analysis.risk_level, analysis.pr_type,
+            pr.number,
+            crate::pipelines::truncate(&pr.title, 80),
+            crate::pipelines::truncate(&analysis.summary, 120),
+            analysis.risk_level,
+            analysis.pr_type,
         ),
         "low",
         &["pr-analysis", &analysis.pr_type, &analysis.risk_level],
