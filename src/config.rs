@@ -149,6 +149,10 @@ pub struct TriageConfig {
     /// Re-triage interval in hours (0 = disabled). Re-evaluates previously triaged issues.
     #[serde(default)]
     pub retriage_interval_hours: u32,
+
+    /// Override the AI system prompt for triage. If not set, uses the built-in default.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
 }
 
 impl Default for TriageConfig {
@@ -165,6 +169,7 @@ impl Default for TriageConfig {
             labels_wontfix: default_label_wontfix(),
             labels_needs_info: default_label_needs_info(),
             retriage_interval_hours: 0,
+            system_prompt: None,
         }
     }
 }
@@ -208,6 +213,10 @@ pub struct PrConfig {
     /// Override AI model for PR analysis (uses [ai].model if not set)
     #[serde(default)]
     pub model: Option<String>,
+
+    /// Override the AI system prompt for PR analysis.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
 }
 
 impl Default for PrConfig {
@@ -217,6 +226,7 @@ impl Default for PrConfig {
             auto_label: true,
             risk_labels: true,
             model: None,
+            system_prompt: None,
         }
     }
 }
@@ -457,6 +467,10 @@ pub struct FixConfig {
     /// Maximum retries: if tests fail, re-prompt the AI with the error output (default: 0)
     #[serde(default)]
     pub test_retries: u32,
+
+    /// Override the AI system prompt for auto-fix.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
 }
 
 impl Default for FixConfig {
@@ -473,6 +487,7 @@ impl Default for FixConfig {
             allowed_users: Vec::new(),
             test_command: None,
             test_retries: 0,
+            system_prompt: None,
         }
     }
 }

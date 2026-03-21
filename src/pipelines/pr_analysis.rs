@@ -128,7 +128,10 @@ async fn analyze_pr(
         ));
     }
 
-    let analysis: PrAnalysis = ai.complete(pr_analyze::SYSTEM, &user_prompt).await?;
+    let system_prompt = config.pr.system_prompt.as_deref()
+        .unwrap_or(pr_analyze::SYSTEM);
+
+    let analysis: PrAnalysis = ai.complete(system_prompt, &user_prompt).await?;
 
     // Store in DB
     let now = chrono::Utc::now().to_rfc3339();

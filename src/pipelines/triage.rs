@@ -203,8 +203,11 @@ async fn triage_issue(
         ));
     }
 
+    let system_prompt = config.triage.system_prompt.as_deref()
+        .unwrap_or(issue_classify::SYSTEM);
+
     let classification: IssueClassification =
-        ai.complete(issue_classify::SYSTEM, &user_prompt).await?;
+        ai.complete(system_prompt, &user_prompt).await?;
 
     // Only persist triage result and ICM context when applying
     if apply {
