@@ -218,7 +218,7 @@ async fn triage_issue(
             &format!(
                 "Issue #{} '{}' → {} (confidence: {:.0}%, priority: {})",
                 issue.number,
-                issue.title,
+                crate::pipelines::truncate(&issue.title, 80),
                 classification.category,
                 classification.confidence * 100.0,
                 classification.priority.as_deref().unwrap_or("unset"),

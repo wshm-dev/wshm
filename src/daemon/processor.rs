@@ -187,6 +187,22 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
     let number = event.number;
     info!("Handling pull_request event: number={number:?}");
 
+    // Skip if blacklisted or already analyzed (prevent AI credit exhaustion)
+    if let Some(n) = number {
+        if state.config.prs_blacklist.contains(&n) {
+            info!("Skipping blacklisted PR #{n}");
+            return Ok(());
+        }
+        // For synchronize events, allow re-analysis (code changed).
+        // For opened events, skip if already analyzed.
+        if event.action == "opened" {
+            if let Ok(Some(_)) = state.db.get_pr_analysis(n) {
+                info!("PR #{n} already analyzed, skipping");
+                return Ok(());
+            }
+        }
+    }
+
     // Force sync pulls (bypass throttle — we know there's a new event)
     gh_sync::sync_pulls_now(&state.gh, &state.db).await?;
 

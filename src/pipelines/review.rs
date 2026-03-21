@@ -117,15 +117,15 @@ pub async fn run(
                 .comments
                 .iter()
                 .map(|c| {
-                    let body = format_github_comment(c);
+                    let body = crate::pipelines::truncate(&format_github_comment(c), 2000);
                     (c.path.clone(), c.line, body)
                 })
                 .collect();
 
             let review_body = format!(
-                "{}## 🔎 Automated Code Review\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{}## Automated Code Review\n\n{}\n\n{}\n\n{}\n\n{}",
                 config.branding.header(),
-                result.summary,
+                crate::pipelines::truncate(&result.summary, 500),
                 format_stats_summary(&result.stats),
                 format_size_summary(&size),
                 config.branding.footer("Reviewed"),
