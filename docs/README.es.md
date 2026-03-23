@@ -32,6 +32,7 @@ wshm es una herramienta CLI + GitHub Action que actua como agente autonomo de ma
 - **Auto-asignacion** — Asignacion ponderada de maintainers
 - **Blacklist de labels** — Impedir la aplicacion de ciertos labels
 - **Retriage periodico** — Re-evaluacion de triajes obsoletos
+- **Notificaciones** — Resumen diario de prioridades a Discord, Slack, Teams o webhook
 - **Dashboard y reportes** — Dashboard HTML y reportes markdown/PDF
 
 Un solo binario. Tus claves API. Tus datos. Cero infraestructura.

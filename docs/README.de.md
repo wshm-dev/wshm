@@ -32,6 +32,7 @@ wshm ist ein CLI-Tool + GitHub Action, das als autonomer Agent fur die Repositor
 - **Auto-Zuweisung** — Gewichtete Zufallszuweisung von Maintainern
 - **Label-Blacklist** — Bestimmte Labels von der Anwendung ausschliessen
 - **Periodische Neubewertung** — Veraltete Triage-Ergebnisse neu bewerten
+- **Benachrichtigungen** — Tagliche Prioritatszusammenfassung an Discord, Slack, Teams oder Webhook
 - **Dashboard und Berichte** — HTML-Dashboard und Markdown/PDF-Berichte
 
 Eine einzige Binary. Ihre API-Schlussel. Ihre Daten. Null Infrastruktur.

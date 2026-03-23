@@ -42,6 +42,7 @@
 - **Auto-Assign** — Weighted random assignment of maintainers to issues and PRs
 - **Labels Blacklist** — Prevent specific labels from ever being applied
 - **Periodic Retriage** — Re-evaluate stale triage results on a schedule
+- **Notifications** — Daily priority summary to Discord, Slack, Teams, or any webhook
 - **Dashboard & Reports** — HTML dashboards and markdown/PDF reports
 - **Fully Customizable** — Templates for every comment, branding, and behavior
 
@@ -149,8 +150,18 @@ labels_blacklist = ["do-not-touch", "manual-only"]
 [branding]
 name = "my-bot"
 url = "https://my-project.dev"
-# triage_template = "..."          # Full custom markdown/HTML
-# pr_template = "..."              # Full custom markdown/HTML
+
+[notify]
+on_run = true                       # send summary after `wshm run`
+
+[[notify.discord]]
+url = "https://discord.com/api/webhooks/ID/TOKEN"
+
+[[notify.slack]]
+url = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+
+[[notify.teams]]
+url = "https://outlook.office.com/webhook/YOUR/WEBHOOK/URL"
 ```
 
 ## Supported AI Providers
@@ -201,6 +212,7 @@ wshm conflicts scan [--apply]  # detect and resolve conflicts
 wshm review [--apply]          # inline code review on PR diffs
 wshm fix --issue <N> [--apply] # auto-generate fix from issue
 wshm run [--apply]             # full cycle
+wshm notify                    # send priority summary (Discord/Slack/Teams/webhook)
 wshm dashboard                 # generate HTML dashboard
 wshm report                    # generate report (md/html/pdf)
 wshm daemon                    # persistent daemon with webhooks/polling
