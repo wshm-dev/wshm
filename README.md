@@ -157,6 +157,7 @@ Credentials are stored in `.wshm/credentials` (chmod 600, gitignored).
 | `wshm report` | Generate report (md/html/pdf) |
 | `wshm changelog` | Generate changelog from merged PRs |
 | `wshm dashboard` | Generate metrics dashboard (HTML + charts) |
+| `wshm notify` | Send priority summary (Discord/Slack/Teams/webhook) |
 | `wshm daemon` | Start persistent daemon (webhook + polling) |
 | `wshm config init` | Create `.wshm/config.toml` template |
 | `wshm model list` | List available local AI models |
@@ -199,6 +200,37 @@ footer_template = "*{action} by [{name}]({url})*"  # Custom footer
 > *Triaged by [jarvis](https://acme.com/jarvis)*
 
 All GitHub comments, slash commands, PR titles, and footers adapt automatically.
+
+## Notifications
+
+Send a daily priority summary to Discord, Slack, Microsoft Teams, or any webhook.
+
+```toml
+# .wshm/config.toml
+[notify]
+on_run = true                    # auto-send after `wshm run`
+
+[[notify.discord]]
+url = "https://discord.com/api/webhooks/ID/TOKEN"
+username = "wshm"
+
+[[notify.slack]]
+url = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+
+[[notify.teams]]
+url = "https://outlook.office.com/webhook/YOUR/WEBHOOK/URL"
+
+[[notify.webhooks]]
+url = "https://your-server.com/wshm-notify"
+secret = "hmac-secret"
+```
+
+```bash
+wshm notify          # send summary now
+wshm run --apply     # full cycle + auto-notify (if on_run = true)
+```
+
+The summary includes: open issues, untriaged count, high-priority issues, open PRs, high-risk PRs, and merge conflicts. Formatted natively for each platform (Discord embeds, Slack blocks, Teams adaptive cards).
 
 ## Auto-Fix with Podman Sandbox
 

@@ -180,6 +180,11 @@ async fn main() -> Result<()> {
             )
             .await?;
 
+            // Send notification if configured
+            if config.notify.on_run && config.notify.has_targets() {
+                pipelines::notify::run(&config, &db, cli.json).await?;
+            }
+
             if !cli.json {
                 println!("Full cycle complete.");
             }
@@ -313,6 +318,11 @@ async fn main() -> Result<()> {
                 println!("Created .wshm/config.toml template.");
             }
         },
+        Some(Command::Notify) => {
+            let config = config::Config::load(&cli)?;
+            let db = db::Database::open(&config)?;
+            pipelines::notify::run(&config, &db, cli.json).await?;
+        }
         Some(Command::Revert(args)) => {
             let (config, db, gh, _) = init_full(&cli)?;
 

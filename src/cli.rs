@@ -88,6 +88,9 @@ pub enum Command {
     /// Start persistent daemon with webhook server
     Daemon(DaemonArgs),
 
+    /// Send a priority summary notification (Discord, Slack, Teams, webhook)
+    Notify,
+
     /// Revert all wshm actions (remove comments, labels, clear results)
     Revert(RevertArgs),
 

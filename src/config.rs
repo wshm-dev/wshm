@@ -55,6 +55,9 @@ pub struct Config {
     pub export: ExportConfig,
 
     #[serde(default)]
+    pub notify: NotifyConfig,
+
+    #[serde(default)]
     pub vault: Option<VaultConfig>,
 
     /// Labels that wshm must never apply (blacklist).
@@ -739,6 +742,80 @@ fn default_webhook_events() -> Vec<String> {
     vec!["*".to_string()]
 }
 
+// ── Notify config ─────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct NotifyConfig {
+    /// Send notification at the end of `wshm run`
+    #[serde(default)]
+    pub on_run: bool,
+
+    /// Discord webhook targets
+    #[serde(default)]
+    pub discord: Vec<DiscordNotifyConfig>,
+
+    /// Slack webhook targets
+    #[serde(default)]
+    pub slack: Vec<SlackNotifyConfig>,
+
+    /// Microsoft Teams webhook targets
+    #[serde(default)]
+    pub teams: Vec<TeamsNotifyConfig>,
+
+    /// Generic webhook targets (raw JSON POST)
+    #[serde(default)]
+    pub webhooks: Vec<GenericNotifyWebhook>,
+}
+
+impl NotifyConfig {
+    pub fn has_targets(&self) -> bool {
+        !self.discord.is_empty()
+            || !self.slack.is_empty()
+            || !self.teams.is_empty()
+            || !self.webhooks.is_empty()
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DiscordNotifyConfig {
+    pub url: String,
+
+    /// Optional username override for the bot
+    #[serde(default)]
+    pub username: Option<String>,
+
+    /// Optional avatar URL override
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SlackNotifyConfig {
+    pub url: String,
+
+    /// Optional channel override (webhook default is used if absent)
+    #[serde(default)]
+    pub channel: Option<String>,
+
+    /// Optional username override
+    #[serde(default)]
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TeamsNotifyConfig {
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GenericNotifyWebhook {
+    pub url: String,
+
+    /// Optional HMAC-SHA256 secret
+    #[serde(default)]
+    pub secret: Option<String>,
+}
+
 // ── Vault config ──────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1098,6 +1175,26 @@ full_sync_interval_hours = 24
 # mount = "secret"
 # Auth from env: VAULT_TOKEN, VAULT_ROLE_ID, etc.
 
+# [notify]
+# on_run = true                         # Send summary after `wshm run`
+#
+# [[notify.discord]]
+# url = "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN"
+# username = "wshm"
+# avatar_url = "https://github.com/wshm-dev.png"
+#
+# [[notify.slack]]
+# url = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+# channel = "repo-updates"
+# username = "wshm"
+#
+# [[notify.teams]]
+# url = "https://outlook.office.com/webhook/YOUR/WEBHOOK/URL"
+#
+# [[notify.webhooks]]
+# url = "https://your-server.com/wshm-notify"
+# secret = "hmac-secret"
+
 # [export.storage]
 # provider = "s3"                      # "s3" | "azure" | "gcs"
 # bucket = "wshm-logs"
@@ -1157,6 +1254,7 @@ impl Default for Config {
             branding: BrandingConfig::default(),
             update: UpdateConfig::default(),
             export: ExportConfig::default(),
+            notify: NotifyConfig::default(),
             vault: None,
             labels_blacklist: Vec::new(),
             issues_blacklist: Vec::new(),

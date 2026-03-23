@@ -45,6 +45,7 @@ pub fn extract_linked_issues_with_type(body: &str) -> Vec<(String, u64)> {
 }
 pub mod changelog;
 pub mod conflict_resolution;
+pub mod notify;
 pub mod dashboard;
 pub mod merge_queue;
 pub mod pr_analysis;

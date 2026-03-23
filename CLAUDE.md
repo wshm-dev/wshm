@@ -217,6 +217,7 @@ wshm conflicts scan            # detect conflicting PRs
 wshm conflicts scan --apply    # attempt resolution
 wshm run                       # full cycle: sync + triage + analyze + queue + conflicts
 wshm run --apply               # full cycle with actions
+wshm notify                    # send priority summary to Discord/Slack/Teams/webhook
 wshm config init               # create .wshm/config.toml template
 ```
 
@@ -269,6 +270,24 @@ auto_resolve_confidence = 0.85
 [sync]
 interval_minutes = 5             # minimum time between auto-syncs
 full_sync_interval_hours = 24    # force full sync every N hours
+
+[notify]
+on_run = true                    # send summary after `wshm run` (default: false)
+
+[[notify.discord]]
+url = "https://discord.com/api/webhooks/ID/TOKEN"
+username = "wshm"
+
+[[notify.slack]]
+url = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+channel = "repo-updates"
+
+[[notify.teams]]
+url = "https://outlook.office.com/webhook/YOUR/WEBHOOK/URL"
+
+[[notify.webhooks]]
+url = "https://your-server.com/wshm-notify"
+secret = "hmac-secret"
 ```
 
 ---
@@ -314,7 +333,8 @@ wshm/
 │       ├── triage.rs            ← Pipeline 1
 │       ├── pr_analysis.rs       ← Pipeline 2
 │       ├── merge_queue.rs       ← Pipeline 3
-│       └── conflict_resolution.rs  ← Pipeline 4
+│       ├── conflict_resolution.rs  ← Pipeline 4
+│       └── notify.rs            ← Daily summary notifications (Discord/Slack/Teams/webhook)
 └── tests/
     ├── fixtures/                ← sample GitHub API responses
     └── integration/
