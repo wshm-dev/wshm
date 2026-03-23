@@ -27,6 +27,7 @@ pub struct IssueBrief {
     pub priority: Option<String>,
     pub category: Option<String>,
     pub labels: Vec<String>,
+    pub age_days: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,7 +51,8 @@ fn build_summary(config: &Config, db: &Database) -> Result<NotifySummary> {
         .filter(|p| p.mergeable == Some(false))
         .count();
 
-    // Collect high-priority issues (triaged as bug with high/critical priority, or simple fixes)
+    // Collect high/critical priority issues only — sorted oldest first (most urgent)
+    let now = chrono::Utc::now();
     let mut high_priority_issues = Vec::new();
     for issue in &open_issues {
         if let Ok(Some(triage)) = db.get_triage_result(issue.number) {
@@ -58,18 +60,24 @@ fn build_summary(config: &Config, db: &Database) -> Result<NotifySummary> {
                 triage.priority.as_deref(),
                 Some("high") | Some("critical")
             );
-            let is_bug = triage.category == "bug";
-            if is_high || (is_bug && triage.is_simple_fix) {
-                high_priority_issues.push(IssueBrief {
-                    number: issue.number,
-                    title: crate::pipelines::truncate(&issue.title, 80),
-                    priority: triage.priority.clone(),
-                    category: Some(triage.category.clone()),
-                    labels: issue.labels.clone(),
-                });
+            if !is_high {
+                continue;
             }
+            let age_days = chrono::DateTime::parse_from_rfc3339(&issue.created_at)
+                .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_days())
+                .unwrap_or(0);
+            high_priority_issues.push(IssueBrief {
+                number: issue.number,
+                title: crate::pipelines::truncate(&issue.title, 80),
+                priority: triage.priority.clone(),
+                category: Some(triage.category.clone()),
+                labels: issue.labels.clone(),
+                age_days,
+            });
         }
     }
+    // Oldest first = most urgent at the top
+    high_priority_issues.sort_by(|a, b| b.age_days.cmp(&a.age_days));
 
     // Collect high-risk PRs or PRs with conflicts
     let mut high_risk_prs = Vec::new();
@@ -136,11 +144,16 @@ fn format_discord(summary: &NotifySummary) -> serde_json::Value {
             .take(10)
             .map(|i| {
                 let prio = i.priority.as_deref().unwrap_or("?");
-                format!("`#{}` [{}] {}", i.number, prio, i.title)
+                let age = if i.age_days > 0 {
+                    format!(" ({}d)", i.age_days)
+                } else {
+                    String::new()
+                };
+                format!("`#{}` **{}**{} — {}", i.number, prio, age, i.title)
             })
             .collect();
         fields.push(serde_json::json!({
-            "name": "Priority Issues",
+            "name": "Action Required",
             "value": lines.join("\n"),
         }));
     }
@@ -225,14 +238,19 @@ fn format_slack(summary: &NotifySummary) -> serde_json::Value {
             .take(10)
             .map(|i| {
                 let prio = i.priority.as_deref().unwrap_or("?");
-                format!(":warning: `#{}` [{}] {}", i.number, prio, i.title)
+                let age = if i.age_days > 0 {
+                    format!(" ({}d)", i.age_days)
+                } else {
+                    String::new()
+                };
+                format!("`#{}` *{}*{} — {}", i.number, prio, age, i.title)
             })
             .collect();
         blocks.push(serde_json::json!({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": format!("*Priority Issues*\n{}", lines.join("\n")),
+                "text": format!("*🚨 Action Required*\n{}", lines.join("\n")),
             }
         }));
     }
@@ -251,7 +269,7 @@ fn format_slack(summary: &NotifySummary) -> serde_json::Value {
                 if p.has_conflicts {
                     tags.push("CONFLICT".to_string());
                 }
-                format!(":rotating_light: `#{}` [{}] {}", p.number, tags.join(", "), p.title)
+                format!("`#{}` [{}] {}", p.number, tags.join(", "), p.title)
             })
             .collect();
         blocks.push(serde_json::json!({
@@ -297,12 +315,17 @@ fn format_teams(summary: &NotifySummary) -> serde_json::Value {
             .take(10)
             .map(|i| {
                 let prio = i.priority.as_deref().unwrap_or("?");
-                format!("- `#{}` [{}] {}", i.number, prio, i.title)
+                let age = if i.age_days > 0 {
+                    format!(" ({}d)", i.age_days)
+                } else {
+                    String::new()
+                };
+                format!("- `#{}` **{}**{} — {}", i.number, prio, age, i.title)
             })
             .collect();
         body.push(serde_json::json!({
             "type": "TextBlock",
-            "text": format!("**Priority Issues**\n\n{}", lines.join("\n\n")),
+            "text": format!("**Action Required**\n\n{}", lines.join("\n\n")),
             "wrap": true,
         }));
     }
