@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wshm-config
+  namespace: wshm
+data:
+  global.toml: |
+    [daemon]
+    apply = true
+    poll = true
+    poll_interval = 30
+
+    [update]
+    enabled = false
+
+    [[repos]]
+    slug = "owner/repo"
+    path = "/data/repos/repo"
+    apply = true

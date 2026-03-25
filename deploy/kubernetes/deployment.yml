@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wshm
+  namespace: wshm
+  labels:
+    app: wshm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: wshm
+  template:
+    metadata:
+      labels:
+        app: wshm
+    spec:
+      containers:
+        - name: wshm
+          image: wshmdev/wshm:latest
+          args:
+            - daemon
+            - --config
+            - /config/global.toml
+            - --apply
+            - --poll
+            - --no-server
+          envFrom:
+            - secretRef:
+                name: wshm-credentials
+          env:
+            - name: RUST_LOG
+              value: "wshm=info"
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: data
+              mountPath: /data/repos
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: wshm-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: wshm-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wshm-data
+  namespace: wshm
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

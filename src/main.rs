@@ -15,6 +15,7 @@ mod github;
 mod icm;
 mod login;
 mod pipelines;
+mod telemetry;
 mod tui;
 mod update;
 mod vault;
@@ -60,6 +61,9 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Telemetry ping (fire-and-forget, 1x/day)
+    telemetry::maybe_ping();
 
     // Binary integrity check (skip for --help/--version which exit early)
     match update::verify_binary_integrity() {

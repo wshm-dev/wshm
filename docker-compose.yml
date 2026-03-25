@@ -1,0 +1,24 @@
+services:
+  wshm:
+    build: .
+    image: wshmdev/wshm:latest
+    restart: unless-stopped
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # Optional: other AI providers
+      # - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - RUST_LOG=wshm=info
+    volumes:
+      # Multi-repo mode: mount global config
+      - ./global.toml:/home/wshm/.wshm/global.toml:ro
+      # Persist repo state between restarts
+      - wshm-data:/home/wshm/repos
+    ports:
+      # Webhook server (remove if using --no-server)
+      - "3000:3000"
+    command: ["daemon", "--config", "/home/wshm/.wshm/global.toml", "--apply", "--poll"]
+
+volumes:
+  wshm-data:

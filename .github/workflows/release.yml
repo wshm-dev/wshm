@@ -61,6 +61,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.deps }}
 
       - name: Build
+        env:
+          WSHM_TELEMETRY_URL: https://telemetry.wshm.dev/api/v1/telemetry
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features != '' && format('--features {0}', matrix.features) || '' }}
 
       - name: Package (tar.gz)
@@ -145,7 +147,7 @@ jobs:
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           gh release download "$TAG" \
-            --repo pszymkowiak/wshm \
+            --repo wshm-dev/wshm \
             --pattern "checksums-${TAG}.sha256"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -165,24 +167,24 @@ jobs:
           cat > wshm.rb << 'FORMULA'
           class Wshm < Formula
             desc "AI-powered GitHub agent for OSS maintainers"
-            homepage "https://github.com/pszymkowiak/wshm"
+            homepage "https://github.com/wshm-dev/wshm"
             version "VERSION_PLACEHOLDER"
             license "MIT"
 
             on_macos do
               on_intel do
-                url "https://github.com/pszymkowiak/wshm/releases/download/TAG_PLACEHOLDER/wshm-x86_64-apple-darwin.tar.gz"
+                url "https://github.com/wshm-dev/wshm/releases/download/TAG_PLACEHOLDER/wshm-x86_64-apple-darwin.tar.gz"
                 sha256 "SHA_INTEL_PLACEHOLDER"
               end
               on_arm do
-                url "https://github.com/pszymkowiak/wshm/releases/download/TAG_PLACEHOLDER/wshm-aarch64-apple-darwin.tar.gz"
+                url "https://github.com/wshm-dev/wshm/releases/download/TAG_PLACEHOLDER/wshm-aarch64-apple-darwin.tar.gz"
                 sha256 "SHA_ARM_PLACEHOLDER"
               end
             end
 
             on_linux do
               on_intel do
-                url "https://github.com/pszymkowiak/wshm/releases/download/TAG_PLACEHOLDER/wshm-x86_64-unknown-linux-gnu.tar.gz"
+                url "https://github.com/wshm-dev/wshm/releases/download/TAG_PLACEHOLDER/wshm-x86_64-unknown-linux-gnu.tar.gz"
                 sha256 "SHA_LINUX_PLACEHOLDER"
               end
             end
@@ -206,14 +208,14 @@ jobs:
       - name: Push to homebrew-tap
         run: |
           CONTENT=$(base64 -w 0 wshm.rb)
-          SHA=$(gh api repos/pszymkowiak/homebrew-tap/contents/Formula/wshm.rb --jq '.sha' 2>/dev/null || echo "")
+          SHA=$(gh api repos/wshm-dev/wshm-tools/contents/Formula/wshm.rb --jq '.sha' 2>/dev/null || echo "")
           if [ -n "$SHA" ]; then
-            gh api -X PUT repos/pszymkowiak/homebrew-tap/contents/Formula/wshm.rb \
+            gh api -X PUT repos/wshm-dev/wshm-tools/contents/Formula/wshm.rb \
               -f message="wshm ${{ steps.version.outputs.version }}" \
               -f content="$CONTENT" \
               -f sha="$SHA"
           else
-            gh api -X PUT repos/pszymkowiak/homebrew-tap/contents/Formula/wshm.rb \
+            gh api -X PUT repos/wshm-dev/wshm-tools/contents/Formula/wshm.rb \
               -f message="wshm ${{ steps.version.outputs.version }}" \
               -f content="$CONTENT"
           fi
