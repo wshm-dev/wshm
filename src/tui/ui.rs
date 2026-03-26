@@ -509,16 +509,70 @@ fn draw_stats_tab(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(recent_table, chunks[1]);
 }
 
-fn draw_activity(f: &mut Frame, _app: &App, area: Rect) {
-    let text = Paragraph::new("Activity log coming soon. Press 'r' to refresh data.")
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Activity "),
-        )
-        .style(Style::default().fg(Color::DarkGray));
+fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
+    if app.activity.is_empty() {
+        let text = Paragraph::new("No activity yet. Triage some issues first.")
+            .block(Block::default().borders(Borders::ALL).title(" Activity "))
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(text, area);
+        return;
+    }
 
-    f.render_widget(text, area);
+    let header = Row::new(vec![
+        Cell::from("Time"),
+        Cell::from("Issue"),
+        Cell::from("Category"),
+        Cell::from("Priority"),
+        Cell::from("Summary"),
+    ])
+    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+
+    let rows: Vec<Row> = app
+        .activity
+        .iter()
+        .skip(app.scroll_offset)
+        .map(|t| {
+            let time = if t.acted_at.len() > 16 { &t.acted_at[..16] } else { &t.acted_at };
+            let priority_style = match t.priority.as_deref() {
+                Some("critical") => Style::default().fg(Color::Red),
+                Some("high") => Style::default().fg(Color::LightRed),
+                Some("medium") => Style::default().fg(Color::Yellow),
+                _ => Style::default().fg(Color::Green),
+            };
+            let category_style = match t.category.as_str() {
+                "bug" => Style::default().fg(Color::Red),
+                "feature" => Style::default().fg(Color::Cyan),
+                "question" => Style::default().fg(Color::Magenta),
+                _ => Style::default(),
+            };
+            Row::new(vec![
+                Cell::from(time.to_string()).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(format!("#{}", t.issue_number)),
+                Cell::from(t.category.clone()).style(category_style),
+                Cell::from(t.priority.clone().unwrap_or_default()).style(priority_style),
+                Cell::from(t.summary.clone().unwrap_or_default()),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(17),
+            Constraint::Length(7),
+            Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Min(30),
+        ],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Activity ({}) ", app.activity.len())),
+    );
+
+    f.render_widget(table, area);
 }
 
 fn draw_footer(f: &mut Frame, area: Rect) {

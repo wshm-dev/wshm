@@ -107,6 +107,7 @@ pub struct App {
     pub open_pr_count: usize,
     pub conflict_count: usize,
     pub stats: Stats,
+    pub activity: Vec<TriageResultRow>,
 }
 
 impl App {
@@ -135,6 +136,7 @@ impl App {
                 avg_issue_age_days: 0,
                 avg_pr_age_days: 0,
             },
+            activity: Vec::new(),
         };
         app.refresh(db)?;
         Ok(app)
@@ -171,6 +173,9 @@ impl App {
 
         // Build stats from triage results
         self.build_stats();
+
+        // Load recent activity
+        self.activity = db.recent_activity(50).unwrap_or_default();
 
         self.scroll_offset = 0;
         Ok(())
@@ -357,7 +362,7 @@ impl App {
             Tab::PullRequests => self.pulls.len(),
             Tab::Queue => self.pulls.len(),
             Tab::Stats => self.stats.recent_triages.len(),
-            Tab::Activity => 0,
+            Tab::Activity => self.activity.len(),
         }
     }
 }

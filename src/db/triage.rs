@@ -132,6 +132,32 @@ impl Database {
         })
     }
 
+    /// Get recent triage activity (last N entries, most recent first).
+    pub fn recent_activity(&self, limit: usize) -> Result<Vec<TriageResultRow>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT t.issue_number, t.category, t.confidence, t.priority, t.summary, t.is_simple_fix, t.acted_at
+                 FROM triage_results t
+                 ORDER BY t.acted_at DESC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt
+                .query_map(rusqlite::params![limit], |row| {
+                    Ok(TriageResultRow {
+                        issue_number: row.get(0)?,
+                        category: row.get(1)?,
+                        confidence: row.get(2)?,
+                        priority: row.get(3)?,
+                        summary: row.get(4)?,
+                        is_simple_fix: row.get(5)?,
+                        acted_at: row.get(6)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
     pub fn is_triaged(&self, issue_number: u64) -> Result<bool> {
         self.with_conn(|conn| {
             let count: i64 = conn.query_row(
