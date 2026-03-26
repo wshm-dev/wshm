@@ -534,9 +534,11 @@ fn draw_repos(f: &mut Frame, app: &App, area: Rect) {
     let header = Row::new(vec![
         Cell::from(""),
         Cell::from("Repository"),
-        Cell::from("Path"),
         Cell::from("Status"),
-        Cell::from("Issues"),
+        Cell::from("Open"),
+        Cell::from("Closed"),
+        Cell::from("Total"),
+        Cell::from("PRs"),
         Cell::from("Triaged"),
     ])
     .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
@@ -568,9 +570,14 @@ fn draw_repos(f: &mut Frame, app: &App, area: Rect) {
             Row::new(vec![
                 Cell::from(toggle).style(Style::default().fg(toggle_color)),
                 Cell::from(r.slug.clone()),
-                Cell::from(r.path.clone()).style(Style::default().fg(Color::DarkGray)),
                 Cell::from(status.0).style(Style::default().fg(status.1)),
-                Cell::from(r.issue_count.map(|c| c.to_string()).unwrap_or("–".into())),
+                Cell::from(r.open_issues.map(|c| c.to_string()).unwrap_or("–".into()))
+                    .style(Style::default().fg(Color::Yellow)),
+                Cell::from(r.closed_issues.map(|c| c.to_string()).unwrap_or("–".into()))
+                    .style(Style::default().fg(Color::Green)),
+                Cell::from(r.total_issues.map(|c| c.to_string()).unwrap_or("–".into())),
+                Cell::from(r.open_prs.map(|c| c.to_string()).unwrap_or("–".into()))
+                    .style(Style::default().fg(Color::Cyan)),
                 Cell::from(r.triaged_count.map(|c| c.to_string()).unwrap_or("–".into())),
             ])
             .style(style)
@@ -582,9 +589,11 @@ fn draw_repos(f: &mut Frame, app: &App, area: Rect) {
         [
             Constraint::Length(3),
             Constraint::Length(25),
-            Constraint::Min(20),
             Constraint::Length(12),
-            Constraint::Length(8),
+            Constraint::Length(6),
+            Constraint::Length(7),
+            Constraint::Length(6),
+            Constraint::Length(5),
             Constraint::Length(8),
         ],
     )

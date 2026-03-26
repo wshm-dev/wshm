@@ -168,7 +168,10 @@ pub struct RepoRow {
     pub enabled: bool,
     pub exists: bool,
     pub has_wshm: bool,
-    pub issue_count: Option<usize>,
+    pub open_issues: Option<usize>,
+    pub closed_issues: Option<usize>,
+    pub total_issues: Option<usize>,
+    pub open_prs: Option<usize>,
     pub triaged_count: Option<usize>,
 }
 
@@ -465,21 +468,30 @@ impl App {
                 let has_wshm = path_buf.join(".wshm").exists();
 
                 // Try to get counts from the repo's state.db
-                let (issue_count, triaged_count) = if has_wshm {
+                let (open_issues, closed_issues, total_issues, open_prs, triaged_count) = if has_wshm {
                     let db_path = path_buf.join(".wshm").join("state.db");
                     if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                        let issues: Option<usize> = conn
+                        let open: Option<usize> = conn
                             .query_row("SELECT COUNT(*) FROM issues WHERE state = 'open'", [], |r| r.get(0))
+                            .ok();
+                        let closed: Option<usize> = conn
+                            .query_row("SELECT COUNT(*) FROM issues WHERE state = 'closed'", [], |r| r.get(0))
+                            .ok();
+                        let total: Option<usize> = conn
+                            .query_row("SELECT COUNT(*) FROM issues", [], |r| r.get(0))
+                            .ok();
+                        let prs: Option<usize> = conn
+                            .query_row("SELECT COUNT(*) FROM pull_requests WHERE state = 'open'", [], |r| r.get(0))
                             .ok();
                         let triaged: Option<usize> = conn
                             .query_row("SELECT COUNT(*) FROM triage_results", [], |r| r.get(0))
                             .ok();
-                        (issues, triaged)
+                        (open, closed, total, prs, triaged)
                     } else {
-                        (None, None)
+                        (None, None, None, None, None)
                     }
                 } else {
-                    (None, None)
+                    (None, None, None, None, None)
                 };
 
                 RepoRow {
@@ -488,7 +500,10 @@ impl App {
                     enabled: r.enabled,
                     exists,
                     has_wshm,
-                    issue_count,
+                    open_issues,
+                    closed_issues,
+                    total_issues,
+                    open_prs,
                     triaged_count,
                 }
             })
