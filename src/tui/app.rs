@@ -127,6 +127,7 @@ pub struct App {
     pub input_step: u8,
     pub input_tmp_slug: String,
     pub confirm_delete: bool,
+    pub settings_popup: Option<RepoSettings>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -134,6 +135,30 @@ pub enum InputMode {
     AddRepoSlug,
     AddRepoPath,
     DeleteConfirm,
+    EditSetting,
+}
+
+#[derive(Clone)]
+pub struct RepoSettings {
+    pub slug: String,
+    pub path: String,
+    pub items: Vec<SettingItem>,
+    pub selected: usize,
+}
+
+#[derive(Clone)]
+pub struct SettingItem {
+    pub section: String,
+    pub key: String,
+    pub value: String,
+    pub kind: SettingKind,
+}
+
+#[derive(Clone, PartialEq)]
+pub enum SettingKind {
+    Toggle,  // true/false
+    Text,    // editable string
+    Label,   // read-only info
 }
 
 #[derive(Clone)]
@@ -183,6 +208,7 @@ impl App {
             input_step: 0,
             input_tmp_slug: String::new(),
             confirm_delete: false,
+            settings_popup: None,
         };
         app.load_repos();
         app.refresh(db)?;
@@ -512,6 +538,9 @@ impl App {
                 self.input_mode = None;
                 self.input_buffer.clear();
             }
+            Some(InputMode::EditSetting) => {
+                // Handled in mod.rs directly
+            }
             None => {}
         }
     }
@@ -551,6 +580,115 @@ impl App {
                 }
             }
         }
+    }
+
+    pub fn open_settings(&mut self) {
+        if let Some(repo) = self.repos.get(self.scroll_offset) {
+            let config_path = PathBuf::from(&repo.path).join(".wshm").join("config.toml");
+            let content = std::fs::read_to_string(&config_path).unwrap_or_default();
+            let toml_val: toml::Value = toml::from_str(&content).unwrap_or(toml::Value::Table(toml::Table::new()));
+
+            let mut items = Vec::new();
+
+            // AI section
+            if let Some(ai) = toml_val.get("ai").and_then(|v| v.as_table()) {
+                items.push(SettingItem { section: "ai".into(), key: "provider".into(), value: ai.get("provider").and_then(|v| v.as_str()).unwrap_or("anthropic").into(), kind: SettingKind::Text });
+                items.push(SettingItem { section: "ai".into(), key: "model".into(), value: ai.get("model").and_then(|v| v.as_str()).unwrap_or("claude-sonnet-4-6").into(), kind: SettingKind::Text });
+            } else {
+                items.push(SettingItem { section: "ai".into(), key: "provider".into(), value: "anthropic".into(), kind: SettingKind::Text });
+                items.push(SettingItem { section: "ai".into(), key: "model".into(), value: "claude-sonnet-4-6".into(), kind: SettingKind::Text });
+            }
+
+            // Triage
+            let triage = toml_val.get("triage").and_then(|v| v.as_table());
+            items.push(SettingItem { section: "triage".into(), key: "enabled".into(), value: triage.and_then(|t| t.get("enabled")).and_then(|v| v.as_bool()).unwrap_or(true).to_string(), kind: SettingKind::Toggle });
+            items.push(SettingItem { section: "triage".into(), key: "auto_fix".into(), value: triage.and_then(|t| t.get("auto_fix")).and_then(|v| v.as_bool()).unwrap_or(false).to_string(), kind: SettingKind::Toggle });
+
+            // PR
+            let pr = toml_val.get("pr").and_then(|v| v.as_table());
+            items.push(SettingItem { section: "pr".into(), key: "enabled".into(), value: pr.and_then(|t| t.get("enabled")).and_then(|v| v.as_bool()).unwrap_or(false).to_string(), kind: SettingKind::Toggle });
+            items.push(SettingItem { section: "pr".into(), key: "auto_label".into(), value: pr.and_then(|t| t.get("auto_label")).and_then(|v| v.as_bool()).unwrap_or(true).to_string(), kind: SettingKind::Toggle });
+
+            // Queue
+            let queue = toml_val.get("queue").and_then(|v| v.as_table());
+            items.push(SettingItem { section: "queue".into(), key: "enabled".into(), value: queue.and_then(|t| t.get("enabled")).and_then(|v| v.as_bool()).unwrap_or(false).to_string(), kind: SettingKind::Toggle });
+
+            // Conflicts
+            let conflicts = toml_val.get("conflicts").and_then(|v| v.as_table());
+            items.push(SettingItem { section: "conflicts".into(), key: "enabled".into(), value: conflicts.and_then(|t| t.get("enabled")).and_then(|v| v.as_bool()).unwrap_or(false).to_string(), kind: SettingKind::Toggle });
+
+            self.settings_popup = Some(RepoSettings {
+                slug: repo.slug.clone(),
+                path: repo.path.clone(),
+                items,
+                selected: 0,
+            });
+        }
+    }
+
+    pub fn settings_up(&mut self) {
+        if let Some(ref mut s) = self.settings_popup {
+            if s.selected > 0 { s.selected -= 1; }
+        }
+    }
+
+    pub fn settings_down(&mut self) {
+        if let Some(ref mut s) = self.settings_popup {
+            if s.selected < s.items.len().saturating_sub(1) { s.selected += 1; }
+        }
+    }
+
+    pub fn settings_toggle(&mut self) {
+        if let Some(ref mut settings) = self.settings_popup {
+            if let Some(item) = settings.items.get_mut(settings.selected) {
+                if item.kind == SettingKind::Toggle {
+                    item.value = if item.value == "true" { "false".into() } else { "true".into() };
+                }
+            }
+        }
+    }
+
+    pub fn settings_edit(&mut self) {
+        if let Some(ref settings) = self.settings_popup {
+            if let Some(item) = settings.items.get(settings.selected) {
+                if item.kind == SettingKind::Text {
+                    self.input_mode = Some(InputMode::EditSetting);
+                    self.input_buffer = item.value.clone();
+                }
+            }
+        }
+    }
+
+    pub fn save_settings(&mut self) {
+        if let Some(ref settings) = self.settings_popup {
+            let config_path = PathBuf::from(&settings.path).join(".wshm").join("config.toml");
+            let content = std::fs::read_to_string(&config_path).unwrap_or_default();
+            let mut toml_val: toml::Value = toml::from_str(&content).unwrap_or(toml::Value::Table(toml::Table::new()));
+
+            for item in &settings.items {
+                let table = toml_val
+                    .as_table_mut()
+                    .unwrap()
+                    .entry(&item.section)
+                    .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                    .as_table_mut()
+                    .unwrap();
+
+                let val = match item.kind {
+                    SettingKind::Toggle => toml::Value::Boolean(item.value == "true"),
+                    SettingKind::Text => toml::Value::String(item.value.clone()),
+                    SettingKind::Label => continue,
+                };
+                table.insert(item.key.clone(), val);
+            }
+
+            let _ = std::fs::write(&config_path, toml::to_string_pretty(&toml_val).unwrap_or_default());
+        }
+        self.settings_popup = None;
+    }
+
+    pub fn close_settings(&mut self) {
+        self.settings_popup = None;
     }
 
     /// Toggle enabled/disabled for the selected repo and save

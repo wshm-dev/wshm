@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{App, InputMode, SortField, Tab};
+use super::app::{self, App, InputMode, SettingKind, SortField, Tab};
 
 fn sort_header(app: &App, label: &str, field: SortField) -> String {
     if app.sort_field == field {
@@ -37,6 +37,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Queue => draw_queue(f, app, chunks[2]),
         Tab::Stats => draw_stats_tab(f, app, chunks[2]),
         Tab::Activity => draw_activity(f, app, chunks[2]),
+    }
+
+    // Settings popup overlay
+    if let Some(ref settings) = app.settings_popup {
+        draw_settings_popup(f, settings, &app.input_mode, &app.input_buffer);
     }
 
     // Root warning
@@ -604,9 +609,10 @@ fn draw_repos(f: &mut Frame, app: &App, area: Rect) {
             InputMode::AddRepoSlug => ("Repo slug (owner/repo): ", "Enter to confirm, Esc to cancel"),
             InputMode::AddRepoPath => ("Local path: ", "Enter to confirm, Esc to cancel"),
             InputMode::DeleteConfirm => {
-                let slug = app.repos.get(app.scroll_offset).map(|r| r.slug.as_str()).unwrap_or("?");
-                let _ = slug; // used in format below
                 ("Delete? (y/N): ", "")
+            }
+            InputMode::EditSetting => {
+                ("New value: ", "Enter to confirm, Esc to cancel")
             }
         };
         let input = Paragraph::new(Line::from(vec![
@@ -618,11 +624,110 @@ fn draw_repos(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(input, layout[1]);
     } else {
         let help = Paragraph::new(Span::styled(
-            " Enter:toggle  n:add  x:delete  r:refresh  ↑↓:select",
+            " Space:toggle  Enter:settings  n:add  x:delete  r:refresh  ↑↓:select",
             Style::default().fg(Color::DarkGray),
         ));
         f.render_widget(help, layout[1]);
     }
+}
+
+fn draw_settings_popup(f: &mut Frame, settings: &app::RepoSettings, input_mode: &Option<InputMode>, input_buffer: &str) {
+    let area = f.area();
+    let popup = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(10),
+            Constraint::Percentage(80),
+            Constraint::Percentage(10),
+        ])
+        .split(area);
+    let popup = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(15),
+            Constraint::Percentage(70),
+            Constraint::Percentage(15),
+        ])
+        .split(popup[1]);
+    let area = popup[1];
+
+    // Clear background
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let mut rows: Vec<ListItem> = Vec::new();
+    let mut last_section = String::new();
+
+    for (i, item) in settings.items.iter().enumerate() {
+        // Section header
+        if item.section != last_section {
+            if !last_section.is_empty() {
+                rows.push(ListItem::new(Line::from("")));
+            }
+            rows.push(ListItem::new(Line::from(Span::styled(
+                format!("  [{}]", item.section),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ))));
+            last_section = item.section.clone();
+        }
+
+        let selected = i == settings.selected;
+        let cursor = if selected { "▸ " } else { "  " };
+
+        let value_style = match item.kind {
+            SettingKind::Toggle => {
+                if item.value == "true" {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }
+            }
+            SettingKind::Text => Style::default().fg(Color::Cyan),
+            SettingKind::Label => Style::default().fg(Color::DarkGray),
+        };
+
+        let toggle_indicator = match item.kind {
+            SettingKind::Toggle => if item.value == "true" { " ◉" } else { " ○" },
+            _ => "",
+        };
+
+        let line = Line::from(vec![
+            Span::raw(cursor),
+            Span::styled(&item.key, if selected { Style::default().add_modifier(Modifier::BOLD) } else { Style::default() }),
+            Span::raw(" = "),
+            Span::styled(&item.value, value_style),
+            Span::styled(toggle_indicator, value_style),
+        ]);
+
+        rows.push(ListItem::new(line));
+    }
+
+    // Input prompt if editing
+    if *input_mode == Some(InputMode::EditSetting) {
+        rows.push(ListItem::new(Line::from("")));
+        rows.push(ListItem::new(Line::from(vec![
+            Span::styled("  New value: ", Style::default().fg(Color::Yellow)),
+            Span::raw(input_buffer),
+            Span::styled("▌", Style::default().fg(Color::Yellow)),
+        ])));
+    }
+
+    let list = List::new(rows).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(format!(" {} — Settings ", settings.slug))
+            .style(Style::default().bg(Color::Black)),
+    );
+
+    f.render_widget(list, area);
+
+    // Help line at bottom of popup
+    let help_area = Rect::new(area.x + 1, area.y + area.height - 2, area.width - 2, 1);
+    let help = Paragraph::new(Span::styled(
+        " Space/Enter:toggle  e:edit  s:save  Esc:close",
+        Style::default().fg(Color::DarkGray),
+    ));
+    f.render_widget(help, help_area);
 }
 
 fn draw_activity(f: &mut Frame, app: &App, area: Rect) {

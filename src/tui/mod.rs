@@ -69,10 +69,37 @@ fn run_loop(
                     // Input mode intercepts all keys
                     if app.input_mode.is_some() {
                         match key.code {
-                            KeyCode::Enter => app.confirm_input(),
+                            KeyCode::Enter => {
+                                if app.input_mode == Some(app::InputMode::EditSetting) {
+                                    // Apply edited value to settings
+                                    if let Some(ref mut settings) = app.settings_popup {
+                                        if let Some(item) = settings.items.get_mut(settings.selected) {
+                                            item.value = app.input_buffer.clone();
+                                        }
+                                    }
+                                    app.input_mode = None;
+                                    app.input_buffer.clear();
+                                } else {
+                                    app.confirm_input();
+                                }
+                            }
                             KeyCode::Esc => app.cancel_input(),
                             KeyCode::Backspace => { app.input_buffer.pop(); }
                             KeyCode::Char(c) => app.input_buffer.push(c),
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // Settings popup intercepts keys
+                    if app.settings_popup.is_some() {
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => app.settings_up(),
+                            KeyCode::Down | KeyCode::Char('j') => app.settings_down(),
+                            KeyCode::Char(' ') | KeyCode::Enter => app.settings_toggle(),
+                            KeyCode::Char('e') => app.settings_edit(),
+                            KeyCode::Char('s') => app.save_settings(),
+                            KeyCode::Esc | KeyCode::Char('q') => app.close_settings(),
                             _ => {}
                         }
                         continue;
@@ -88,8 +115,11 @@ fn run_loop(
                         KeyCode::Char('6') => app.active_tab = app::Tab::Activity,
                         KeyCode::Enter => {
                             if app.active_tab == app::Tab::Repos {
-                                app.toggle_repo();
+                                app.open_settings();
                             }
+                        }
+                        KeyCode::Char(' ') if app.active_tab == app::Tab::Repos => {
+                            app.toggle_repo();
                         }
                         KeyCode::Tab => app.next_tab(),
                         KeyCode::BackTab => app.prev_tab(),
