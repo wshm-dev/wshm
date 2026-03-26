@@ -351,9 +351,26 @@ async fn main() -> Result<()> {
             pipelines::revert::run(&db, &gh, args.apply).await?;
         }
         Some(Command::Tui) => {
-            let config = config::Config::load(&cli)?;
-            let db = db::Database::open(&config)?;
-            tui::run(&config, &db).await?;
+            // Try single-repo mode first, fallback to global mode
+            match config::Config::load(&cli) {
+                Ok(config) => {
+                    let db = db::Database::open(&config)?;
+                    tui::run(&config, &db).await?;
+                }
+                Err(_) => {
+                    // Global mode: use first enabled repo from global.toml
+                    let global_path = config::GlobalConfig::default_path();
+                    if !global_path.exists() {
+                        anyhow::bail!("Not in a git repo and no ~/.wshm/global.toml found. Use --repo or create global.toml.");
+                    }
+                    let global = config::GlobalConfig::load(&global_path)?;
+                    let first = global.repos.iter().find(|r| r.enabled)
+                        .ok_or_else(|| anyhow::anyhow!("No enabled repos in global.toml"))?;
+                    let config = config::Config::load_for_repo(&first.path, &first.slug)?;
+                    let db = db::Database::open(&config)?;
+                    tui::run(&config, &db).await?;
+                }
+            }
         }
         None => {
             let config = config::Config::load(&cli)?;
