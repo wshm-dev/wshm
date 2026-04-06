@@ -122,28 +122,22 @@
 				{#each paged as issue}
 					<TableBodyRow
 						class="cursor-pointer"
-						style="border-left: 3px solid {prStatusBorder(colors, issue.pr_status ?? 'no_pr')};"
+						style="border-left: 3px solid {prStatusBorder(colors, issue.pr_status ?? 'no_pr')}; background-color: {prStatusBorder(colors, issue.pr_status ?? 'no_pr')}18;"
 						onclick={() => goto(`/issues/${issue.number}`)}
 					>
-						<TableBodyCell class="px-2 py-1.5 mono">{issue.number}</TableBodyCell>
-						<TableBodyCell class="px-2 py-1.5 truncate">{issue.title}</TableBodyCell>
-						<TableBodyCell class="px-2 py-1.5">
-							<span class="inline-block rounded px-1.5 py-0.5 text-xs font-medium" style="background-color: {prStatusBorder(colors, issue.pr_status ?? 'no_pr')}40; color: {prStatusBorder(colors, issue.pr_status ?? 'no_pr')}; border: 1px solid {prStatusBorder(colors, issue.pr_status ?? 'no_pr')}80;">
-								{issue.pr_status === 'pr_ready' ? 'PR ready' : issue.pr_status === 'has_pr' ? 'PR open' : 'No PR'}
-							</span>
+						<TableBodyCell class="px-2 py-1.5 mono text-gray-200">{issue.number}</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5 truncate text-gray-200">{issue.title}</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5 text-gray-200 text-xs">
+							{issue.pr_status === 'pr_ready' ? 'PR ready' : issue.pr_status === 'has_pr' ? 'PR open' : 'No PR'}
 						</TableBodyCell>
 						<TableBodyCell class="px-2 py-1.5">
 							{#each issue.labels as label}
 								<Badge color="blue" class="mr-1">{label}</Badge>
 							{/each}
 						</TableBodyCell>
-						<TableBodyCell class="px-2 py-1.5">
-							<span class="font-medium" style="color: {priorityColor(colors, issue.priority)}">{issue.priority ?? '-'}</span>
-						</TableBodyCell>
-						<TableBodyCell class="px-2 py-1.5">
-							<span style="color: {categoryColor(colors, issue.category)}">{issue.category ?? '-'}</span>
-						</TableBodyCell>
-						<TableBodyCell class="px-2 py-1.5 text-gray-500 mono">{timeAgo(issue.created_at)}</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5 text-gray-200">{issue.priority ?? '-'}</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5 text-gray-200">{issue.category ?? '-'}</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5 text-gray-400 mono">{timeAgo(issue.created_at)}</TableBodyCell>
 					</TableBodyRow>
 				{:else}
 					<TableBodyRow>
