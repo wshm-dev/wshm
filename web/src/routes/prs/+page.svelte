@@ -12,7 +12,7 @@
 	let error: string | null = $state(null);
 	let sortColumns: SortColumn[] = $state([{ key: 'risk_level', asc: true }, { key: 'age', asc: false }]);
 	let filters: Record<string, string> = $state({
-		number: '', title: '', state: '', risk: '', ci_status: '', conflicts: '', age: ''
+		number: '', title: '', state: '', base_ref: '', risk: '', ci_status: '', conflicts: '', age: ''
 	});
 
 	function timeAgo(dateStr: string): string {
@@ -109,6 +109,9 @@
 				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[70px]" onclick={(e: MouseEvent) => handleSort('state', e)}>
 					State <span class={sortArrowClass(sortColumns, 'state')}>{sortArrow(sortColumns, 'state')}</span>{#if sortIndex(sortColumns, 'state') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'state')}</span>{/if}
 				</TableHeadCell>
+				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[90px]" onclick={(e: MouseEvent) => handleSort('base_ref', e)}>
+					Base <span class={sortArrowClass(sortColumns, 'base_ref')}>{sortArrow(sortColumns, 'base_ref')}</span>{#if sortIndex(sortColumns, 'base_ref') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'base_ref')}</span>{/if}
+				</TableHeadCell>
 				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[80px]" onclick={(e: MouseEvent) => handleSort('risk', e)}>
 					Risk <span class={sortArrowClass(sortColumns, 'risk')}>{sortArrow(sortColumns, 'risk')}</span>{#if sortIndex(sortColumns, 'risk') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'risk')}</span>{/if}
 				</TableHeadCell>
@@ -127,6 +130,7 @@
 					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.number} placeholder="#" class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.title} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.state} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
+					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.base_ref} placeholder="main..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.risk} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.ci_status} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.conflicts} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
@@ -139,6 +143,7 @@
 						<TableBodyCell class="px-2 py-1.5">
 							<Badge color={pr.state === 'open' ? 'green' : 'red'}>{pr.state}</Badge>
 						</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5 text-xs mono text-gray-400">{pr.base_ref ?? '-'}</TableBodyCell>
 						<TableBodyCell class="px-2 py-1.5">
 							{#if pr.risk}
 								<Badge color={riskColor(pr.risk)}>{pr.risk}</Badge>

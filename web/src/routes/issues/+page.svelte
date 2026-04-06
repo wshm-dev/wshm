@@ -12,7 +12,7 @@
 	let error: string | null = $state(null);
 	let sortColumns: SortColumn[] = $state([{ key: 'priority', asc: true }, { key: 'age', asc: false }]);
 	let filters: Record<string, string> = $state({
-		number: '', title: '', state: '', labels: '', priority: '', category: '', age: ''
+		number: '', title: '', pr_status: '', labels: '', priority: '', category: '', age: ''
 	});
 
 	function timeAgo(dateStr: string): string {
@@ -40,7 +40,7 @@
 	let filtered = $derived(applyFilters(enriched, {
 		number: filters.number,
 		title: filters.title,
-		state: filters.state,
+		pr_status: filters.pr_status,
 		labels_str: filters.labels,
 		priority: filters.priority,
 		category: filters.category,
@@ -91,8 +91,8 @@
 				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5" onclick={(e: MouseEvent) => handleSort('title', e)}>
 					Title <span class={sortArrowClass(sortColumns, 'title')}>{sortArrow(sortColumns, 'title')}</span>{#if sortIndex(sortColumns, 'title') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'title')}</span>{/if}
 				</TableHeadCell>
-				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[70px]" onclick={(e: MouseEvent) => handleSort('state', e)}>
-					State <span class={sortArrowClass(sortColumns, 'state')}>{sortArrow(sortColumns, 'state')}</span>{#if sortIndex(sortColumns, 'state') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'state')}</span>{/if}
+				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[80px]" onclick={(e: MouseEvent) => handleSort('pr_status', e)}>
+					PR <span class={sortArrowClass(sortColumns, 'pr_status')}>{sortArrow(sortColumns, 'pr_status')}</span>{#if sortIndex(sortColumns, 'pr_status') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'pr_status')}</span>{/if}
 				</TableHeadCell>
 				<TableHeadCell class="px-2 py-1.5 w-[140px]">Labels</TableHeadCell>
 				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[80px]" onclick={(e: MouseEvent) => handleSort('priority', e)}>
@@ -109,16 +109,24 @@
 				<TableBodyRow class="border-b border-gray-700">
 					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.number} placeholder="#" class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.title} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
-					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.state} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
+					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.pr_status} placeholder="no/open/ready" class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.labels} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.priority} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.category} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.age} placeholder=">N" class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
 				</TableBodyRow>
 				{#each paged as issue}
-					<TableBodyRow class="cursor-pointer" onclick={() => goto(`/issues/${issue.number}`)}>
+					<TableBodyRow
+						class="cursor-pointer {issue.pr_status === 'pr_ready' ? 'bg-green-900/20 border-l-2 border-l-green-500' : issue.pr_status === 'has_pr' ? 'bg-blue-900/20 border-l-2 border-l-blue-500' : 'border-l-2 border-l-red-800'}"
+						onclick={() => goto(`/issues/${issue.number}`)}
+					>
 						<TableBodyCell class="px-2 py-1.5 mono">{issue.number}</TableBodyCell>
 						<TableBodyCell class="px-2 py-1.5 truncate">{issue.title}</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5">
+							<Badge color={issue.pr_status === 'pr_ready' ? 'green' : issue.pr_status === 'has_pr' ? 'blue' : 'dark'}>
+								{issue.pr_status === 'pr_ready' ? 'PR ready' : issue.pr_status === 'has_pr' ? 'PR open' : 'No PR'}
+							</Badge>
+						</TableBodyCell>
 						<TableBodyCell class="px-2 py-1.5">
 							<Badge color={issue.state === 'open' ? 'green' : 'red'}>{issue.state}</Badge>
 						</TableBodyCell>
@@ -133,7 +141,7 @@
 					</TableBodyRow>
 				{:else}
 					<TableBodyRow>
-						<TableBodyCell colspan={7} class="text-center text-gray-600 py-8">No issues found</TableBodyCell>
+						<TableBodyCell colspan={8} class="text-center text-gray-600 py-8">No issues found</TableBodyCell>
 					</TableBodyRow>
 				{/each}
 			</TableBody>

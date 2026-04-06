@@ -241,8 +241,39 @@ async fn api_issues(
             }
         }
         if let Ok(issues) = ds.db.get_open_issues() {
+            // Build a map: issue_number -> list of linked PRs (from open PRs bodies)
+            let open_prs = ds.db.get_open_pulls().unwrap_or_default();
+            let mut issue_prs: std::collections::HashMap<u64, Vec<serde_json::Value>> = std::collections::HashMap::new();
+            for pr in &open_prs {
+                let body = pr.body.as_deref().unwrap_or("");
+                let linked = crate::pipelines::extract_linked_issue_numbers(body);
+                for issue_num in linked {
+                    issue_prs.entry(issue_num).or_default().push(json!({
+                        "number": pr.number,
+                        "title": pr.title,
+                        "state": pr.state,
+                        "draft": pr.title.to_lowercase().contains("[draft]") || pr.labels.iter().any(|l| l.to_lowercase().contains("draft")),
+                        "ci_status": pr.ci_status,
+                        "mergeable": pr.mergeable,
+                    }));
+                }
+            }
+
             for issue in issues {
                 let triage = ds.db.get_triage_result(issue.number).ok().flatten();
+                let linked = issue_prs.get(&issue.number);
+                let pr_status = match linked {
+                    None => "no_pr",
+                    Some(prs) => {
+                        let has_ready = prs.iter().any(|p| {
+                            let ci_ok = p["ci_status"].as_str().map(|s| s == "success").unwrap_or(false);
+                            let mergeable = p["mergeable"].as_bool().unwrap_or(true);
+                            let not_draft = !p["draft"].as_bool().unwrap_or(false);
+                            ci_ok && mergeable && not_draft
+                        });
+                        if has_ready { "pr_ready" } else { "has_pr" }
+                    }
+                };
                 all_issues.push(json!({
                     "repo": slug,
                     "number": issue.number,
@@ -257,6 +288,8 @@ async fn api_issues(
                     "reactions_total": issue.reactions_total,
                     "priority": triage.as_ref().and_then(|t| t.priority.as_deref()),
                     "category": triage.as_ref().map(|t| t.category.as_str()),
+                    "pr_status": pr_status,
+                    "linked_prs": linked,
                 }));
             }
         }
