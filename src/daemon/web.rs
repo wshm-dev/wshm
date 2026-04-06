@@ -542,6 +542,38 @@ async fn handle_spa_fallback(req: Request<Body>) -> Response {
     serve_asset(path).await
 }
 
+/// GET /api/v1/license -- license status and feature gates.
+async fn api_license() -> impl IntoResponse {
+    let is_pro = crate::pro_hooks::is_pro();
+
+    let pro_features = vec![
+        ("review", "Inline code review", is_pro && crate::pro_hooks::has_feature("review")),
+        ("auto-fix", "Auto-generate fix PRs", is_pro && crate::pro_hooks::has_feature("auto-fix")),
+        ("improve", "Propose improvements", is_pro && crate::pro_hooks::has_feature("improve")),
+        ("conflicts", "Conflict resolution", is_pro && crate::pro_hooks::has_feature("conflicts")),
+        ("dashboard", "HTML dashboard export", is_pro && crate::pro_hooks::has_feature("dashboard")),
+        ("changelog", "Changelog generation", is_pro && crate::pro_hooks::has_feature("changelog")),
+        ("reports", "HTML/PDF reports", is_pro && crate::pro_hooks::has_feature("reports")),
+        ("revert", "Revert wshm actions", is_pro && crate::pro_hooks::has_feature("revert")),
+        ("daemon-webhook", "Daemon webhook mode", is_pro && crate::pro_hooks::has_feature("daemon")),
+    ];
+
+    let features: Vec<serde_json::Value> = pro_features
+        .iter()
+        .map(|(id, label, enabled)| json!({ "id": id, "label": label, "enabled": enabled }))
+        .collect();
+
+    Json(json!({
+        "is_pro": is_pro,
+        "plan": if is_pro { "pro" } else { "free" },
+        "features": features,
+        "oss_features": [
+            "triage", "pr_analysis", "merge_queue", "notify",
+            "web_ui", "daemon_polling", "sqlite", "postgresql"
+        ],
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Router builder
 // ---------------------------------------------------------------------------
@@ -561,7 +593,8 @@ pub fn web_routes(multi: Arc<MultiDaemonState>) -> Router {
         .route("/api/v1/pulls", get(api_pulls))
         .route("/api/v1/triage", get(api_triage))
         .route("/api/v1/queue", get(api_queue))
-        .route("/api/v1/activity", get(api_activity));
+        .route("/api/v1/activity", get(api_activity))
+        .route("/api/v1/license", get(api_license));
 
     let spa_routes = Router::new()
         .route("/", get(handle_spa_root))

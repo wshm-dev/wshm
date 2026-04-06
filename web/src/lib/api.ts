@@ -121,3 +121,20 @@ export function fetchQueue(): Promise<QueueEntry[]> {
 export function fetchActivity(): Promise<ActivityEntry[]> {
 	return apiGet<ActivityEntry[]>('/activity');
 }
+
+export interface LicenseFeature {
+	id: string;
+	label: string;
+	enabled: boolean;
+}
+
+export interface LicenseInfo {
+	is_pro: boolean;
+	plan: string;
+	features: LicenseFeature[];
+	oss_features: string[];
+}
+
+export function fetchLicense(): Promise<LicenseInfo> {
+	return apiGet<LicenseInfo>('/license');
+}
