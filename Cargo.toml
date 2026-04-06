@@ -1,6 +1,6 @@
 [package]
 name = "wshm"
-version = "0.25.0"
+version = "0.26.0"
 edition = "2021"
 description = "AI-powered GitHub agent for OSS maintainers"
 license = "SSPL-1.0"

@@ -94,7 +94,7 @@
 
 		<div class="border-t border-gray-700 px-3 py-2 flex items-center {collapsed ? 'justify-center' : 'justify-between'}">
 			{#if !collapsed}
-				<span class="text-[0.625rem] text-gray-600">v0.25.0</span>
+				<span class="text-[0.625rem] text-gray-600">v0.26.0</span>
 			{/if}
 			<button
 				onclick={toggleCollapse}
