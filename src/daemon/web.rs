@@ -242,6 +242,7 @@ async fn api_issues(
         }
         if let Ok(issues) = ds.db.get_open_issues() {
             for issue in issues {
+                let triage = ds.db.get_triage_result(issue.number).ok().flatten();
                 all_issues.push(json!({
                     "repo": slug,
                     "number": issue.number,
@@ -254,6 +255,8 @@ async fn api_issues(
                     "updated_at": issue.updated_at,
                     "reactions_plus1": issue.reactions_plus1,
                     "reactions_total": issue.reactions_total,
+                    "priority": triage.as_ref().and_then(|t| t.priority.as_deref()),
+                    "category": triage.as_ref().map(|t| t.category.as_str()),
                 }));
             }
         }
@@ -277,6 +280,7 @@ async fn api_pulls(
         }
         if let Ok(prs) = ds.db.get_open_pulls() {
             for pr in prs {
+                let analysis = ds.db.get_pr_analysis(pr.number).ok().flatten();
                 all_prs.push(json!({
                     "repo": slug,
                     "number": pr.number,
@@ -291,6 +295,9 @@ async fn api_pulls(
                     "ci_status": pr.ci_status,
                     "created_at": pr.created_at,
                     "updated_at": pr.updated_at,
+                    "risk_level": analysis.as_ref().map(|a| a.risk_level.as_str()),
+                    "pr_type": analysis.as_ref().map(|a| a.pr_type.as_str()),
+                    "summary": analysis.as_ref().map(|a| a.summary.as_str()),
                 }));
             }
         }
