@@ -2,56 +2,50 @@
 	import { onMount } from 'svelte';
 	import { selectedRepo } from '$lib/stores';
 	import { fetchIssues, type Issue } from '$lib/api';
+	import { multiSort, toggleSort as toggle, sortArrow, sortIndex, sortArrowClass, type SortColumn } from '$lib/sort';
+	import { applyFilters } from '$lib/filter';
+	import { Card, Table, TableHead, TableHeadCell, TableBody, TableBodyRow, TableBodyCell, Badge } from 'flowbite-svelte';
 
 	let issues: Issue[] = $state([]);
 	let error: string | null = $state(null);
-	let sortBy: string = $state('number');
-	let sortAsc: boolean = $state(false);
+	let sortColumns: SortColumn[] = $state([{ key: 'number', asc: false }]);
+	let filters: Record<string, string> = $state({
+		number: '', title: '', state: '', labels: '', priority: '', category: '', age: ''
+	});
 
 	function timeAgo(dateStr: string): string {
 		const diff = Date.now() - new Date(dateStr).getTime();
 		const days = Math.floor(diff / 86400000);
 		if (days === 0) return 'today';
-		if (days === 1) return '1 day ago';
-		return `${days} days ago`;
+		if (days === 1) return '1d';
+		return `${days}d`;
 	}
 
 	function ageDays(dateStr: string): number {
 		return Math.floor((Date.now() - new Date(dateStr).getTime()) / 86400000);
 	}
 
-	function toggleSort(column: string) {
-		if (sortBy === column) {
-			sortAsc = !sortAsc;
-		} else {
-			sortBy = column;
-			sortAsc = true;
-		}
+	function handleSort(key: string, event: MouseEvent) {
+		sortColumns = toggle(sortColumns, key, event.shiftKey);
 	}
 
-	function arrow(column: string): string {
-		if (sortBy !== column) return '';
-		return sortAsc ? 'v' : '^';
-	}
+	let enriched = $derived(issues.map(i => ({
+		...i,
+		age: ageDays(i.created_at),
+		labels_str: i.labels.join(', ')
+	})));
 
-	function arrowClass(column: string): string {
-		return sortBy === column ? 'sort-arrow active' : 'sort-arrow';
-	}
+	let filtered = $derived(applyFilters(enriched, {
+		number: filters.number,
+		title: filters.title,
+		state: filters.state,
+		labels_str: filters.labels,
+		priority: filters.priority,
+		category: filters.category,
+		age: filters.age
+	}));
 
-	let sorted = $derived(
-		[...issues].sort((a, b) => {
-			let cmp = 0;
-			switch (sortBy) {
-				case 'number': cmp = a.number - b.number; break;
-				case 'title': cmp = a.title.localeCompare(b.title); break;
-				case 'priority': cmp = (a.priority ?? '').localeCompare(b.priority ?? ''); break;
-				case 'category': cmp = (a.category ?? '').localeCompare(b.category ?? ''); break;
-				case 'age': cmp = ageDays(a.created_at) - ageDays(b.created_at); break;
-				default: cmp = 0;
-			}
-			return sortAsc ? cmp : -cmp;
-		})
-	);
+	let sorted = $derived(multiSort(filtered, sortColumns));
 
 	async function load() {
 		try {
@@ -73,67 +67,71 @@
 	<title>wshm - Issues</title>
 </svelte:head>
 
-<div class="page-header">
-	<h2>Issues</h2>
-	<p>All tracked issues from the repository</p>
+<div class="mb-6">
+	<h2 class="text-xl font-semibold text-gray-100 mb-1">Issues</h2>
+	<p class="text-sm text-gray-500">All tracked issues from the repository</p>
 </div>
 
 {#if error}
-	<div class="card" style="border-color: #f85149;">
-		<p style="color: #f85149;">{error}</p>
-	</div>
+	<Card class="border-red-500 bg-gray-800">
+		<p class="text-red-400">{error}</p>
+	</Card>
 {:else}
-	<div class="card">
-		<table>
-			<thead>
-				<tr>
-					<th class="sortable" onclick={() => toggleSort('number')}># <span class={arrowClass('number')}>{arrow('number')}</span></th>
-					<th class="sortable" onclick={() => toggleSort('title')}>Title <span class={arrowClass('title')}>{arrow('title')}</span></th>
-					<th>State</th>
-					<th>Labels</th>
-					<th class="sortable" onclick={() => toggleSort('priority')}>Priority <span class={arrowClass('priority')}>{arrow('priority')}</span></th>
-					<th class="sortable" onclick={() => toggleSort('category')}>Category <span class={arrowClass('category')}>{arrow('category')}</span></th>
-					<th class="sortable" onclick={() => toggleSort('age')}>Age <span class={arrowClass('age')}>{arrow('age')}</span></th>
-				</tr>
-			</thead>
-			<tbody>
+	<div class="overflow-x-auto">
+		<Table striped hoverable class="w-full">
+			<TableHead class="text-xs uppercase text-gray-400">
+				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[60px]" onclick={(e: MouseEvent) => handleSort('number', e)}>
+					# <span class={sortArrowClass(sortColumns, 'number')}>{sortArrow(sortColumns, 'number')}</span>{#if sortIndex(sortColumns, 'number') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'number')}</span>{/if}
+				</TableHeadCell>
+				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5" onclick={(e: MouseEvent) => handleSort('title', e)}>
+					Title <span class={sortArrowClass(sortColumns, 'title')}>{sortArrow(sortColumns, 'title')}</span>{#if sortIndex(sortColumns, 'title') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'title')}</span>{/if}
+				</TableHeadCell>
+				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[70px]" onclick={(e: MouseEvent) => handleSort('state', e)}>
+					State <span class={sortArrowClass(sortColumns, 'state')}>{sortArrow(sortColumns, 'state')}</span>{#if sortIndex(sortColumns, 'state') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'state')}</span>{/if}
+				</TableHeadCell>
+				<TableHeadCell class="px-2 py-1.5 w-[140px]">Labels</TableHeadCell>
+				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[80px]" onclick={(e: MouseEvent) => handleSort('priority', e)}>
+					Priority <span class={sortArrowClass(sortColumns, 'priority')}>{sortArrow(sortColumns, 'priority')}</span>{#if sortIndex(sortColumns, 'priority') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'priority')}</span>{/if}
+				</TableHeadCell>
+				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[90px]" onclick={(e: MouseEvent) => handleSort('category', e)}>
+					Category <span class={sortArrowClass(sortColumns, 'category')}>{sortArrow(sortColumns, 'category')}</span>{#if sortIndex(sortColumns, 'category') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'category')}</span>{/if}
+				</TableHeadCell>
+				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[60px]" onclick={(e: MouseEvent) => handleSort('age', e)}>
+					Age <span class={sortArrowClass(sortColumns, 'age')}>{sortArrow(sortColumns, 'age')}</span>{#if sortIndex(sortColumns, 'age') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'age')}</span>{/if}
+				</TableHeadCell>
+			</TableHead>
+			<TableBody>
+				<TableBodyRow class="border-b border-gray-700">
+					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.number} placeholder="#" class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
+					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.title} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
+					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.state} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
+					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.labels} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
+					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.priority} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
+					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.category} placeholder="filter..." class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
+					<TableBodyCell class="px-2 py-1"><input type="text" bind:value={filters.age} placeholder=">N" class="w-full rounded border border-gray-600 bg-gray-900 px-1 py-0.5 text-xs text-gray-300 focus:border-blue-500 focus:outline-none" /></TableBodyCell>
+				</TableBodyRow>
 				{#each sorted as issue}
-					<tr>
-						<td>{issue.number}</td>
-						<td>{issue.title}</td>
-						<td>
-							<span class="badge" class:badge-green={issue.state === 'open'} class:badge-red={issue.state === 'closed'}>
-								{issue.state}
-							</span>
-						</td>
-						<td>
+					<TableBodyRow>
+						<TableBodyCell class="px-2 py-1.5 mono">{issue.number}</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5 truncate">{issue.title}</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5">
+							<Badge color={issue.state === 'open' ? 'green' : 'red'}>{issue.state}</Badge>
+						</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5">
 							{#each issue.labels as label}
-								<span class="badge badge-blue">{label}</span>
+								<Badge color="blue" class="mr-1">{label}</Badge>
 							{/each}
-						</td>
-						<td>{issue.priority ?? '-'}</td>
-						<td>{issue.category ?? '-'}</td>
-						<td class="muted">{timeAgo(issue.created_at)}</td>
-					</tr>
+						</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5">{issue.priority ?? '-'}</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5">{issue.category ?? '-'}</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5 text-gray-500 mono">{timeAgo(issue.created_at)}</TableBodyCell>
+					</TableBodyRow>
 				{:else}
-					<tr>
-						<td colspan="7" class="empty">No issues found</td>
-					</tr>
+					<TableBodyRow>
+						<TableBodyCell colspan={7} class="text-center text-gray-600 py-8">No issues found</TableBodyCell>
+					</TableBodyRow>
 				{/each}
-			</tbody>
-		</table>
+			</TableBody>
+		</Table>
 	</div>
 {/if}
-
-<style>
-	.muted {
-		color: #8b949e;
-		font-size: 0.875rem;
-	}
-
-	.empty {
-		text-align: center;
-		color: #484f58;
-		padding: 2rem 0;
-	}
-</style>

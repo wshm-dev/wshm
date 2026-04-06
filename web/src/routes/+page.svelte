@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { selectedRepo } from '$lib/stores';
 	import { fetchStatus, type Status } from '$lib/api';
+	import { Card } from 'flowbite-svelte';
 
 	let status: Status | null = $state(null);
 	let error: string | null = $state(null);
@@ -26,68 +27,40 @@
 	<title>wshm - Dashboard</title>
 </svelte:head>
 
-<div class="page-header">
-	<h2>Dashboard</h2>
-	<p>Repository status overview</p>
+<div class="mb-6">
+	<h2 class="text-xl font-semibold text-gray-100 mb-1">Dashboard</h2>
+	<p class="text-sm text-gray-500">Repository status overview</p>
 </div>
 
 {#if error}
-	<div class="card" style="border-color: #f85149;">
-		<p style="color: #f85149;">{error}</p>
-		<p style="color: #8b949e; font-size: 0.875rem; margin-top: 0.5rem;">
-			Make sure the wshm server is running.
-		</p>
-	</div>
+	<Card class="border-red-500 bg-gray-800">
+		<p class="text-red-400">{error}</p>
+		<p class="mt-2 text-sm text-gray-500">Make sure the wshm server is running.</p>
+	</Card>
 {:else}
-	<div class="stats-grid">
-		<div class="card stat-card">
-			<div class="stat-label">Open Issues</div>
-			<div class="stat-value">{status?.open_issues ?? '--'}</div>
-		</div>
-		<div class="card stat-card">
-			<div class="stat-label">Open PRs</div>
-			<div class="stat-value">{status?.open_prs ?? '--'}</div>
-		</div>
-		<div class="card stat-card">
-			<div class="stat-label">Untriaged</div>
-			<div class="stat-value">{status?.untriaged ?? '--'}</div>
-		</div>
-		<div class="card stat-card">
-			<div class="stat-label">Conflicts</div>
-			<div class="stat-value">{status?.conflicts ?? '--'}</div>
-		</div>
+	<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+		<Card class="bg-gray-800 border-gray-700 text-center">
+			<div class="text-xs uppercase tracking-wider text-gray-500 mb-2">Open Issues</div>
+			<div class="text-3xl font-bold text-gray-100 mono">{status?.open_issues ?? '--'}</div>
+		</Card>
+		<Card class="bg-gray-800 border-gray-700 text-center">
+			<div class="text-xs uppercase tracking-wider text-gray-500 mb-2">Open PRs</div>
+			<div class="text-3xl font-bold text-gray-100 mono">{status?.open_prs ?? '--'}</div>
+		</Card>
+		<Card class="bg-gray-800 border-gray-700 text-center">
+			<div class="text-xs uppercase tracking-wider text-gray-500 mb-2">Untriaged</div>
+			<div class="text-3xl font-bold text-gray-100 mono">{status?.untriaged ?? '--'}</div>
+		</Card>
+		<Card class="bg-gray-800 border-gray-700 text-center">
+			<div class="text-xs uppercase tracking-wider text-gray-500 mb-2">Conflicts</div>
+			<div class="text-3xl font-bold text-gray-100 mono">{status?.conflicts ?? '--'}</div>
+		</Card>
 	</div>
 
-	<div class="card" style="margin-top: 1.5rem;">
-		<h2>Sync Status</h2>
-		<p style="color: #8b949e; font-size: 0.875rem;">
+	<Card class="mt-6 bg-gray-800 border-gray-700">
+		<h2 class="text-xl font-semibold text-gray-100 mb-2">Sync Status</h2>
+		<p class="text-sm text-gray-500">
 			Last sync: {status?.last_sync ?? 'Never'}
 		</p>
-	</div>
+	</Card>
 {/if}
-
-<style>
-	.stats-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-		gap: 1rem;
-	}
-
-	.stat-card {
-		text-align: center;
-	}
-
-	.stat-label {
-		color: #8b949e;
-		font-size: 0.8125rem;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		margin-bottom: 0.5rem;
-	}
-
-	.stat-value {
-		font-size: 2rem;
-		font-weight: 700;
-		color: #e6edf3;
-	}
-</style>

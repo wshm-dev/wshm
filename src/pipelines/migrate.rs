@@ -1,13 +1,10 @@
-use anyhow::{Context, Result};
-#[cfg(feature = "export-postgres")]
-use std::path::Path;
+use anyhow::Result;
 
 use crate::cli::MigrateArgs;
-use crate::config;
-use crate::db::Database;
 
 /// Sanitize a repo slug into a valid PostgreSQL schema name.
 /// e.g. "rtk-ai/rtk" -> "wshm_rtk_ai_rtk"
+#[cfg_attr(not(feature = "export-postgres"), allow(dead_code))]
 fn sanitize_schema_name(slug: &str) -> String {
     let sanitized: String = slug
         .chars()
@@ -17,6 +14,7 @@ fn sanitize_schema_name(slug: &str) -> String {
 }
 
 /// PostgreSQL DDL that mirrors the SQLite schema.
+#[cfg_attr(not(feature = "export-postgres"), allow(dead_code))]
 fn pg_create_tables_ddl(schema: &str) -> String {
     format!(
         r#"
@@ -119,10 +117,11 @@ CREATE INDEX IF NOT EXISTS {schema}_idx_triage_acted_at ON {schema}.triage_resul
 /// Migrate a single SQLite database to PostgreSQL.
 #[cfg(feature = "export-postgres")]
 async fn migrate_one(
-    db: &Database,
+    db: &crate::db::Database,
     slug: &str,
     pool: &sqlx::PgPool,
 ) -> Result<MigrationSummary> {
+    use anyhow::Context;
     use sqlx::Executor;
 
     let schema = sanitize_schema_name(slug);
@@ -451,6 +450,7 @@ async fn migrate_one(
     Ok(summary)
 }
 
+#[cfg(feature = "export-postgres")]
 struct MigrationSummary {
     slug: String,
     issues: usize,
@@ -463,6 +463,7 @@ struct MigrationSummary {
     webhook_events: usize,
 }
 
+#[cfg(feature = "export-postgres")]
 impl std::fmt::Display for MigrationSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -484,6 +485,10 @@ impl std::fmt::Display for MigrationSummary {
 /// Entry point for `wshm migrate`.
 #[cfg(feature = "export-postgres")]
 pub async fn run(args: &MigrateArgs, cli: &crate::cli::Cli) -> Result<()> {
+    use anyhow::Context;
+    use crate::config;
+    use crate::db::Database;
+
     if args.to != "postgresql" {
         anyhow::bail!("Unsupported target '{}'. Currently only 'postgresql' is supported.", args.to);
     }
@@ -554,7 +559,10 @@ pub async fn run(args: &MigrateArgs, _cli: &crate::cli::Cli) -> Result<()> {
 
 /// Migrate from a specific SQLite path (used by tests or scripts).
 #[cfg(feature = "export-postgres")]
-pub async fn migrate_from_path(db_path: &Path, slug: &str, pg_uri: &str) -> Result<()> {
+pub async fn migrate_from_path(db_path: &std::path::Path, slug: &str, pg_uri: &str) -> Result<()> {
+    use anyhow::Context;
+    use crate::db::Database;
+
     let db = Database::open_path(db_path)?;
 
     let pool = sqlx::postgres::PgPoolOptions::new()
