@@ -14,9 +14,11 @@ pub struct PostgresSink {
 }
 
 impl PostgresSink {
-    pub async fn new(config: &DatabaseExportConfig) -> Result<Self> {
+    pub fn new(config: &DatabaseExportConfig) -> Result<Self> {
         let uri = config.uri.as_deref().unwrap_or("postgres://localhost/wshm");
-        let pool = sqlx::PgPool::connect(uri).await?;
+        let pool = sqlx::pool::PoolOptions::new()
+            .max_connections(2)
+            .connect_lazy(uri)?;
         let table = config
             .index
             .clone()

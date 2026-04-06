@@ -90,7 +90,7 @@ google-cloud-storage = { version = "1", optional = true }
 # Optional: Export - Databases
 elasticsearch = { version = "9.1.0-alpha.1", optional = true }
 opensearch = { version = "2", optional = true }
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"], optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"], optional = true }
 mongodb = { version = "3", optional = true }
 mysql_async = { version = "0.36", optional = true }
 
