@@ -90,6 +90,24 @@ pub enum Command {
 
     /// Restore from a backup file
     Restore(RestoreArgs),
+
+    /// Manage anonymous telemetry consent (GDPR)
+    Telemetry(TelemetryArgs),
+}
+
+#[derive(clap::Args)]
+pub struct TelemetryArgs {
+    /// Accept anonymous telemetry
+    #[arg(long, conflicts_with_all = ["decline", "status"])]
+    pub accept: bool,
+
+    /// Decline anonymous telemetry
+    #[arg(long, conflicts_with_all = ["accept", "status"])]
+    pub decline: bool,
+
+    /// Show current telemetry consent state (default)
+    #[arg(long)]
+    pub status: bool,
 }
 
 #[derive(clap::Args)]

@@ -1,0 +1,6 @@
+[advisories]
+ignore = [
+    # rsa 0.9 Marvin timing side-channel — transitive via sqlx-mysql, no fix available yet
+    # Low exploit risk: only used if user configures MySQL export sink (Pro feature)
+    "RUSTSEC-2023-0071",
+]

@@ -285,6 +285,9 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
         Some(Command::Restore(args)) => {
             crate::pipelines::backup::restore(args)?;
         }
+        Some(Command::Telemetry(args)) => {
+            handle_telemetry_command(args)?;
+        }
         Some(Command::Tui) => match crate::Config::load(&cli) {
             Ok(config) => {
                 let db = crate::Database::open(&config)?;
@@ -313,5 +316,48 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Handle the `wshm telemetry` subcommand (GDPR consent management).
+fn handle_telemetry_command(args: &crate::cli::TelemetryArgs) -> Result<()> {
+    use crate::telemetry::{consent_state, set_consent, ConsentState};
+
+    if args.accept {
+        set_consent(true)?;
+        println!("Telemetry: ACCEPTED");
+        println!("Anonymous pings will be sent occasionally (see `wshm telemetry --status`).");
+        println!("Revoke anytime with `wshm telemetry --decline`.");
+    } else if args.decline {
+        set_consent(false)?;
+        println!("Telemetry: DECLINED");
+        println!("No telemetry will be sent.");
+    } else {
+        // Default: show status
+        let state = consent_state();
+        let status = match state {
+            ConsentState::Accepted => "ACCEPTED",
+            ConsentState::Declined => "DECLINED",
+            ConsentState::Unknown => "NOT SET (default: disabled)",
+        };
+        println!("Telemetry consent: {status}");
+        println!();
+        println!("Manage:");
+        println!("  wshm telemetry --accept    # enable anonymous telemetry");
+        println!("  wshm telemetry --decline   # disable (default)");
+        println!();
+        println!("Env override: WSHM_TELEMETRY_DISABLED=1");
+        println!();
+        println!("What we collect (ONLY if accepted):");
+        println!("  - Anonymous device hash (SHA256, not reversible)");
+        println!("  - wshm version, OS, architecture");
+        println!("  - Number of configured repos (count only)");
+        println!("  - Install method (brew/cargo/manual)");
+        println!();
+        println!("What we NEVER collect:");
+        println!("  - Repo names, URLs, or content");
+        println!("  - Issue or PR content");
+        println!("  - API tokens or credentials");
+    }
     Ok(())
 }
