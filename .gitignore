@@ -1,0 +1,16 @@
+/target
+Cargo.lock
+
+# Svelte/Vite build
+web/node_modules/
+web/.svelte-kit/
+web/build/
+
+# wshm runtime
+.wshm/
+*.log
+
+# OS
+.DS_Store
+*.swp
+*.swo

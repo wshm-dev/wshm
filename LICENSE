@@ -1,0 +1,118 @@
+Server Side Public License (SSPL) v1
+
+Copyright (c) 2025-2026 wshm-dev / Patrick Szymkowiak. All rights reserved.
+
+1. DEFINITIONS
+
+"This License" refers to Server Side Public License, Version 1.
+
+"The Program" refers to any copyrightable work licensed under this License.
+
+"Copyright Holder" refers to wshm-dev / Patrick Szymkowiak.
+
+"You" refers to any individual or legal entity exercising permissions
+granted by this License.
+
+"Service" means making the functionality of the Program or a modified
+version available to third parties as a service, including but not limited
+to enabling third parties to interact with the functionality of the Program
+or a modified version remotely through a computer network, offering a
+service the value of which entirely or primarily derives from the value of
+the Program, or offering a service that accomplishes for users the primary
+purpose of the Program or a modified version.
+
+2. GRANT OF LICENSE
+
+Subject to the terms and conditions of this License, the Copyright Holder
+hereby grants to You a worldwide, royalty-free, non-exclusive license to:
+
+  a) Use the Program for any purpose, including commercial use, without
+     restriction.
+
+  b) View, study, and audit the source code of the Program.
+
+  c) Modify the Program for your own internal use.
+
+  d) Distribute copies of the unmodified Program, provided that you include
+     a complete copy of this License and prominently display all copyright
+     notices.
+
+3. SERVICE RESTRICTION
+
+If you make the functionality of the Program or a modified version
+available to third parties as a Service, you must make the complete
+corresponding source code of your Service available to everyone, under
+this License, at no charge.
+
+"Complete corresponding source code" means all the source code needed to
+generate, install, and (for an executable work) run the object code and to
+modify the work, including scripts to control those activities, as well as
+the source code for all programs and services that the Service depends on
+to operate, including, without limitation, all server-side software,
+management software, user interfaces, application program interfaces,
+databases, data-export functionality, and configuration needed for anyone
+to be able to deploy and offer a substantially similar service.
+
+4. NO COMPETING SERVICE
+
+You may NOT use the Program, or any modified version of it, to offer a
+commercial service that competes with any product or service offered by the
+Copyright Holder, without prior written authorization from the Copyright
+Holder.
+
+5. CONTRIBUTIONS
+
+By submitting a contribution (pull request, patch, issue, or other
+modification) to this project, you:
+
+  a) Grant the Copyright Holder a perpetual, worldwide, royalty-free,
+     non-exclusive, irrevocable license to use, reproduce, modify,
+     distribute, and sublicense your contribution.
+
+  b) Represent that you have the legal right to make such contribution.
+
+6. TRADEMARKS
+
+This License does not grant permission to use the trade names, trademarks,
+service marks, or product names of the Copyright Holder, except as required
+for reasonable and customary use in describing the origin of the Program.
+
+7. PATENT GRANT
+
+Each contributor hereby grants to You a perpetual, worldwide, non-exclusive,
+no-charge, royalty-free, irrevocable patent license to make, use, sell,
+import, and otherwise transfer the Program, where such license applies only
+to those patent claims licensable by such contributor that are necessarily
+infringed by their contribution(s) alone or by combination of their
+contribution(s) with the Program.
+
+8. DISCLAIMER OF WARRANTY
+
+THE PROGRAM IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF
+OR IN CONNECTION WITH THE PROGRAM OR THE USE OR OTHER DEALINGS IN THE
+PROGRAM.
+
+9. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS PROGRAM, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+10. TERMINATION
+
+This License and the rights granted hereunder will terminate automatically
+if You fail to comply with any term herein. Upon termination, you must
+cease all use and destroy all copies of the Program in your possession.
+
+---
+
+For commercial licensing, enterprise agreements, or questions:
+contact@wshm.dev | https://wshm.dev

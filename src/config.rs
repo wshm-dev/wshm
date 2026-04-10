@@ -1,0 +1,1595 @@
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::cli::Cli;
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Config {
+    #[serde(default)]
+    pub github: GitHubConfig,
+
+    /// Git provider: "github" (default), "gitlab", "gitea", "azure-devops"
+    #[serde(default)]
+    pub git_provider: Option<String>,
+
+    /// Git platform URL for self-hosted (e.g. "https://gitlab.company.com")
+    #[serde(default)]
+    pub git_url: Option<String>,
+
+    #[serde(default)]
+    pub ai: AiConfig,
+
+    #[serde(default)]
+    pub triage: TriageConfig,
+
+    #[serde(default)]
+    pub pr: PrConfig,
+
+    #[serde(default)]
+    pub queue: QueueConfig,
+
+    #[serde(default)]
+    pub conflicts: ConflictConfig,
+
+    #[serde(default)]
+    pub sync: SyncConfig,
+
+    #[serde(default)]
+    pub fix: FixConfig,
+
+    #[serde(default)]
+    pub assign: AssignConfig,
+
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+
+    #[serde(default)]
+    pub branding: BrandingConfig,
+
+    #[serde(default)]
+    pub update: UpdateConfig,
+
+    #[serde(default)]
+    pub export: ExportConfig,
+
+    #[serde(default)]
+    pub notify: NotifyConfig,
+
+    #[serde(default)]
+    pub vault: Option<VaultConfig>,
+
+    #[serde(default)]
+    pub license: LicenseConfig,
+
+    #[serde(default)]
+    pub web: WebConfig,
+
+    /// Database backend: "sqlite" (default) or "postgresql".
+    #[serde(default)]
+    pub database: Option<DatabaseConfig>,
+
+    /// Labels that wshm must never apply (blacklist).
+    #[serde(default)]
+    pub labels_blacklist: Vec<String>,
+
+    /// Issue numbers to never triage or touch.
+    #[serde(default)]
+    pub issues_blacklist: Vec<u64>,
+
+    /// PR numbers to never analyze or touch.
+    #[serde(default)]
+    pub prs_blacklist: Vec<u64>,
+
+    /// Label definitions with conditions. Fed to AI for better label selection.
+    #[serde(default)]
+    pub labels: Vec<LabelDef>,
+
+    /// Resolved at runtime, not from config file
+    #[serde(skip)]
+    pub repo_owner: String,
+
+    /// Resolved at runtime, not from config file
+    #[serde(skip)]
+    pub repo_name: String,
+
+    /// Resolved at runtime
+    #[serde(skip)]
+    pub wshm_dir: PathBuf,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct GitHubConfig {}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AiConfig {
+    #[serde(default = "default_ai_provider")]
+    pub provider: String,
+
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+
+    /// Optional base URL override (for custom endpoints, proxies, etc.)
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_ai_provider(),
+            model: default_ai_model(),
+            base_url: None,
+        }
+    }
+}
+
+fn default_ai_provider() -> String {
+    "anthropic".to_string()
+}
+
+fn default_ai_model() -> String {
+    "claude-sonnet-4-20250514".to_string()
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TriageConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub auto_fix: bool,
+
+    #[serde(default = "default_confidence")]
+    pub auto_fix_confidence: f64,
+
+    /// Minimum confidence to apply labels and post comments (default: 0.5)
+    #[serde(default = "default_triage_confidence")]
+    pub triage_confidence: f64,
+
+    /// Override AI model for triage (uses [ai].model if not set)
+    #[serde(default)]
+    pub model: Option<String>,
+
+    #[serde(default = "default_label_bug")]
+    pub labels_bug: String,
+
+    #[serde(default = "default_label_feature")]
+    pub labels_feature: String,
+
+    #[serde(default = "default_label_duplicate")]
+    pub labels_duplicate: String,
+
+    #[serde(default = "default_label_wontfix")]
+    pub labels_wontfix: String,
+
+    #[serde(default = "default_label_needs_info")]
+    pub labels_needs_info: String,
+
+    /// Re-triage interval in hours (0 = disabled). Re-evaluates previously triaged issues.
+    #[serde(default)]
+    pub retriage_interval_hours: u32,
+
+    /// Override the AI system prompt for triage. If not set, uses the built-in default.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+}
+
+impl Default for TriageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_fix: false,
+            auto_fix_confidence: default_confidence(),
+            triage_confidence: default_triage_confidence(),
+            model: None,
+            labels_bug: default_label_bug(),
+            labels_feature: default_label_feature(),
+            labels_duplicate: default_label_duplicate(),
+            labels_wontfix: default_label_wontfix(),
+            labels_needs_info: default_label_needs_info(),
+            retriage_interval_hours: 0,
+            system_prompt: None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_confidence() -> f64 {
+    0.85
+}
+fn default_triage_confidence() -> f64 {
+    0.5
+}
+fn default_label_bug() -> String {
+    "bug".to_string()
+}
+fn default_label_feature() -> String {
+    "feature".to_string()
+}
+fn default_label_duplicate() -> String {
+    "duplicate".to_string()
+}
+fn default_label_wontfix() -> String {
+    "wontfix".to_string()
+}
+fn default_label_needs_info() -> String {
+    "needs-info".to_string()
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PrConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default = "default_true")]
+    pub auto_label: bool,
+
+    #[serde(default = "default_true")]
+    pub risk_labels: bool,
+
+    /// Override AI model for PR analysis (uses [ai].model if not set)
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Override the AI system prompt for PR analysis.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+}
+
+impl Default for PrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_label: true,
+            risk_labels: true,
+            model: None,
+            system_prompt: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct QueueConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default = "default_merge_threshold")]
+    pub merge_threshold: i32,
+
+    #[serde(default = "default_merge_strategy")]
+    pub strategy: String,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            merge_threshold: default_merge_threshold(),
+            strategy: default_merge_strategy(),
+        }
+    }
+}
+
+fn default_merge_threshold() -> i32 {
+    15
+}
+fn default_merge_strategy() -> String {
+    "rebase".to_string()
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ConflictConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub auto_resolve: bool,
+
+    #[serde(default = "default_confidence")]
+    pub auto_resolve_confidence: f64,
+}
+
+impl Default for ConflictConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_resolve: false,
+            auto_resolve_confidence: default_confidence(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SyncConfig {
+    #[serde(default = "default_sync_interval")]
+    pub interval_minutes: u32,
+
+    #[serde(default = "default_full_sync_interval")]
+    pub full_sync_interval_hours: u32,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            interval_minutes: default_sync_interval(),
+            full_sync_interval_hours: default_full_sync_interval(),
+        }
+    }
+}
+
+fn default_sync_interval() -> u32 {
+    5
+}
+
+// ── Label definitions ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LabelDef {
+    /// Label name (e.g. "bug", "priority:high")
+    pub name: String,
+
+    /// What this label means
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// When to apply this label
+    #[serde(default)]
+    pub when: Option<String>,
+
+    /// Label color (hex, e.g. "d73a4a")
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+impl Config {
+    /// Build a prompt fragment describing the available labels for the AI.
+    pub fn labels_prompt(&self) -> String {
+        if self.labels.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("\n## Available labels (use ONLY these):\n");
+        for label in &self.labels {
+            out.push_str(&format!("- **{}**", label.name));
+            if let Some(ref desc) = label.description {
+                out.push_str(&format!(": {desc}"));
+            }
+            if let Some(ref when) = label.when {
+                out.push_str(&format!(" — Apply when: {when}"));
+            }
+            out.push('\n');
+        }
+        out.push_str("\nDo NOT invent labels outside this list.\n");
+        out
+    }
+}
+
+// ── Assign config ─────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct AssignConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Assignees for issues (weighted random selection)
+    #[serde(default)]
+    pub issues: Vec<Assignee>,
+
+    /// Assignees for PRs (weighted random selection)
+    #[serde(default)]
+    pub prs: Vec<Assignee>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Assignee {
+    pub user: String,
+
+    /// Weight for selection (higher = more likely). Doesn't need to sum to 100.
+    #[serde(default = "default_weight")]
+    pub weight: u32,
+}
+
+fn default_weight() -> u32 {
+    1
+}
+
+impl AssignConfig {
+    /// Pick an assignee from a list using weighted random selection.
+    pub fn pick(assignees: &[Assignee]) -> Option<&str> {
+        if assignees.is_empty() {
+            return None;
+        }
+        let total: u32 = assignees.iter().map(|a| a.weight).sum();
+        if total == 0 {
+            return None;
+        }
+        let mut roll = rand_u32() % total;
+        for a in assignees {
+            if roll < a.weight {
+                return Some(&a.user);
+            }
+            roll -= a.weight;
+        }
+        // Fallback (shouldn't happen)
+        Some(&assignees[0].user)
+    }
+}
+
+/// Simple random u32 without pulling in the `rand` crate.
+/// Uses a counter to avoid identical results on rapid consecutive calls.
+fn rand_u32() -> u32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut hasher = DefaultHasher::new();
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .hash(&mut hasher);
+    std::thread::current().id().hash(&mut hasher);
+    COUNTER.fetch_add(1, Ordering::Relaxed).hash(&mut hasher);
+    hasher.finish() as u32
+}
+fn default_full_sync_interval() -> u32 {
+    24
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct FixConfig {
+    /// AI tool to use: claude-code, codex (default: claude-code)
+    #[serde(default = "default_fix_tool")]
+    pub tool: String,
+
+    /// Docker image for sandboxed execution
+    #[serde(default = "default_fix_image")]
+    pub docker_image: String,
+
+    /// Extra env var names to forward into Docker containers
+    #[serde(default)]
+    pub secret_env: Vec<String>,
+
+    /// Only auto-fix issues from trusted authors (collaborators with write+)
+    #[serde(default = "default_true")]
+    pub trusted_authors_only: bool,
+
+    /// Scan generated diff for suspicious patterns before committing
+    #[serde(default = "default_true")]
+    pub scan_diff: bool,
+
+    /// Create PRs as draft (require manual review before merge)
+    #[serde(default = "default_true")]
+    pub draft_pr: bool,
+
+    /// Base branch to create fix branches from (default: "main")
+    #[serde(default = "default_base_branch")]
+    pub base_branch: String,
+
+    /// Override AI model for auto-fix (uses [ai].model if not set)
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Explicit whitelist of GitHub usernames allowed to trigger auto-fix.
+    /// If non-empty, only these users can trigger auto-fix (overrides trusted_authors_only).
+    /// If empty, falls back to trusted_authors_only (collaborator check via API).
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+
+    /// Command to run tests after code generation (e.g. "cargo test", "bun test").
+    /// If set and tests fail, the fix is aborted and a comment is posted on the issue.
+    #[serde(default)]
+    pub test_command: Option<String>,
+
+    /// Maximum retries: if tests fail, re-prompt the AI with the error output (default: 0)
+    #[serde(default)]
+    pub test_retries: u32,
+
+    /// Override the AI system prompt for auto-fix.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+}
+
+impl Default for FixConfig {
+    fn default() -> Self {
+        Self {
+            tool: default_fix_tool(),
+            docker_image: default_fix_image(),
+            secret_env: Vec::new(),
+            trusted_authors_only: true,
+            scan_diff: true,
+            draft_pr: true,
+            base_branch: default_base_branch(),
+            model: None,
+            allowed_users: Vec::new(),
+            test_command: None,
+            test_retries: 0,
+            system_prompt: None,
+        }
+    }
+}
+
+fn default_base_branch() -> String {
+    "main".to_string()
+}
+
+fn default_fix_tool() -> String {
+    "claude-code".to_string()
+}
+fn default_fix_image() -> String {
+    "wshm-sandbox:latest".to_string()
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DaemonConfig {
+    #[serde(default = "default_daemon_bind")]
+    pub bind: String,
+
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+
+    #[serde(default)]
+    pub apply: bool,
+
+    #[serde(default)]
+    pub icm_enabled: bool,
+
+    #[serde(default = "default_icm_prefix")]
+    pub icm_topic_prefix: String,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_daemon_bind(),
+            webhook_secret: None,
+            apply: false,
+            icm_enabled: false,
+            icm_topic_prefix: default_icm_prefix(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WebConfig {
+    #[serde(default = "default_web_enabled")]
+    pub enabled: bool,
+
+    #[serde(default = "default_web_username")]
+    pub username: String,
+
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+fn default_web_enabled() -> bool {
+    false
+}
+fn default_web_username() -> String {
+    "admin".to_string()
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_web_enabled(),
+            username: default_web_username(),
+            password: None,
+        }
+    }
+}
+
+impl WebConfig {
+    /// Resolve the effective password: config.toml > .wshm/credentials > auto-generate.
+    /// If auto-generated, writes to .wshm/credentials and prints to stdout.
+    pub fn resolve_password(&mut self, wshm_dir: &std::path::Path) {
+        if self.password.is_some() {
+            return;
+        }
+
+        let creds_path = wshm_dir.join("credentials");
+
+        // Try reading WEB_PASSWORD from credentials file
+        if let Ok(content) = std::fs::read_to_string(&creds_path) {
+            for line in content.lines() {
+                let line = line.trim();
+                if let Some(val) = line.strip_prefix("WEB_PASSWORD=") {
+                    let val = val.trim();
+                    if !val.is_empty() {
+                        self.password = Some(val.to_string());
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Auto-generate
+        let mut buf = [0u8; 16];
+        if getrandom::getrandom(&mut buf).is_err() {
+            return;
+        }
+        let generated: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+
+        // Append to credentials file
+        let entry = format!("WEB_PASSWORD={generated}\n");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&creds_path)
+        {
+            let _ = std::io::Write::write_all(&mut f, entry.as_bytes());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+
+        eprintln!("Web UI credentials (auto-generated):");
+        eprintln!("  Username: {}", self.username);
+        eprintln!("  Password: {generated}");
+        eprintln!("  Stored in: {}", creds_path.display());
+        eprintln!();
+
+        self.password = Some(generated);
+    }
+}
+
+// ── Database backend config ──────────────────────────────────
+
+/// Configuration for the database backend.
+///
+/// SQLite is the default (zero-config, single-file). PostgreSQL can be used
+/// as an alternative for multi-repo setups or team environments.
+///
+/// ```toml
+/// [database]
+/// provider = "postgresql"          # "sqlite" (default) | "postgresql"
+/// uri = "postgres://user:pass@host/db"
+/// ```
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DatabaseConfig {
+    /// Database provider: "sqlite" (default) or "postgresql".
+    #[serde(default = "default_db_provider")]
+    pub provider: String,
+
+    /// Connection URI for PostgreSQL (e.g. "postgres://user:pass@host/db").
+    /// Ignored for SQLite. Can also be set via DATABASE_URL env var.
+    #[serde(default)]
+    pub uri: Option<String>,
+}
+
+fn default_db_provider() -> String {
+    "sqlite".to_string()
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_db_provider(),
+            uri: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BrandingConfig {
+    /// Bot display name in comments (default: "wshm")
+    #[serde(default = "default_bot_name")]
+    pub name: String,
+
+    /// Bot URL linked in footers (default: "https://github.com/wshm-dev/wshm")
+    #[serde(default = "default_bot_url")]
+    pub url: String,
+
+    /// Avatar/logo URL shown in comment headers (optional, Markdown image)
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+
+    /// Tagline shown in comment headers (optional)
+    #[serde(default)]
+    pub tagline: Option<String>,
+
+    /// Slash command prefix in issue comments (default: "/wshm")
+    #[serde(default = "default_command_prefix")]
+    pub command_prefix: String,
+
+    /// Footer template. Placeholders: {name}, {url}
+    /// Default: "*{action} by [{name}]({url})*"
+    #[serde(default)]
+    pub footer_template: Option<String>,
+
+    /// Custom triage comment template (markdown/HTML).
+    /// Placeholders: {category}, {priority}, {confidence}, {summary},
+    /// {category_emoji}, {priority_emoji}, {relevant_files}, {duplicate_of},
+    /// {header}, {footer}
+    #[serde(default)]
+    pub triage_template: Option<String>,
+
+    /// Custom message shown when an issue is classified as a simple fix.
+    /// Set to "" to hide the message entirely.
+    #[serde(default)]
+    pub simple_fix_message: Option<String>,
+
+    /// Custom PR analysis comment template (markdown/HTML).
+    /// Placeholders: {type}, {risk}, {summary}, {type_emoji}, {risk_emoji},
+    /// {tests_present}, {breaking_change}, {docs_updated}, {linked_issues},
+    /// {header}, {footer}
+    #[serde(default)]
+    pub pr_template: Option<String>,
+}
+
+impl Default for BrandingConfig {
+    fn default() -> Self {
+        Self {
+            name: default_bot_name(),
+            url: default_bot_url(),
+            avatar_url: Some("https://raw.githubusercontent.com/wshm-dev/wshm/main/assets/wizard-icon.png".to_string()),
+            tagline: None,
+            command_prefix: default_command_prefix(),
+            footer_template: None,
+            simple_fix_message: None,
+            triage_template: None,
+            pr_template: None,
+        }
+    }
+}
+
+impl BrandingConfig {
+    /// Hidden HTML marker for idempotent comment updates.
+    pub fn comment_marker(&self) -> String {
+        format!("<!-- {} -->", self.name)
+    }
+
+    /// Build the footer line for a comment. `action` is e.g. "Triaged", "Analyzed", "Reviewed".
+    pub fn footer(&self, action: &str) -> String {
+        let tmpl = self.footer_template.as_deref()
+            .unwrap_or("*{action} automatically by [{name}]({url})* · This is an automated analysis, not a human review.");
+
+        let result = tmpl
+            .replace("{action}", action)
+            .replace("{name}", &self.name)
+            .replace("{url}", &self.url);
+
+        format!("---\n{}\n{}", result, self.comment_marker())
+    }
+
+    /// Build a comment header — always shows a clear bot banner.
+    pub fn header(&self) -> String {
+        let icon = if let Some(ref avatar) = self.avatar_url {
+            // Only allow HTTPS URLs to prevent javascript: or data: URI injection
+            if avatar.starts_with("https://") && !avatar.contains('"') && !avatar.contains('>') {
+                format!("<img src=\"{avatar}\" width=\"48\" height=\"48\">")
+            } else {
+                tracing::warn!("Ignoring invalid avatar_url (must be HTTPS, no special chars)");
+                "[w]".to_string()
+            }
+        } else {
+            "[w]".to_string()
+        };
+
+        let tagline = self.tagline.as_deref().unwrap_or("Automated triage by AI");
+
+        format!("> {icon} **{name}** · {tagline}\n\n", name = self.name,)
+    }
+}
+
+fn default_bot_name() -> String {
+    "wshm".to_string()
+}
+fn default_bot_url() -> String {
+    "https://github.com/wshm-dev/wshm".to_string()
+}
+fn default_command_prefix() -> String {
+    "/wshm".to_string()
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct UpdateConfig {
+    /// Enable automatic update checks in daemon mode (default: false)
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Check interval in hours (default: 6)
+    #[serde(default = "default_update_interval")]
+    pub interval_hours: u32,
+
+    /// Auto-apply updates without confirmation (default: false, daemon sets true)
+    #[serde(default)]
+    pub auto_apply: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_hours: default_update_interval(),
+            auto_apply: false,
+        }
+    }
+}
+
+fn default_update_interval() -> u32 {
+    6
+}
+
+// ── Export config ──────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct ExportConfig {
+    #[serde(default)]
+    pub storage: Option<StorageConfig>,
+
+    #[serde(default)]
+    pub database: Option<DatabaseExportConfig>,
+
+    #[serde(default)]
+    pub webhooks: Vec<WebhookConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct StorageConfig {
+    pub provider: String,
+
+    #[serde(default)]
+    pub bucket: Option<String>,
+
+    #[serde(default)]
+    pub prefix: Option<String>,
+
+    #[serde(default)]
+    pub region: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DatabaseExportConfig {
+    pub provider: String,
+
+    #[serde(default)]
+    pub uri: Option<String>,
+
+    #[serde(default)]
+    pub index: Option<String>,
+
+    #[serde(default)]
+    pub database: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WebhookConfig {
+    pub url: String,
+
+    #[serde(default = "default_webhook_events")]
+    pub events: Vec<String>,
+
+    #[serde(default)]
+    pub secret: Option<String>,
+}
+
+fn default_webhook_events() -> Vec<String> {
+    vec!["*".to_string()]
+}
+
+// ── Notify config ─────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct NotifyConfig {
+    /// Send notification at the end of `wshm run`
+    #[serde(default)]
+    pub on_run: bool,
+
+    /// Discord webhook targets
+    #[serde(default)]
+    pub discord: Vec<DiscordNotifyConfig>,
+
+    /// Slack webhook targets
+    #[serde(default)]
+    pub slack: Vec<SlackNotifyConfig>,
+
+    /// Microsoft Teams webhook targets
+    #[serde(default)]
+    pub teams: Vec<TeamsNotifyConfig>,
+
+    /// Generic webhook targets (raw JSON POST)
+    #[serde(default)]
+    pub webhooks: Vec<GenericNotifyWebhook>,
+}
+
+impl NotifyConfig {
+    pub fn has_targets(&self) -> bool {
+        !self.discord.is_empty()
+            || !self.slack.is_empty()
+            || !self.teams.is_empty()
+            || !self.webhooks.is_empty()
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DiscordNotifyConfig {
+    pub url: String,
+
+    /// Optional username override for the bot
+    #[serde(default)]
+    pub username: Option<String>,
+
+    /// Optional avatar URL override
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SlackNotifyConfig {
+    pub url: String,
+
+    /// Optional channel override (webhook default is used if absent)
+    #[serde(default)]
+    pub channel: Option<String>,
+
+    /// Optional username override
+    #[serde(default)]
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TeamsNotifyConfig {
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GenericNotifyWebhook {
+    pub url: String,
+
+    /// Optional HMAC-SHA256 secret
+    #[serde(default)]
+    pub secret: Option<String>,
+}
+
+// ── License config ────────────────────────────────────────────
+
+/// License key resolution configuration.
+///
+/// Resolution order:
+/// 1. Vault placeholder in `key` field (e.g. `vault(secret/wshm/license)`)
+/// 2. Environment variable `WSHM_LICENSE_KEY`
+/// 3. File path in `path` field (JWT file)
+/// 4. Fallback: `~/.wshm/license.jwt`
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct LicenseConfig {
+    /// License key or vault placeholder.
+    /// Examples:
+    ///   - `vault(secret/wshm/license-key)` (HashiCorp)
+    ///   - `vault(wshm/license-key)` (AWS Secrets Manager)
+    ///   - `vault(wshm-keyvault/license-key)` (Azure Key Vault)
+    ///   - `vault(projects/my-proj/secrets/wshm-license)` (GCP)
+    #[serde(default)]
+    pub key: Option<String>,
+
+    /// Path to a cached JWT license file.
+    /// Default: `~/.wshm/license.jwt`
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+// ── Vault config ──────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct VaultConfig {
+    pub provider: String,
+
+    #[serde(default)]
+    pub address: Option<String>,
+
+    #[serde(default)]
+    pub mount: Option<String>,
+}
+
+fn default_daemon_bind() -> String {
+    "127.0.0.1:3000".to_string()
+}
+
+fn default_icm_prefix() -> String {
+    "wshm".to_string()
+}
+
+// ── Global multi-repo config ──────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GlobalConfig {
+    #[serde(default)]
+    pub daemon: GlobalDaemonConfig,
+
+    #[serde(default)]
+    pub ai: Option<AiConfig>,
+
+    #[serde(default)]
+    pub update: UpdateConfig,
+
+    pub repos: Vec<RepoEntry>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct GlobalDaemonConfig {
+    #[serde(default = "default_daemon_bind")]
+    pub bind: String,
+
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+
+    #[serde(default)]
+    pub apply: bool,
+
+    #[serde(default)]
+    pub poll: bool,
+
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval: u64,
+}
+
+fn default_poll_interval() -> u64 {
+    30
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RepoEntry {
+    /// Repository slug: "owner/repo"
+    pub slug: String,
+
+    /// Absolute path to the local checkout
+    pub path: PathBuf,
+
+    /// Per-repo apply override (inherits from [daemon].apply if not set)
+    #[serde(default)]
+    pub apply: Option<bool>,
+
+    /// Enable/disable this repo (default: true)
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+
+    /// Per-repo webhook secret override
+    #[serde(default)]
+    pub secret: Option<String>,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+impl GlobalConfig {
+    pub fn load(path: &Path) -> Result<Self> {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read global config: {}", path.display()))?;
+        let config: Self = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse global config: {}", path.display()))?;
+        if config.repos.is_empty() {
+            anyhow::bail!("Global config has no [[repos]] entries");
+        }
+        Ok(config)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let content = toml::to_string_pretty(self)
+            .context("Failed to serialize global config")?;
+        fs::write(path, content)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Default global config path: ~/.wshm/global.toml
+    pub fn default_path() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".wshm")
+            .join("global.toml")
+    }
+}
+
+impl Config {
+    /// Load a Config for a specific repo from its working directory.
+    /// Used by multi-repo daemon — slug is provided, no git detection needed.
+    pub fn load_for_repo(repo_path: &Path, slug: &str) -> Result<Self> {
+        let wshm_dir = repo_path.join(".wshm");
+        let config_path = wshm_dir.join("config.toml");
+
+        let mut config: Config = if config_path.exists() {
+            let content = fs::read_to_string(&config_path)
+                .with_context(|| format!("Failed to read {}", config_path.display()))?;
+            toml::from_str(&content)
+                .with_context(|| format!("Failed to parse {}", config_path.display()))?
+        } else {
+            Config::default()
+        };
+
+        config.wshm_dir = wshm_dir;
+
+        let parts: Vec<&str> = slug.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            anyhow::bail!("Invalid repo slug: {slug} (expected owner/repo)");
+        }
+        config.repo_owner = parts[0].to_string();
+        config.repo_name = parts[1].to_string();
+
+        Ok(config)
+    }
+
+    pub fn fix_secret_env_vars(&self) -> Vec<String> {
+        self.fix.secret_env.clone()
+    }
+
+    /// Filter labels: remove blacklisted ones. If [[labels]] allowlist is configured,
+    /// only allow labels that match a defined name.
+    pub fn filter_labels(&self, labels: Vec<String>) -> Vec<String> {
+        let mut filtered: Vec<String> = labels
+            .into_iter()
+            .filter(|l| {
+                let normalized = l.replace('_', " ").to_lowercase();
+                !self.labels_blacklist.iter().any(|b| {
+                    let b_normalized = b.replace('_', " ").to_lowercase();
+                    b_normalized == normalized
+                })
+            })
+            .collect();
+
+        // If label definitions exist, enforce allowlist
+        if !self.labels.is_empty() {
+            filtered.retain(|l| {
+                self.labels.iter().any(|def| def.name.eq_ignore_ascii_case(l))
+            });
+        }
+
+        filtered
+    }
+
+    /// Resolve the AI model for a given pipeline.
+    /// Pipeline-specific model overrides [ai].model.
+    pub fn model_for(&self, pipeline: &str) -> &str {
+        let override_model = match pipeline {
+            "triage" => self.triage.model.as_deref(),
+            "pr" => self.pr.model.as_deref(),
+            "fix" => self.fix.model.as_deref(),
+            _ => None,
+        };
+        override_model.unwrap_or(&self.ai.model)
+    }
+
+    pub fn load(cli: &Cli) -> Result<Self> {
+        let wshm_dir = PathBuf::from(".wshm");
+        let config_path = wshm_dir.join("config.toml");
+
+        let mut config: Config = if config_path.exists() {
+            let content =
+                fs::read_to_string(&config_path).context("Failed to read .wshm/config.toml")?;
+            toml::from_str(&content).context("Failed to parse .wshm/config.toml")?
+        } else {
+            Config::default()
+        };
+
+        config.wshm_dir = wshm_dir;
+
+        // Resolve repo owner/name from CLI flag or git remote
+        if let Some(ref repo) = cli.repo {
+            let parts: Vec<&str> = repo.splitn(2, '/').collect();
+            if parts.len() != 2 {
+                anyhow::bail!("--repo must be in format owner/repo");
+            }
+            config.repo_owner = parts[0].to_string();
+            config.repo_name = parts[1].to_string();
+        } else {
+            // Try to detect from git remote first
+            match detect_repo() {
+                Ok((owner, name)) => {
+                    config.repo_owner = owner;
+                    config.repo_name = name;
+                }
+                Err(_) => {
+                    // Not in a git repo and no --repo flag: try global.toml fallback
+                    let global_path = GlobalConfig::default_path();
+                    if global_path.exists() {
+                        let global = GlobalConfig::load(&global_path)
+                            .context("Failed to load ~/.wshm/global.toml")?;
+
+                        let enabled_repos: Vec<_> = global.repos.iter()
+                            .filter(|r| r.enabled)
+                            .collect();
+
+                        if enabled_repos.len() == 1 {
+                            // Exactly one repo: use it automatically
+                            let repo = enabled_repos[0];
+                            let parts: Vec<&str> = repo.slug.splitn(2, '/').collect();
+                            if parts.len() != 2 {
+                                anyhow::bail!("Invalid repo slug in global.toml: {} (expected owner/repo)", repo.slug);
+                            }
+                            config.repo_owner = parts[0].to_string();
+                            config.repo_name = parts[1].to_string();
+                        } else if enabled_repos.is_empty() {
+                            anyhow::bail!("Not inside a git repository and no enabled repos in ~/.wshm/global.toml. Use --repo owner/repo");
+                        } else {
+                            // Multiple repos: print list and instructions
+                            eprintln!("Not inside a git repository. Multiple repos found in ~/.wshm/global.toml:");
+                            eprintln!();
+                            for repo in &enabled_repos {
+                                eprintln!("  {}", repo.slug);
+                            }
+                            eprintln!();
+                            eprintln!("Use --repo <slug> to specify which one.");
+                            anyhow::bail!("Ambiguous repo selection");
+                        }
+                    } else {
+                        // No global.toml: show original error
+                        anyhow::bail!("Not inside a git repository. Use --repo owner/repo");
+                    }
+                }
+            }
+        }
+
+        Ok(config)
+    }
+
+    pub fn init_template() -> Result<()> {
+        let wshm_dir = Path::new(".wshm");
+        fs::create_dir_all(wshm_dir)?;
+
+        let config_path = wshm_dir.join("config.toml");
+        if config_path.exists() {
+            anyhow::bail!(".wshm/config.toml already exists");
+        }
+
+        let template = r#"[github]
+# Token from env var GITHUB_TOKEN or WSHM_TOKEN, or `gh auth token` (never stored in config)
+
+[ai]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+# base_url = "https://custom-endpoint.example.com/v1/chat/completions"
+#
+# Supported providers:
+#   anthropic  → ANTHROPIC_API_KEY
+#   openai     → OPENAI_API_KEY
+#   google     → GOOGLE_API_KEY or GEMINI_API_KEY
+#   mistral    → MISTRAL_API_KEY
+#   groq       → GROQ_API_KEY
+#   deepseek   → DEEPSEEK_API_KEY
+#   xai        → XAI_API_KEY
+#   together   → TOGETHER_API_KEY
+#   fireworks  → FIREWORKS_API_KEY
+#   perplexity → PERPLEXITY_API_KEY
+#   cohere     → COHERE_API_KEY or CO_API_KEY
+#   openrouter → OPENROUTER_API_KEY
+#   ollama     → no key needed (local)
+#   azure      → AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT
+#   custom     → WSHM_AI_API_KEY + base_url
+
+[triage]
+enabled = true
+auto_fix = false
+auto_fix_confidence = 0.85
+# model = "claude-haiku-4-5-20251001"   # override: small model for triage
+labels_bug = "bug"
+labels_feature = "feature"
+labels_duplicate = "duplicate"
+labels_wontfix = "wontfix"
+labels_needs_info = "needs-info"
+# retriage_interval_hours = 24   # re-evaluate triaged issues every 24h (0 = disabled)
+
+[pr]
+enabled = true
+auto_label = true
+risk_labels = true
+# model = "claude-sonnet-4-20250514"    # override: default model for PR analysis
+
+[queue]
+enabled = true
+merge_threshold = 15
+strategy = "rebase"
+
+[conflicts]
+enabled = true
+auto_resolve = false
+auto_resolve_confidence = 0.85
+
+[sync]
+interval_minutes = 5
+full_sync_interval_hours = 24
+
+[fix]
+# model = "claude-sonnet-4-20250514"    # override: capable model for code generation
+# trusted_authors_only = true   # Only auto-fix issues from repo collaborators
+# allowed_users = ["alice", "bob"]  # Explicit whitelist (overrides trusted_authors_only)
+# scan_diff = true               # Scan generated code for suspicious patterns
+# draft_pr = true                # Create PRs as draft (require human review)
+# base_branch = "main"           # Base branch for fix PRs (e.g. "develop")
+
+# Labels that wshm must never apply (case-insensitive)
+# labels_blacklist = ["do-not-touch", "manual-only", "security"]
+
+# Issues/PRs that wshm must never touch
+# issues_blacklist = [755, 123]
+# prs_blacklist = [42]
+
+# Label definitions (fed to AI for better label selection)
+# [[labels]]
+# name = "bug"
+# description = "Something is broken or produces wrong results"
+# when = "Confirmed broken behavior with clear repro steps"
+#
+# [[labels]]
+# name = "enhancement"
+# description = "New feature or improvement request"
+# when = "Request for new capability, not a fix"
+#
+# [[labels]]
+# name = "priority:critical"
+# description = "Blocks users, data loss, security vulnerability"
+# when = "Production down, data corruption, or security exploit"
+#
+# [[labels]]
+# name = "priority:high"
+# description = "Major impact, needs attention soon"
+# when = "Core feature broken, no workaround"
+#
+# [[labels]]
+# name = "priority:medium"
+# description = "Moderate impact, can wait"
+# when = "Feature degraded but workaround exists"
+#
+# [[labels]]
+# name = "priority:low"
+# description = "Minor or cosmetic"
+# when = "Edge case or low-impact improvement"
+
+# [assign]
+# enabled = true
+#
+# [[assign.issues]]
+# user = "alice"
+# weight = 70
+#
+# [[assign.issues]]
+# user = "bob"
+# weight = 30
+#
+# [[assign.prs]]
+# user = "alice"
+# weight = 50
+#
+# [[assign.prs]]
+# user = "bob"
+# weight = 50
+
+# [update]
+# enabled = false                        # Enable automatic update checks in daemon mode
+# interval_hours = 6                     # Check interval
+# auto_apply = false                     # Auto-install updates (daemon uses true)
+
+# [branding]
+# name = "wshm"                       # Bot display name in comments
+# url = "https://github.com/wshm-dev/wshm"        # Link in comment footers
+# avatar_url = "https://example.com/logo.png"   # Optional avatar in headers
+# tagline = "AI-powered repo assistant"          # Optional tagline
+# command_prefix = "/wshm"             # Slash command prefix
+# footer_template = "*{action} by [{name}]({url})*"  # Custom footer
+#
+# Custom comment templates (markdown/HTML). Omit to use defaults.
+# Triage placeholders: {header}, {footer}, {category}, {priority}, {confidence},
+#   {summary}, {category_emoji}, {priority_emoji}, {relevant_files}, {duplicate_of}
+# triage_template = """
+# {header}
+# ## Triage Result
+# **{category_emoji} {category}** — {summary}
+# {footer}
+# """
+#
+# PR analysis placeholders: {header}, {footer}, {type}, {risk}, {summary},
+#   {type_emoji}, {risk_emoji}, {tests_present}, {breaking_change},
+#   {docs_updated}, {linked_issues}
+# pr_template = """
+# {header}
+# ## PR Review
+# **{type_emoji} {type}** | Risk: {risk_emoji} {risk}
+# {summary}
+# {footer}
+# """
+
+# [web]
+# enabled = true                        # Enable web dashboard on daemon port
+# username = "admin"                    # Basic auth username
+# password = "changeme"                # Basic auth password (or auto-generated in .wshm/credentials)
+
+# [license]
+# Resolution order: vault → env WSHM_LICENSE_KEY → path → ~/.wshm/license.jwt
+#
+# key = "vault(secret/wshm/license-key)"               # HashiCorp Vault
+# key = "vault(wshm/license-key)"                       # AWS Secrets Manager
+# key = "vault(wshm-keyvault/license-key)"              # Azure Key Vault
+# key = "vault(projects/my-proj/secrets/wshm-license)"  # GCP Secret Manager
+#
+# path = "~/.wshm/license.jwt"         # Explicit path to cached JWT
+#
+# Or use env var: WSHM_LICENSE_KEY=WSHM-XXXX-XXXX-XXXX
+
+# [vault]
+# provider = "hashicorp"               # "hashicorp" | "aws" | "azure" | "gcp"
+# address = "https://vault.example.com"
+# mount = "secret"
+# Auth from env: VAULT_TOKEN, VAULT_ROLE_ID, etc.
+
+# [notify]
+# on_run = true                         # Send summary after `wshm run`
+#
+# [[notify.discord]]
+# url = "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN"
+# username = "wshm"
+# avatar_url = "https://github.com/wshm-dev.png"
+#
+# [[notify.slack]]
+# url = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+# channel = "repo-updates"
+# username = "wshm"
+#
+# [[notify.teams]]
+# url = "https://outlook.office.com/webhook/YOUR/WEBHOOK/URL"
+#
+# [[notify.webhooks]]
+# url = "https://your-server.com/wshm-notify"
+# secret = "hmac-secret"
+
+# [export.storage]
+# provider = "s3"                      # "s3" | "azure" | "gcs"
+# bucket = "wshm-logs"
+# prefix = "repos/{repo}/"
+# region = "eu-west-1"
+
+# [export.database]
+# provider = "elasticsearch"           # "elasticsearch" | "opensearch" | "postgresql" | "mongodb" | "mysql" | "mariadb"
+# uri = "http://localhost:9200"        # or vault(secret/wshm/elastic-uri)
+# index = "wshm-events"
+
+# [[export.webhooks]]
+# url = "https://hooks.example.com/wshm"
+# events = ["FixApplied", "PrMerged"]
+# secret = "your-hmac-secret"          # or vault(secret/wshm/webhook-hmac)
+
+# [[export.webhooks]]
+# url = "https://slack.example.com/webhook"
+# events = ["*"]
+"#;
+
+        fs::write(&config_path, template)?;
+        Ok(())
+    }
+
+    pub fn repo_slug(&self) -> String {
+        format!("{}/{}", self.repo_owner, self.repo_name)
+    }
+
+    pub fn github_token(&self) -> Result<String> {
+        let token = std::env::var("WSHM_TOKEN")
+            .or_else(|_| std::env::var("GITHUB_TOKEN"))
+            .or_else(|_| gh_auth_token())
+            .context("No GitHub token found. Set GITHUB_TOKEN, WSHM_TOKEN, or authenticate with `gh auth login`")?;
+        if token.trim().is_empty() {
+            anyhow::bail!("GitHub token is empty. Check your GITHUB_TOKEN or WSHM_TOKEN environment variable.");
+        }
+        Ok(token)
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            github: GitHubConfig::default(),
+            git_provider: None,
+            git_url: None,
+            ai: AiConfig::default(),
+            triage: TriageConfig::default(),
+            pr: PrConfig::default(),
+            queue: QueueConfig::default(),
+            conflicts: ConflictConfig::default(),
+            sync: SyncConfig::default(),
+            fix: FixConfig::default(),
+            assign: AssignConfig::default(),
+            daemon: DaemonConfig::default(),
+            branding: BrandingConfig::default(),
+            update: UpdateConfig::default(),
+            export: ExportConfig::default(),
+            notify: NotifyConfig::default(),
+            vault: None,
+            license: LicenseConfig::default(),
+            web: WebConfig::default(),
+            database: None,
+            labels_blacklist: Vec::new(),
+            issues_blacklist: Vec::new(),
+            prs_blacklist: Vec::new(),
+            labels: Vec::new(),
+            repo_owner: String::new(),
+            repo_name: String::new(),
+            wshm_dir: PathBuf::from(".wshm"),
+        }
+    }
+}
+
+fn gh_auth_token() -> Result<String, std::env::VarError> {
+    std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if token.is_empty() {
+                    None
+                } else {
+                    Some(token)
+                }
+            } else {
+                None
+            }
+        })
+        .ok_or(std::env::VarError::NotPresent)
+}
+
+fn detect_repo() -> Result<(String, String)> {
+    let repo = git2::Repository::open_from_env()
+        .context("Not inside a git repository. Use --repo owner/repo")?;
+
+    let remote = repo
+        .find_remote("origin")
+        .context("No 'origin' remote found. Use --repo owner/repo")?;
+
+    let url = remote.url().context("Remote URL is not valid UTF-8")?;
+    parse_github_url(url)
+}
+
+fn parse_github_url(url: &str) -> Result<(String, String)> {
+    // Handle SSH: git@github.com:owner/repo.git
+    if let Some(path) = url.strip_prefix("git@github.com:") {
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        let parts: Vec<&str> = path.splitn(2, '/').collect();
+        if parts.len() == 2 {
+            return Ok((parts[0].to_string(), parts[1].to_string()));
+        }
+    }
+
+    // Handle HTTPS: https://github.com/owner/repo.git
+    if let Some(path) = url
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("http://github.com/"))
+    {
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        let parts: Vec<&str> = path.splitn(2, '/').collect();
+        if parts.len() == 2 {
+            return Ok((parts[0].to_string(), parts[1].to_string()));
+        }
+    }
+
+    anyhow::bail!("Cannot parse GitHub owner/repo from remote URL: {url}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ssh_url() {
+        let (owner, repo) = parse_github_url("git@github.com:user/project.git").unwrap();
+        assert_eq!(owner, "user");
+        assert_eq!(repo, "project");
+    }
+
+    #[test]
+    fn test_parse_https_url() {
+        let (owner, repo) = parse_github_url("https://github.com/user/project.git").unwrap();
+        assert_eq!(owner, "user");
+        assert_eq!(repo, "project");
+    }
+
+    #[test]
+    fn test_parse_https_no_git_suffix() {
+        let (owner, repo) = parse_github_url("https://github.com/user/project").unwrap();
+        assert_eq!(owner, "user");
+        assert_eq!(repo, "project");
+    }
+}

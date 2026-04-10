@@ -1,0 +1,229 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Tag to release'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: metal
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            features: metal
+            archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: ""
+            archive: tar.gz
+            deps: libclang-dev cmake
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            features: ""
+            archive: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install system deps (Linux)
+        if: matrix.deps != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.deps }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build Web UI
+        run: cd web && bun install --frozen-lockfile && bun run build
+
+      - name: Build
+        env:
+          WSHM_TELEMETRY_URL: https://telemetry.wshm.dev/api/v1/telemetry
+        run: cargo build --release --target ${{ matrix.target }} --features "export-postgres${{ matrix.features != '' && format(',{0}', matrix.features) || '' }}"
+
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czvf ../../../wshm-${{ matrix.target }}.${{ matrix.archive }} wshm
+          cd ../../..
+
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../wshm-${{ matrix.target }}.zip wshm.exe
+          cd ../../..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wshm-${{ matrix.target }}
+          path: wshm-${{ matrix.target }}.${{ matrix.archive }}
+
+  release:
+    name: Create Release
+    needs: [build]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Get version
+        id: version
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          echo "version=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release/ \;
+
+      - name: Create checksums
+        run: |
+          cd release
+          sha256sum * > checksums-${{ steps.version.outputs.version }}.sha256
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  homebrew:
+    name: Update Homebrew formula
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get version
+        id: version
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download checksums
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          gh release download "$TAG" \
+            --repo wshm-dev/wshm \
+            --pattern "checksums-${TAG}.sha256"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse checksums
+        id: sha
+        run: |
+          CHECKSUMS="checksums-${{ steps.version.outputs.tag }}.sha256"
+          echo "arm=$(grep aarch64-apple-darwin $CHECKSUMS | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "intel=$(grep x86_64-apple-darwin $CHECKSUMS | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "linux=$(grep x86_64-unknown-linux-gnu $CHECKSUMS | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+      - name: Update formula
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          cat > wshm.rb << 'FORMULA'
+          class Wshm < Formula
+            desc "AI-powered GitHub agent for OSS maintainers"
+            homepage "https://github.com/wshm-dev/wshm"
+            version "VERSION_PLACEHOLDER"
+            license "MIT"
+
+            on_macos do
+              on_intel do
+                url "https://github.com/wshm-dev/wshm/releases/download/TAG_PLACEHOLDER/wshm-x86_64-apple-darwin.tar.gz"
+                sha256 "SHA_INTEL_PLACEHOLDER"
+              end
+              on_arm do
+                url "https://github.com/wshm-dev/wshm/releases/download/TAG_PLACEHOLDER/wshm-aarch64-apple-darwin.tar.gz"
+                sha256 "SHA_ARM_PLACEHOLDER"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "https://github.com/wshm-dev/wshm/releases/download/TAG_PLACEHOLDER/wshm-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_LINUX_PLACEHOLDER"
+              end
+            end
+
+            def install
+              bin.install "wshm"
+            end
+
+            test do
+              assert_match "wshm #{version}", shell_output("#{bin}/wshm --version")
+            end
+          end
+          FORMULA
+          sed -i "s/VERSION_PLACEHOLDER/$VERSION/g" wshm.rb
+          sed -i "s/TAG_PLACEHOLDER/$TAG/g" wshm.rb
+          sed -i "s/SHA_INTEL_PLACEHOLDER/${{ steps.sha.outputs.intel }}/g" wshm.rb
+          sed -i "s/SHA_ARM_PLACEHOLDER/${{ steps.sha.outputs.arm }}/g" wshm.rb
+          sed -i "s/SHA_LINUX_PLACEHOLDER/${{ steps.sha.outputs.linux }}/g" wshm.rb
+          sed -i 's/^          //' wshm.rb
+
+      - name: Push to homebrew-tap
+        run: |
+          CONTENT=$(base64 -w 0 wshm.rb)
+          SHA=$(gh api repos/wshm-dev/wshm-tools/contents/Formula/wshm.rb --jq '.sha' 2>/dev/null || echo "")
+          if [ -n "$SHA" ]; then
+            gh api -X PUT repos/wshm-dev/wshm-tools/contents/Formula/wshm.rb \
+              -f message="wshm ${{ steps.version.outputs.version }}" \
+              -f content="$CONTENT" \
+              -f sha="$SHA"
+          else
+            gh api -X PUT repos/wshm-dev/wshm-tools/contents/Formula/wshm.rb \
+              -f message="wshm ${{ steps.version.outputs.version }}" \
+              -f content="$CONTENT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
