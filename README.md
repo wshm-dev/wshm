@@ -10,9 +10,13 @@
 
 Works with GitHub, GitLab, Gitea, and Azure DevOps. Plug in Claude Max, OpenAI, or a local Ollama — your call. Your AI keys. Your data. No SaaS dependency.
 
+**Runs on macOS (Intel & Apple Silicon), Linux (x86_64 & ARM64), and Windows (x86_64).**
+
 [![License: SSPL](https://img.shields.io/badge/License-SSPL--1.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
-![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
+![macOS](https://img.shields.io/badge/macOS-Intel%20%7C%20ARM-black?logo=apple)
+![Linux](https://img.shields.io/badge/Linux-x64%20%7C%20ARM-yellow?logo=linux)
+![Windows](https://img.shields.io/badge/Windows-x64-blue?logo=windows)
 ![AI providers](https://img.shields.io/badge/AI%20providers-14-purple)
 ![Git providers](https://img.shields.io/badge/Git%20providers-4-green)
 ![Self-hosted](https://img.shields.io/badge/self--hosted-yes-success)
@@ -147,15 +151,14 @@ wshm was born out of a real need: triaging the growing backlog of issues and pul
 - **PR analysis** — risk level (low/medium/high), type (feature/fix/docs), summary, review checklist
 - **Merge queue** — scoring, auto-merge above threshold, conflict detection
 - **PR health** — duplicate detection, stale/zombie PR flagging
-- **Changelog** — auto-generate from merged PRs (markdown, JSON)
-- **Dashboard** — HTML metrics dashboard with Chart.js graphs
+- **Sync** — full / incremental fetch of issues and PRs from your forge
+- **Run** — one-command cycle: sync + triage + analyze + queue
 - **Backup / Restore** — snapshot your `.wshm/` data for safe migration
 - **Revert** — undo all wshm actions (remove comments, labels, clear analyses)
-- **Notifications** — Discord, Slack, Teams, generic webhooks with HMAC signing
-- **Daemon** — background polling with embedded web dashboard
+- **Webhook notifications** — generic HTTP webhooks with HMAC signing
 - **TUI** — rich interactive terminal UI (issues, PRs, queue, stats)
-- **Web service** — embedded Svelte/Vite dashboard served by the daemon
-- **Multi-repo** — manage multiple repos from one daemon instance
+- **Context export** — dump repo context as LLM-ready markdown
+- **Migrate** — move data between SQLite and PostgreSQL
 - **14 AI providers** — Anthropic, OpenAI, Google, Mistral, Groq, DeepSeek, xAI, Ollama (local), llama.cpp, and more
 - **Claude Max / Pro / Team subscription** — OAuth login via your existing Claude plan (no separate API key billing needed)
 - **4 Git providers** — GitHub, GitLab, Gitea, Azure DevOps (self-hosted friendly)
@@ -164,13 +167,17 @@ wshm was born out of a real need: triaging the growing backlog of issues and pul
 
 ### Pro ([wshm.dev/pro](https://wshm.dev/pro))
 
-Token-heavy AI features and enterprise integrations:
+Persistent automation, token-heavy AI features, and enterprise integrations:
 
+- **Daemon** — persistent multi-repo background service with webhook server and embedded Svelte web dashboard
+- **Rich notifications** — Discord, Slack, Teams (in addition to the Free webhook sink)
+- **Changelog** — AI-generated changelog from merged PRs (markdown, JSON)
+- **Dashboard** — HTML metrics dashboard with Chart.js graphs
+- **HTML/PDF reports** — full repo health reports with SLA metrics
 - **Inline code review** — line-by-line AI review on PR diffs
 - **Auto-fix** — generate PRs from issue descriptions (Claude Code / Codex / containerized)
 - **AI conflict resolution** — automatic rebase with AI assistance
 - **Improvement proposals** — analyze codebase, create refactor/testing/perf issues
-- **HTML/PDF reports** — full repo health reports with SLA metrics
 - **Cloud exports** — ship issues/PRs/analyses to external sinks:
   - Object storage: **S3**, **Azure Blob**, **GCS**
   - Databases: **PostgreSQL**, **MySQL**, **MongoDB**, **Elasticsearch**, **OpenSearch**
@@ -178,15 +185,14 @@ Token-heavy AI features and enterprise integrations:
 - **Secret management / Key vaults** — HashiCorp Vault, AWS Secrets Manager, **Azure Key Vault**, GCP Secret Manager (keep license keys, webhook secrets, DB URIs, API keys out of config)
 - **SAML SSO** — Okta, Azure AD, custom IdP
 - **RBAC + Audit log** — organizations, roles, action audit trail
-- **Daemon webhook mode** — real-time GitHub webhook processing
 
 ---
 
 ## Interfaces
 
-wshm ships four ways to interact with it, all powered by the same core.
+wshm ships three interfaces out of the box (Free) plus a persistent daemon + web dashboard (Pro).
 
-### CLI
+### CLI (Free)
 
 ```bash
 wshm sync               # fetch issues + PRs
@@ -196,7 +202,7 @@ wshm queue              # show ranked merge queue
 wshm run --apply        # full cycle
 ```
 
-### TUI
+### TUI (Free)
 
 Rich interactive terminal UI — browse issues, PRs, merge queue, and stats without leaving the terminal.
 
@@ -210,12 +216,12 @@ wshm tui
   <img src="docs/assets/wshm-tui-stats.png" alt="wshm TUI — stats"  width="32%" />
 </p>
 
-### Web service (daemon)
+### Daemon + Web dashboard (Pro)
 
-The daemon runs background polling *and* serves an embedded Svelte web dashboard on `https://127.0.0.1:3000`.
+The daemon is a long-running multi-repo service: webhook server, scheduled triage, rich notifications (Discord/Slack/Teams), and an embedded Svelte web dashboard served on `https://127.0.0.1:3000`.
 
 ```bash
-wshm daemon
+wshm daemon --config /etc/wshm/global.toml --poll
 ```
 
 <p align="center">
@@ -230,14 +236,6 @@ wshm daemon
 <p align="center">
   <img src="docs/assets/wshm-web-queue.png"   alt="Merge queue"   width="85%" />
 </p>
-
-### Daemon (headless)
-
-Long-running process for servers — multi-repo polling, scheduled triage, notifications, Pro webhook mode.
-
-```bash
-wshm daemon --config /etc/wshm/global.toml --poll
-```
 
 ---
 
@@ -272,15 +270,25 @@ docker pull ghcr.io/wshm-dev/wshm:latest
 
 #### Windows
 
-Download the latest `wshm-x86_64-pc-windows-msvc.zip` from [GitHub Releases](https://github.com/wshm-dev/wshm/releases).
+```powershell
+# PowerShell — download and extract the latest release
+Invoke-WebRequest -Uri https://github.com/wshm-dev/wshm/releases/latest/download/wshm-x86_64-pc-windows-msvc.zip -OutFile wshm.zip
+Expand-Archive wshm.zip -DestinationPath $env:USERPROFILE\.wshm\bin
+```
+
+Or install from source with `cargo install wshm-core --bin wshm` (requires the [Rust toolchain](https://rustup.rs)).
+
+Native Scoop / winget manifests are not yet published — follow [#TBD](https://github.com/wshm-dev/wshm/issues) for updates.
 
 #### Supported platforms
 
-| OS      | Architectures       | Install methods            |
-|---------|---------------------|----------------------------|
-| macOS   | x86_64, aarch64     | Homebrew, shell, Cargo     |
-| Linux   | x86_64, aarch64 (GNU) | Homebrew, shell, Cargo, Docker |
-| Windows | x86_64              | GitHub Releases, Cargo     |
+| OS      | Architectures         | Install methods                         |
+|---------|-----------------------|-----------------------------------------|
+| macOS   | x86_64 (Intel), aarch64 (Apple Silicon) | Homebrew, shell installer, Cargo, Docker |
+| Linux   | x86_64, aarch64 (GNU) | Homebrew, shell installer, Cargo, Docker |
+| Windows | x86_64                | GitHub Releases (zip), Cargo            |
+
+Windows is a fully supported tier-1 target: CI builds and tests every commit on `windows-latest`, and every release ships a `wshm-x86_64-pc-windows-msvc.zip`. Homebrew and the `install.sh` shell script are macOS/Linux only by design.
 
 ### Configure
 
