@@ -230,6 +230,22 @@ fn extract_from_zip(archive_data: &[u8]) -> Result<Vec<u8>> {
 fn replace_binary(new_binary: &[u8]) -> Result<PathBuf> {
     let current_exe =
         std::env::current_exe().context("Cannot determine current executable path")?;
+
+    // Detect package-managed installations — refuse to break metadata
+    let path_str = current_exe.to_string_lossy();
+    if path_str.contains("/Cellar/") || path_str.contains("/homebrew/") {
+        anyhow::bail!(
+            "Detected Homebrew installation ({}).\nUse 'brew upgrade wshm' instead to keep metadata consistent.",
+            current_exe.display()
+        );
+    }
+    if path_str.starts_with("/usr/bin/") {
+        warn!(
+            "{} may be managed by a package manager (apt/dnf/rpm). Consider using your package manager to upgrade.",
+            current_exe.display()
+        );
+    }
+
     let parent = current_exe
         .parent()
         .context("Cannot determine binary directory")?;
