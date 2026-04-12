@@ -564,6 +564,14 @@ pub struct WebConfig {
 
     #[serde(default)]
     pub password: Option<String>,
+
+    /// Path to TLS certificate (PEM). Or use WSHM_TLS_CERT env.
+    #[serde(default)]
+    pub tls_cert: Option<String>,
+
+    /// Path to TLS private key (PEM). Or use WSHM_TLS_KEY env.
+    #[serde(default)]
+    pub tls_key: Option<String>,
 }
 
 fn default_web_enabled() -> bool {
@@ -579,11 +587,29 @@ impl Default for WebConfig {
             enabled: default_web_enabled(),
             username: default_web_username(),
             password: None,
+            tls_cert: None,
+            tls_key: None,
         }
     }
 }
 
 impl WebConfig {
+    /// Resolve TLS paths: env > config.toml. Returns Some((cert, key)) if both set.
+    pub fn resolve_tls(&self) -> Option<(String, String)> {
+        let cert = std::env::var("WSHM_TLS_CERT")
+            .ok()
+            .or_else(|| self.tls_cert.clone())
+            .filter(|s| !s.is_empty());
+        let key = std::env::var("WSHM_TLS_KEY")
+            .ok()
+            .or_else(|| self.tls_key.clone())
+            .filter(|s| !s.is_empty());
+        match (cert, key) {
+            (Some(c), Some(k)) => Some((c, k)),
+            _ => None,
+        }
+    }
+
     /// Resolve the effective password: config.toml > .wshm/credentials > auto-generate.
     /// If auto-generated, writes to .wshm/credentials and prints to stdout.
     pub fn resolve_password(&mut self, wshm_dir: &std::path::Path) {
