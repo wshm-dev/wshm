@@ -212,15 +212,23 @@ wshm tui
 
 ### Web service (daemon)
 
-The daemon runs background polling *and* serves an embedded Svelte web dashboard on `http://127.0.0.1:3000`.
+The daemon runs background polling *and* serves an embedded Svelte web dashboard on `https://127.0.0.1:3000`.
 
 ```bash
 wshm daemon
 ```
 
 <p align="center">
-  <img src="docs/assets/wshm-triage.png" alt="Triage view" width="48%" />
-  <img src="docs/assets/wshm-queue.png"  alt="Merge queue" width="48%" />
+  <img src="docs/assets/wshm-web-dashboard.png" alt="Dashboard — repo status overview" width="85%" />
+</p>
+
+<p align="center">
+  <img src="docs/assets/wshm-web-issues.png"  alt="Issues view"   width="48%" />
+  <img src="docs/assets/wshm-web-triage.png"  alt="Triage results" width="48%" />
+</p>
+
+<p align="center">
+  <img src="docs/assets/wshm-web-queue.png"   alt="Merge queue"   width="85%" />
 </p>
 
 ### Daemon (headless)
