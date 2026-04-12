@@ -131,12 +131,13 @@ impl Client {
     /// Post or update a wshm comment on an issue.
     /// If a wshm comment already exists, it is updated in place (idempotent).
     pub async fn comment_issue(&self, number: u64, body: &str) -> Result<()> {
-        let body_with_marker = ensure_wshm_marker(body);
+        let body_with_marker = ensure_comment_marker(body, &self.comment_marker);
 
         if let Some(comment_id) = self.find_wshm_comment(number, &self.comment_marker).await? {
             info!("Updating existing wshm comment {comment_id} on issue #{number}");
             self.update_comment(comment_id, &body_with_marker).await?;
         } else {
+            debug!("Creating new wshm comment on issue #{number}");
             self.octocrab
                 .issues(&self.owner, &self.repo)
                 .create_comment(number, &body_with_marker)
@@ -265,7 +266,7 @@ impl Client {
     }
 
     pub async fn create_issue(&self, title: &str, body: &str, labels: &[String]) -> Result<u64> {
-        let body = ensure_wshm_marker(body);
+        let body = ensure_comment_marker(body, &self.comment_marker);
         let issue = self
             .octocrab
             .issues(&self.owner, &self.repo)
@@ -290,12 +291,72 @@ impl Client {
     }
 }
 
-/// Ensure the comment body contains the hidden wshm marker.
-/// If not already present, appends it at the end.
-pub fn ensure_wshm_marker(body: &str) -> String {
-    if body.contains(WSHM_COMMENT_MARKER) {
+/// Ensure the comment body contains a hidden marker for idempotent updates.
+/// Checks for both the custom marker and the legacy default marker.
+/// If neither is present, appends the custom marker at the end.
+pub fn ensure_comment_marker(body: &str, custom_marker: &str) -> String {
+    let body = body.trim_end();
+
+    // If body already has a marker (custom or legacy), use as-is
+    if body.contains(custom_marker) || body.contains(WSHM_COMMENT_MARKER) {
         body.to_string()
     } else {
-        format!("{body}\n{WSHM_COMMENT_MARKER}")
+        // Append custom marker at the end
+        format!("{body}\n\n{custom_marker}")
+    }
+}
+
+/// Legacy function for backward compatibility - uses default marker.
+/// New code should use ensure_comment_marker with a custom marker.
+pub fn ensure_wshm_marker(body: &str) -> String {
+    ensure_comment_marker(body, WSHM_COMMENT_MARKER)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ensure_marker_appends_when_missing() {
+        let body = "This is a comment";
+        let custom_marker = "<!-- MyBot -->";
+        let result = ensure_comment_marker(body, custom_marker);
+        assert!(result.contains(custom_marker));
+        assert!(result.starts_with("This is a comment"));
+    }
+
+    #[test]
+    fn test_ensure_marker_preserves_when_present() {
+        let body = "This is a comment\n\n<!-- MyBot -->";
+        let custom_marker = "<!-- MyBot -->";
+        let result = ensure_comment_marker(body, custom_marker);
+        // Should not duplicate the marker
+        assert_eq!(result.matches(custom_marker).count(), 1);
+    }
+
+    #[test]
+    fn test_ensure_marker_recognizes_legacy() {
+        let body = "This is a comment\n\n<!-- wshm -->";
+        let custom_marker = "<!-- MyBot -->";
+        let result = ensure_comment_marker(body, custom_marker);
+        // Should recognize legacy marker and not append custom
+        assert!(!result.contains(custom_marker));
+        assert!(result.contains("<!-- wshm -->"));
+    }
+
+    #[test]
+    fn test_ensure_marker_trims_whitespace() {
+        let body = "This is a comment\n\n\n   ";
+        let custom_marker = "<!-- MyBot -->";
+        let result = ensure_comment_marker(body, custom_marker);
+        // Should trim trailing whitespace before appending
+        assert!(result.contains("comment\n\n<!-- MyBot -->"));
+    }
+
+    #[test]
+    fn test_legacy_ensure_wshm_marker() {
+        let body = "This is a comment";
+        let result = ensure_wshm_marker(body);
+        assert!(result.contains(WSHM_COMMENT_MARKER));
     }
 }
