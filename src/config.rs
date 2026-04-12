@@ -1178,9 +1178,51 @@ impl Config {
             config.repo_owner = parts[0].to_string();
             config.repo_name = parts[1].to_string();
         } else {
-            let (owner, name) = detect_repo()?;
-            config.repo_owner = owner;
-            config.repo_name = name;
+            // Try to detect from git remote first
+            match detect_repo() {
+                Ok((owner, name)) => {
+                    config.repo_owner = owner;
+                    config.repo_name = name;
+                }
+                Err(_) => {
+                    // Not in a git repo and no --repo flag: try global.toml fallback
+                    let global_path = GlobalConfig::default_path();
+                    if global_path.exists() {
+                        let global = GlobalConfig::load(&global_path)
+                            .context("Failed to load ~/.wshm/global.toml")?;
+
+                        let enabled_repos: Vec<_> = global.repos.iter()
+                            .filter(|r| r.enabled)
+                            .collect();
+
+                        if enabled_repos.len() == 1 {
+                            // Exactly one repo: use it automatically
+                            let repo = enabled_repos[0];
+                            let parts: Vec<&str> = repo.slug.splitn(2, '/').collect();
+                            if parts.len() != 2 {
+                                anyhow::bail!("Invalid repo slug in global.toml: {} (expected owner/repo)", repo.slug);
+                            }
+                            config.repo_owner = parts[0].to_string();
+                            config.repo_name = parts[1].to_string();
+                        } else if enabled_repos.is_empty() {
+                            anyhow::bail!("Not inside a git repository and no enabled repos in ~/.wshm/global.toml. Use --repo owner/repo");
+                        } else {
+                            // Multiple repos: print list and instructions
+                            eprintln!("Not inside a git repository. Multiple repos found in ~/.wshm/global.toml:");
+                            eprintln!();
+                            for repo in &enabled_repos {
+                                eprintln!("  {}", repo.slug);
+                            }
+                            eprintln!();
+                            eprintln!("Use --repo <slug> to specify which one.");
+                            anyhow::bail!("Ambiguous repo selection");
+                        }
+                    } else {
+                        // No global.toml: show original error
+                        anyhow::bail!("Not inside a git repository. Use --repo owner/repo");
+                    }
+                }
+            }
         }
 
         Ok(config)
