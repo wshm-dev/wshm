@@ -128,9 +128,10 @@ One static binary. No SaaS dependency. Runs where your code lives.
 | Platform       | How                                                              |
 |----------------|------------------------------------------------------------------|
 | **VM / VPS**   | systemd service, auto-update via Homebrew, any Linux             |
+| **Docker**     | `docker run ghcr.io/wshm-dev/wshm:latest` — multi-arch (amd64 + arm64), ships with v0.28.0 |
 | **Local dev**  | `wshm tui` / `wshm triage` — works offline with Ollama           |
 
-Docker images, Kubernetes manifests, and a GitHub Action are planned — follow [#22](https://github.com/wshm-dev/wshm/issues/22).
+Kubernetes manifests and a GitHub Action are planned — follow [#22](https://github.com/wshm-dev/wshm/issues/22).
 
 Forge support: **GitHub** (personal + org), **GitLab** (.com + self-managed), **Gitea / Forgejo / Codeberg**, **Azure DevOps** (Services + Server).
 
@@ -242,7 +243,7 @@ wshm daemon --config /etc/wshm/global.toml --poll
 
 ### Install
 
-> **Heads up** — the current release (`v0.27.0`) only ships prebuilt binaries for **Linux x86_64** and **Windows x86_64**. Full coverage (Intel Mac, Apple Silicon, ARM Linux) arrives with the next tagged release once the 5-target build matrix runs. Track [#22](https://github.com/wshm-dev/wshm/issues/22).
+> **Heads up** — the current release (`v0.27.0`) only ships prebuilt binaries for **Linux x86_64** and **Windows x86_64**. Full native coverage (Intel Mac, Apple Silicon, ARM Linux) and the multi-arch Docker image arrive with the next tagged release once the extended build pipeline runs. Track [#22](https://github.com/wshm-dev/wshm/issues/22).
 
 #### Linux x86_64 — Homebrew
 
@@ -259,10 +260,19 @@ Expand-Archive wshm.zip -DestinationPath $env:USERPROFILE\.wshm\bin
 # then add %USERPROFILE%\.wshm\bin to your PATH
 ```
 
+#### Docker (any x86_64 or ARM64 host) — ships with v0.28.0
+
+```bash
+docker pull ghcr.io/wshm-dev/wshm:latest
+docker run --rm ghcr.io/wshm-dev/wshm --version
+```
+
+The image will be multi-arch (`linux/amd64` + `linux/arm64`), default `CMD` is `wshm daemon` so it's drop-in for Compose / Kubernetes, and is published to GHCR on every release (pipeline landed in `wshm-pro#7`, first push fires on the `v0.28.0` tag).
+
 #### Everything else
 
-- **Intel Mac, Apple Silicon, ARM Linux** — arriving with the next release; `brew install wshm` will work on all of them once v0.28.0 ships.
-- **`cargo install`, install.sh, Docker, Scoop/winget** — not yet published, tracked in [#22](https://github.com/wshm-dev/wshm/issues/22).
+- **Intel Mac, Apple Silicon, ARM Linux** (native binaries) — arriving with the next release; `brew install wshm` will work on all of them once v0.28.0 ships. Docker above works on these hosts today.
+- **`cargo install`, install.sh, Scoop/winget** — not yet published, tracked in [#22](https://github.com/wshm-dev/wshm/issues/22).
 
 #### Release pipeline
 
