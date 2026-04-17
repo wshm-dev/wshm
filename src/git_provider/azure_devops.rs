@@ -74,6 +74,16 @@ impl AzureDevOpsProvider {
         if !status.is_success() { anyhow::bail!("Azure DevOps API error ({status}): {}", &text[..text.len().min(200)]); }
         Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
     }
+
+    async fn patch(&self, url: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+        let resp = self.http.patch(url)
+            .basic_auth("", Some(&self.token))
+            .json(body).send().await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() { anyhow::bail!("Azure DevOps API error ({status}): {}", &text[..text.len().min(200)]); }
+        Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+    }
 }
 
 #[async_trait]
@@ -123,14 +133,32 @@ impl GitProvider for AzureDevOpsProvider {
 
     async fn remove_label(&self, _number: u64, _label: &str) -> Result<()> { Ok(()) }
 
-    async fn comment_issue(&self, number: u64, body: &str, _marker: &str) -> Result<()> {
-        let url = self.wit_api(&format!("workitems/{number}/comments"));
-        self.post(&url, &serde_json::json!({ "text": body })).await?;
+    async fn comment_issue(&self, number: u64, body: &str, marker: &str) -> Result<()> {
+        if let Some(comment_id) = self.find_comment_with_marker(number, marker).await? {
+            let url = self.wit_api(&format!("workitems/{number}/comments/{comment_id}"));
+            self.patch(&url, &serde_json::json!({ "text": body })).await?;
+        } else {
+            let url = self.wit_api(&format!("workitems/{number}/comments"));
+            self.post(&url, &serde_json::json!({ "text": body })).await?;
+        }
         Ok(())
     }
 
     async fn delete_comment(&self, _comment_id: u64) -> Result<()> { Ok(()) }
-    async fn find_comment_with_marker(&self, _number: u64, _marker: &str) -> Result<Option<u64>> { Ok(None) }
+
+    async fn find_comment_with_marker(&self, number: u64, marker: &str) -> Result<Option<u64>> {
+        let url = self.wit_api(&format!("workitems/{number}/comments"));
+        let result = self.get(&url).await?;
+        if let Some(comments) = result["comments"].as_array() {
+            for comment in comments {
+                let text = comment["text"].as_str().unwrap_or("");
+                if text.contains(marker) {
+                    return Ok(comment["id"].as_u64());
+                }
+            }
+        }
+        Ok(None)
+    }
 
     async fn close_issue(&self, _number: u64) -> Result<()> {
         info!("Azure DevOps close_issue: use state transition");
@@ -232,9 +260,32 @@ impl GitProvider for AzureDevOpsProvider {
 
     async fn label_pr(&self, _number: u64, _labels: &[String]) -> Result<()> { Ok(()) }
 
-    async fn comment_pr(&self, number: u64, body: &str, _marker: &str) -> Result<()> {
-        let url = self.git_api(&format!("pullrequests/{number}/threads"));
-        self.post(&url, &serde_json::json!({
+    async fn comment_pr(&self, number: u64, body: &str, marker: &str) -> Result<()> {
+        let threads_url = self.git_api(&format!("pullrequests/{number}/threads"));
+        let threads = self.get(&threads_url).await?;
+
+        if let Some(arr) = threads["value"].as_array() {
+            for thread in arr {
+                let thread_id = match thread["id"].as_u64() {
+                    Some(id) => id,
+                    None => continue,
+                };
+                if let Some(comment) = thread["comments"].as_array().and_then(|c| c.first()) {
+                    let content = comment["content"].as_str().unwrap_or("");
+                    if content.contains(marker) {
+                        if let Some(comment_id) = comment["id"].as_u64() {
+                            let patch_url = self.git_api(&format!(
+                                "pullrequests/{number}/threads/{thread_id}/comments/{comment_id}"
+                            ));
+                            self.patch(&patch_url, &serde_json::json!({ "content": body })).await?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
+        self.post(&threads_url, &serde_json::json!({
             "comments": [{ "parentCommentId": 0, "content": body, "commentType": 1 }],
             "status": 1
         })).await?;
