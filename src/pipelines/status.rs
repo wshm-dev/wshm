@@ -107,7 +107,7 @@ pub fn show(db: &Database, json: bool) -> Result<()> {
 }
 
 /// Build a summary from the local database cache.
-fn build_summary(config: &Config, db: &Database) -> Result<Summary> {
+pub fn build_summary(config: &Config, db: &Database) -> Result<Summary> {
     let open_issues = db.get_open_issues()?;
     let untriaged = db.get_untriaged_issues()?;
     let open_pulls = db.get_open_pulls()?;
