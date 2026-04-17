@@ -17,6 +17,7 @@ pub struct LogEntry {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tab {
+    Summary,
     Repos,
     Action,
     Issues,
@@ -29,6 +30,7 @@ pub enum Tab {
 impl Tab {
     pub fn title(&self) -> &'static str {
         match self {
+            Tab::Summary => "Summary",
             Tab::Repos => "Repos",
             Tab::Action => "Action",
             Tab::Issues => "Issues",
@@ -41,7 +43,7 @@ impl Tab {
 
     pub fn all() -> &'static [Tab] {
         &[
-            Tab::Repos, Tab::Action, Tab::Issues, Tab::PullRequests, Tab::Queue, Tab::Stats, Tab::Activity,
+            Tab::Summary, Tab::Repos, Tab::Action, Tab::Issues, Tab::PullRequests, Tab::Queue, Tab::Stats, Tab::Activity,
         ]
     }
 }
@@ -163,6 +165,7 @@ pub struct App {
     pub confirm_delete: bool,
     pub settings_popup: Option<RepoSettings>,
     pub action_detail: Option<ActionDetailPopup>,
+    pub summary: Option<crate::pipelines::status::Summary>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -214,7 +217,7 @@ impl App {
     pub fn new(config: &Config, db: &Database) -> Result<Self> {
         let mut app = Self {
             repo_slug: config.repo_slug(),
-            active_tab: if GlobalConfig::default_path().exists() { Tab::Repos } else { Tab::Issues },
+            active_tab: Tab::Summary,
             scroll_offset: 0,
             sort_field: SortField::Number,
             sort_dir: SortDir::Desc,
@@ -249,11 +252,17 @@ impl App {
             confirm_delete: false,
             settings_popup: None,
             action_detail: None,
+            summary: None,
         };
         app.load_repos();
         app.load_actions();
         app.refresh(db)?;
+        app.load_summary(config, db);
         Ok(app)
+    }
+
+    pub fn load_summary(&mut self, config: &Config, db: &Database) {
+        self.summary = crate::pipelines::status::build_summary(config, db).ok();
     }
 
     pub fn refresh(&mut self, db: &Database) -> Result<()> {
@@ -482,6 +491,7 @@ impl App {
             Tab::Repos => self.repos.len(),
             Tab::Action => self.actions.len(),
             Tab::Activity => self.logs.len(),
+            Tab::Summary => 0,
         }
     }
 

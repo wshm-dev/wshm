@@ -112,6 +112,42 @@ export function fetchStatus(): Promise<Status> {
 	return apiGet<Status>('/status');
 }
 
+export interface IssueBrief {
+	number: number;
+	title: string;
+	priority: string | null;
+	category: string | null;
+	labels: string[];
+	age_days: number;
+}
+
+export interface PrBrief {
+	number: number;
+	title: string;
+	risk_level: string | null;
+	ci_status: string | null;
+	has_conflicts: boolean;
+	age_days: number;
+}
+
+export interface Summary {
+	repo: string;
+	timestamp: string;
+	open_issues: number;
+	untriaged_issues: number;
+	high_priority_issues: IssueBrief[];
+	top_issues: IssueBrief[];
+	open_prs: number;
+	unanalyzed_prs: number;
+	high_risk_prs: PrBrief[];
+	top_prs: PrBrief[];
+	conflicts: number;
+}
+
+export function fetchSummary(): Promise<Summary> {
+	return apiGet<Summary>('/summary');
+}
+
 export function fetchIssues(state: string = 'open'): Promise<Issue[]> {
 	return apiGet<Issue[]>('/issues', { state });
 }

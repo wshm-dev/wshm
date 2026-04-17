@@ -12,6 +12,7 @@
 
 	const navItems = [
 		{ href: '/', label: 'Dashboard', icon: 'D' },
+		{ href: '/summary', label: 'Summary', icon: 'M' },
 		{ href: '/issues', label: 'Issues', icon: 'I' },
 		{ href: '/prs', label: 'Pull Requests', icon: 'P' },
 		{ href: '/triage', label: 'Triage', icon: 'T' },

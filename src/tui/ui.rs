@@ -31,6 +31,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_stats(f, app, chunks[1]);
 
     match app.active_tab {
+        Tab::Summary => draw_summary(f, app, chunks[2]),
         Tab::Repos => draw_repos(f, app, chunks[2]),
         Tab::Action => draw_action_plan(f, app, chunks[2]),
         Tab::Issues => draw_issues(f, app, chunks[2]),
@@ -1010,6 +1011,179 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
     );
 
     f.render_widget(list, area);
+}
+
+fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
+    let summary = match app.summary.as_ref() {
+        Some(s) => s,
+        None => {
+            let text = Paragraph::new("No summary data available. Run `wshm sync` first.")
+                .block(Block::default().borders(Borders::ALL).title(" Summary "))
+                .style(Style::default().fg(Color::DarkGray));
+            f.render_widget(text, area);
+            return;
+        }
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(Span::styled(
+        format!("{} — daily digest", summary.repo),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(vec![
+        Span::raw("Issues: "),
+        Span::styled(
+            summary.open_issues.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" open ({} untriaged)", summary.untriaged_issues)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("PRs:    "),
+        Span::styled(
+            summary.open_prs.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" open ({} unanalyzed)", summary.unanalyzed_prs)),
+    ]));
+    if summary.conflicts > 0 {
+        lines.push(Line::from(vec![
+            Span::raw("Conflicts: "),
+            Span::styled(
+                summary.conflicts.to_string(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    if !summary.high_priority_issues.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Action Required",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for i in summary.high_priority_issues.iter().take(10) {
+            let prio = i.priority.as_deref().unwrap_or("?");
+            let age = if i.age_days > 0 {
+                format!(" ({}d)", i.age_days)
+            } else {
+                String::new()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  #{} ", i.number),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    format!("{prio}{age} "),
+                    Style::default().fg(Color::Red),
+                ),
+                Span::raw(i.title.clone()),
+            ]));
+        }
+    }
+
+    if !summary.high_risk_prs.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Attention PRs",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for p in summary.high_risk_prs.iter().take(10) {
+            let mut tags = Vec::new();
+            if let Some(ref risk) = p.risk_level {
+                tags.push(format!("risk:{risk}"));
+            }
+            if p.has_conflicts {
+                tags.push("CONFLICT".to_string());
+            }
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  #{} ", p.number),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    format!("[{}] ", tags.join(", ")),
+                    Style::default().fg(Color::Magenta),
+                ),
+                Span::raw(p.title.clone()),
+            ]));
+        }
+    }
+
+    if !summary.top_issues.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Issues TODO",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for i in &summary.top_issues {
+            let prio = i.priority.as_deref().unwrap_or("-");
+            let cat = i.category.as_deref().unwrap_or("-");
+            let age = if i.age_days > 0 {
+                format!(" ({}d)", i.age_days)
+            } else {
+                String::new()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  #{} ", i.number),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    format!("{prio}/{cat}{age} "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(i.title.clone()),
+            ]));
+        }
+    }
+
+    if !summary.top_prs.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "PRs TODO",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for p in &summary.top_prs {
+            let risk = p.risk_level.as_deref().unwrap_or("-");
+            let age = if p.age_days > 0 {
+                format!(" ({}d)", p.age_days)
+            } else {
+                String::new()
+            };
+            let conflict = if p.has_conflicts { " CONFLICT" } else { "" };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  #{} ", p.number),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    format!("{risk}{conflict}{age} "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(p.title.clone()),
+            ]));
+        }
+    }
+
+    let content = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" Summary "))
+        .scroll((app.scroll_offset as u16, 0));
+    f.render_widget(content, area);
 }
 
 fn draw_footer(f: &mut Frame, area: Rect) {
