@@ -1,6 +1,6 @@
 [package]
 name = "wshm-core"
-version = "0.28.0"
+version = "0.28.1"
 edition = "2021"
 description = "Core library for wshm"
 license = "SSPL-1.0"

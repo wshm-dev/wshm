@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v0.28.1)'
+        required: true
 
 permissions:
   contents: write
@@ -20,15 +25,33 @@ jobs:
           targets: x86_64-unknown-linux-gnu
       - name: Build
         run: cargo build --release --bin wshm --target x86_64-unknown-linux-gnu
-      - name: Package
+      - name: Package tar.gz
         run: |
           cd target/x86_64-unknown-linux-gnu/release
           tar czf wshm-x86_64-unknown-linux-gnu.tar.gz wshm
           mv wshm-x86_64-unknown-linux-gnu.tar.gz $GITHUB_WORKSPACE/
+      - name: Package .deb (amd64)
+        run: |
+          TAG="${{ github.ref_name || github.event.inputs.tag }}"
+          VERSION="${TAG#v}"
+          mkdir -p deb/DEBIAN deb/usr/local/bin
+          cp target/x86_64-unknown-linux-gnu/release/wshm deb/usr/local/bin/
+          cat > deb/DEBIAN/control << EOF
+          Package: wshm
+          Version: ${VERSION}
+          Architecture: amd64
+          Maintainer: wshm-dev <contact@wshm.dev>
+          Description: AI-powered GitHub agent
+           Triage issues, analyze PRs, manage merge queue.
+          Homepage: https://wshm.dev
+          EOF
+          dpkg-deb --build deb wshm_${VERSION}_amd64.deb
       - uses: actions/upload-artifact@v4
         with:
           name: wshm-x86_64-unknown-linux-gnu
-          path: wshm-x86_64-unknown-linux-gnu.tar.gz
+          path: |
+            wshm-x86_64-unknown-linux-gnu.tar.gz
+            wshm_*_amd64.deb
 
   build-linux-arm:
     name: Build Linux aarch64
@@ -41,15 +64,33 @@ jobs:
           targets: aarch64-unknown-linux-gnu
       - name: Build
         run: cargo build --release --bin wshm --target aarch64-unknown-linux-gnu
-      - name: Package
+      - name: Package tar.gz
         run: |
           cd target/aarch64-unknown-linux-gnu/release
           tar czf wshm-aarch64-unknown-linux-gnu.tar.gz wshm
           mv wshm-aarch64-unknown-linux-gnu.tar.gz $GITHUB_WORKSPACE/
+      - name: Package .deb (arm64)
+        run: |
+          TAG="${{ github.ref_name || github.event.inputs.tag }}"
+          VERSION="${TAG#v}"
+          mkdir -p deb/DEBIAN deb/usr/local/bin
+          cp target/aarch64-unknown-linux-gnu/release/wshm deb/usr/local/bin/
+          cat > deb/DEBIAN/control << EOF
+          Package: wshm
+          Version: ${VERSION}
+          Architecture: arm64
+          Maintainer: wshm-dev <contact@wshm.dev>
+          Description: AI-powered GitHub agent
+           Triage issues, analyze PRs, manage merge queue.
+          Homepage: https://wshm.dev
+          EOF
+          dpkg-deb --build deb wshm_${VERSION}_arm64.deb
       - uses: actions/upload-artifact@v4
         with:
           name: wshm-aarch64-unknown-linux-gnu
-          path: wshm-aarch64-unknown-linux-gnu.tar.gz
+          path: |
+            wshm-aarch64-unknown-linux-gnu.tar.gz
+            wshm_*_arm64.deb
 
   build-windows:
     name: Build Windows x86_64
@@ -86,14 +127,16 @@ jobs:
           merge-multiple: true
 
       - name: Compute checksums
-        run: sha256sum *.tar.gz *.zip > checksums.txt
+        run: sha256sum *.tar.gz *.zip *.deb > checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name || github.event.inputs.tag }}
           files: |
             wshm-*.tar.gz
             wshm-*.zip
+            wshm_*.deb
             checksums.txt
           generate_release_notes: true
 
@@ -101,7 +144,7 @@ jobs:
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ github.ref_name || github.event.inputs.tag }}"
           VERSION="${TAG#v}"
           SHA_X86=$(sha256sum wshm-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')
           SHA_ARM=$(sha256sum wshm-aarch64-unknown-linux-gnu.tar.gz | awk '{print $1}')
