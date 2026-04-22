@@ -80,6 +80,9 @@ pub enum Command {
 
     /// Show daily digest summary (same data as Discord notifications)
     Summary,
+
+    /// Start persistent daemon with webhook server and web UI
+    Daemon(DaemonArgs),
 }
 
 #[derive(clap::Args)]
@@ -225,4 +228,51 @@ pub struct LoginArgs {
 pub enum ConfigCommand {
     /// Create .wshm/config.toml template
     Init,
+}
+
+#[derive(clap::Args, Clone)]
+pub struct DaemonArgs {
+    /// Path to global multi-repo config (e.g. ~/.wshm/global.toml)
+    #[arg(long)]
+    pub config: Option<std::path::PathBuf>,
+
+    /// Bind address (default: 0.0.0.0:3000)
+    #[arg(long)]
+    pub bind: Option<String>,
+
+    /// Actually perform actions (dry-run by default)
+    #[arg(long)]
+    pub apply: bool,
+
+    /// Webhook secret (overrides config/env)
+    #[arg(long, env = "WSHM_WEBHOOK_SECRET")]
+    pub secret: Option<String>,
+
+    /// Use polling instead of webhooks (no public IP needed)
+    #[arg(long)]
+    pub poll: bool,
+
+    /// Polling interval in seconds (default: 30)
+    #[arg(long, default_value = "30")]
+    pub poll_interval: u64,
+
+    /// Disable the HTTP webhook server (use with --poll)
+    #[arg(long)]
+    pub no_server: bool,
+
+    /// Install wshm daemon as a systemd service
+    #[arg(long)]
+    pub install: bool,
+
+    /// Uninstall the wshm systemd service
+    #[arg(long)]
+    pub uninstall: bool,
+
+    /// Override working directory for systemd (default: current dir)
+    #[arg(long)]
+    pub workdir: Option<String>,
+
+    /// Override repo for systemd (default: from config)
+    #[arg(long)]
+    pub repo: Option<String>,
 }
