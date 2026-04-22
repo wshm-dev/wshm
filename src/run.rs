@@ -181,6 +181,7 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             let slug = config.repo_slug();
             crate::pipelines::context::run(&db, &slug)?;
         }
+)
         Some(Command::Login(args)) => {
             if args.license {
                 crate::license::login()?;
