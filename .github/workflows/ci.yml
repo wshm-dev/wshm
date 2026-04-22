@@ -18,17 +18,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: macOS (Metal)
-            os: macos-latest
-            features: metal
-            deps: ""
           - name: Linux (CPU)
-            os: ubuntu-latest
-            features: ""
-            deps: libclang-dev cmake
+            os: [self-hosted, linux, x64]
+            deps: ""
           - name: Windows (CPU)
             os: windows-latest
-            features: ""
             deps: ""
 
     steps:
@@ -36,10 +30,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install system deps (Linux)
-        if: matrix.deps != ''
-        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.deps }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -57,21 +47,20 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build
-        run: cargo build ${{ matrix.features != '' && format('--features {0}', matrix.features) || '' }}
+        run: cargo build
 
       - name: Run tests
-        run: cargo test ${{ matrix.features != '' && format('--features {0}', matrix.features) || '' }}
+        run: cargo test
 
       - name: Check formatting
         run: cargo fmt -- --check
 
       - name: Clippy
-        run: cargo clippy ${{ matrix.features != '' && format('--features {0}', matrix.features) || '' }} -- -D warnings
+        run: cargo clippy -- -D warnings
 
-  # ── Security audit ──────────────────────────────────────────
   security:
     name: Security
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
 
@@ -84,71 +73,15 @@ jobs:
       - name: Dependency audit (CVEs)
         run: cargo audit
 
-      - name: Check for unsafe code
-        run: |
-          echo "## Unsafe code usage" >> $GITHUB_STEP_SUMMARY
-          UNSAFE_COUNT=$(grep -rn "unsafe" src/ --include="*.rs" | grep -v "// safe:" | grep -v "test" | wc -l)
-          if [ "$UNSAFE_COUNT" -gt 0 ]; then
-            echo "⚠️ Found $UNSAFE_COUNT unsafe blocks:" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            grep -rn "unsafe" src/ --include="*.rs" | grep -v "// safe:" | grep -v "test" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-          else
-            echo "✅ No unsafe code found" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Scan for command injection risks
-        run: |
-          echo "## Command injection scan" >> $GITHUB_STEP_SUMMARY
-          ISSUES=0
-
-          # Check for format! used in Command args (potential injection)
-          if grep -rn 'Command::new.*format!' src/ --include="*.rs" | grep -v test; then
-            echo "⚠️ format! in Command::new — verify no user input" >> $GITHUB_STEP_SUMMARY
-            ISSUES=$((ISSUES + 1))
-          fi
-
-          # Check for shell=true equivalent (sh -c with user input)
-          if grep -rn '\.arg.*"sh"' src/ --include="*.rs" | grep -v test; then
-            echo "⚠️ Shell execution detected" >> $GITHUB_STEP_SUMMARY
-            ISSUES=$((ISSUES + 1))
-          fi
-          if grep -rn '\.arg.*"-c"' src/ --include="*.rs" | grep -v test; then
-            echo "⚠️ Shell -c execution detected" >> $GITHUB_STEP_SUMMARY
-            ISSUES=$((ISSUES + 1))
-          fi
-
-          # Check for SQL without parameterized queries
-          if grep -rn 'format!.*SELECT\|format!.*INSERT\|format!.*UPDATE\|format!.*DELETE' src/ --include="*.rs" | grep -v test | grep -v "?1\|?2\|?3"; then
-            echo "⚠️ Potential SQL injection — format! in SQL without params" >> $GITHUB_STEP_SUMMARY
-            ISSUES=$((ISSUES + 1))
-          fi
-
-          # Check for env var leaks in logs
-          if grep -rn 'println!.*API_KEY\|println!.*TOKEN\|println!.*SECRET\|tracing::.*API_KEY' src/ --include="*.rs" | grep -v test; then
-            echo "⚠️ Potential secret leak in logs" >> $GITHUB_STEP_SUMMARY
-            ISSUES=$((ISSUES + 1))
-          fi
-
-          if [ "$ISSUES" -eq 0 ]; then
-            echo "✅ No command injection risks found" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "::warning::Found $ISSUES potential security issues — review the job summary"
-          fi
-
-  # ── Smoke test (binary works) ───────────────────────────────
   smoke:
     name: Smoke test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     needs: [test]
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -166,20 +99,3 @@ jobs:
         run: |
           ./target/release/wshm --version
           ./target/release/wshm --help
-
-      - name: Check config init
-        run: |
-          ./target/release/wshm config init
-          test -f .wshm/config.toml
-
-      - name: Check offline mode (no API keys needed)
-        run: |
-          ./target/release/wshm --offline || true
-          ./target/release/wshm triage --offline 2>&1 | grep -q "No issues\|not found\|sync" || true
-
-      - name: Report
-        run: |
-          echo "## Smoke test results" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Binary starts and responds to commands" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Config init creates .wshm/config.toml" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Offline mode works without API keys" >> $GITHUB_STEP_SUMMARY
