@@ -171,6 +171,8 @@ pub struct App {
     pub action_detail: Option<ActionDetailPopup>,
     /// Some("v0.29.0") if a newer release is available, None otherwise.
     pub update_available: Option<String>,
+    /// Transient status message (backup/restore feedback).
+    pub status_message: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -179,6 +181,7 @@ pub enum InputMode {
     AddRepoPath,
     DeleteConfirm,
     EditSetting,
+    RestorePath,
 }
 
 #[derive(Clone)]
@@ -262,6 +265,7 @@ impl App {
             settings_popup: None,
             action_detail: None,
             update_available: None,
+            status_message: None,
         };
         app.load_repos();
         app.load_actions();
@@ -832,12 +836,43 @@ impl App {
             Some(InputMode::EditSetting) => {
                 // Handled in mod.rs directly
             }
+            Some(InputMode::RestorePath) => {
+                if !self.input_buffer.is_empty() {
+                    let path = std::path::PathBuf::from(self.input_buffer.clone());
+                    match crate::pipelines::backup::run_restore(&path) {
+                        Ok(()) => {
+                            self.status_message = Some(format!("Restored from: {}", path.display()));
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Restore failed: {e}"));
+                        }
+                    }
+                }
+                self.input_mode = None;
+                self.input_buffer.clear();
+            }
             None => {}
         }
     }
 
     pub fn cancel_input(&mut self) {
         self.input_mode = None;
+        self.input_buffer.clear();
+    }
+
+    pub fn run_backup(&mut self) {
+        match crate::pipelines::backup::run_backup(None) {
+            Ok(path) => {
+                self.status_message = Some(format!("Backup saved: {}", path.display()));
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Backup failed: {e}"));
+            }
+        }
+    }
+
+    pub fn start_restore(&mut self) {
+        self.input_mode = Some(InputMode::RestorePath);
         self.input_buffer.clear();
     }
 

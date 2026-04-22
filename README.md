@@ -259,6 +259,9 @@ wshm login --claude    # Uses your existing Claude Max/Pro/Team subscription
 | `wshm dashboard` | Generate metrics dashboard (HTML + charts) |
 | `wshm notify` | Send priority summary (Discord/Slack/Teams/webhook) |
 | `wshm daemon` | Start persistent daemon (webhook + polling) |
+| `wshm backup` | Backup the local SQLite database |
+| `wshm backup --output <path>` | Backup to a specific file |
+| `wshm restore <file>` | Restore from a backup file |
 | `wshm config init` | Create `.wshm/config.toml` template |
 | `wshm model list` | List available local AI models |
 | `wshm model pull <name>` | Download a model for local inference |
@@ -413,6 +416,30 @@ Environment=RUST_LOG=info
 [Install]
 WantedBy=multi-user.target
 ```
+
+## Backup & Restore
+
+wshm stores all its state in `.wshm/state.db` (SQLite). Back it up before upgrades or migrations.
+
+```bash
+# Backup (atomic via VACUUM INTO, includes WAL checkpoint)
+wshm backup                        # → ~/.wshm/backups/state-20260422T143000.db
+wshm backup --output my-backup.db  # custom path
+
+# Restore
+wshm restore ~/.wshm/backups/state-20260422T143000.db
+# The existing DB is automatically saved as state.db.pre-restore before overwrite
+```
+
+**From the TUI:** press `b` to backup instantly, `B` to restore (prompts for file path).
+
+**From the web API (daemon mode):**
+
+| Method | Endpoint | Action |
+|--------|----------|--------|
+| `GET` | `/api/v1/backups` | List available backup files |
+| `POST` | `/api/v1/backup` | Create a new backup |
+| `POST` | `/api/v1/restore` | Restore from a backup (`{"path": "..."}`) |
 
 ## Safety
 

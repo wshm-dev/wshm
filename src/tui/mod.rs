@@ -177,6 +177,14 @@ fn run_loop(
                                 let _ = crate::update::check_and_update(true, false).await;
                             });
                         }
+                        // 'b' — backup state.db to default path
+                        KeyCode::Char('b') => {
+                            app.run_backup();
+                        }
+                        // 'B' — restore: prompt for backup file path
+                        KeyCode::Char('B') => {
+                            app.start_restore();
+                        }
                         _ => {}
                     }
                 }

@@ -836,7 +836,7 @@ fn draw_repos(f: &mut Frame, app: &App, area: Rect) {
 
     // Input prompt or help
     if let Some(ref mode) = app.input_mode {
-        let (prompt, hint) = match mode {
+        let (prompt, _hint) = match mode {
             InputMode::AddRepoSlug => (
                 "Repo slug (owner/repo): ",
                 "Enter to confirm, Esc to cancel",
@@ -844,6 +844,10 @@ fn draw_repos(f: &mut Frame, app: &App, area: Rect) {
             InputMode::AddRepoPath => ("Local path: ", "Enter to confirm, Esc to cancel"),
             InputMode::DeleteConfirm => ("Delete? (y/N): ", ""),
             InputMode::EditSetting => ("New value: ", "Enter to confirm, Esc to cancel"),
+            InputMode::RestorePath => (
+                "Backup file path: ",
+                "Enter to restore, Esc to cancel",
+            ),
         };
         let input = Paragraph::new(Line::from(vec![
             Span::styled(prompt, Style::default().fg(Color::Yellow)),
@@ -1203,13 +1207,26 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Span::raw("sort  "),
         Span::styled("r ", Style::default().fg(Color::Cyan)),
         Span::raw("refresh  "),
+        Span::styled("b ", Style::default().fg(Color::Cyan)),
+        Span::raw("backup  "),
+        Span::styled("B ", Style::default().fg(Color::Cyan)),
+        Span::raw("restore  "),
         Span::styled("u ", Style::default().fg(Color::Cyan)),
-        Span::raw("check update  "),
+        Span::raw("update  "),
         Span::styled("q ", Style::default().fg(Color::Cyan)),
         Span::raw("quit"),
     ];
 
-    if let Some(ref ver) = app.update_available {
+    if let Some(ref msg) = app.status_message {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!(" {msg} "),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if let Some(ref ver) = app.update_available {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             format!(" [u] Update available: {ver} "),
