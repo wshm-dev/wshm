@@ -832,10 +832,11 @@ impl App {
             }
             Some(InputMode::RestorePath) => {
                 if !self.input_buffer.is_empty() {
-                    let path = std::path::PathBuf::from(self.input_buffer.clone());
-                    match crate::pipelines::backup::run_restore(&path) {
+                    let file = self.input_buffer.clone();
+                    let args = crate::cli::RestoreArgs { file: file.clone(), force: true };
+                    match crate::pipelines::backup::restore(&args) {
                         Ok(()) => {
-                            self.status_message = Some(format!("Restored from: {}", path.display()));
+                            self.status_message = Some(format!("Restored from: {file}"));
                         }
                         Err(e) => {
                             self.status_message = Some(format!("Restore failed: {e}"));
@@ -855,13 +856,22 @@ impl App {
     }
 
     pub fn run_backup(&mut self) {
-        match crate::pipelines::backup::run_backup(None) {
-            Ok(path) => {
-                self.status_message = Some(format!("Backup saved: {}", path.display()));
+        let args = crate::cli::BackupArgs { output: None, include_logs: false };
+        match crate::pipelines::backup::backup(&args) {
+            Ok(()) => {
+                self.status_message = Some("Backup saved to .wshm/".to_string());
             }
             Err(e) => {
                 self.status_message = Some(format!("Backup failed: {e}"));
             }
+        }
+    }
+
+    pub async fn check_update(&mut self) {
+        if let Ok(Some(ver)) = crate::update::check_and_update(false, false).await {
+            self.update_available = Some(ver);
+        } else {
+            self.update_available = None;
         }
     }
 
