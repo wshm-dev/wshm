@@ -19,7 +19,7 @@ jobs:
       matrix:
         include:
           - name: Linux (CPU)
-            os: [self-hosted, linux, x64]
+            os: ubuntu-latest
           - name: Windows (CPU)
             os: windows-latest
 
@@ -120,7 +120,7 @@ jobs:
 
   smoke:
     name: Smoke test
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     needs: [test]
     steps:
       - uses: actions/checkout@v4
