@@ -142,30 +142,28 @@ jobs:
 
       - name: Update Homebrew tap
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           TAG="${{ github.ref_name || github.event.inputs.tag }}"
           VERSION="${TAG#v}"
           SHA_X86=$(sha256sum wshm-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')
           SHA_ARM=$(sha256sum wshm-aarch64-unknown-linux-gnu.tar.gz | awk '{print $1}')
 
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/wshm-dev/homebrew-tap.git" tap
-
-          cat > tap/Formula/wshm.rb << EOF
+          cat > wshm.rb << 'FORMULA'
           class Wshm < Formula
             desc "AI-powered GitHub agent — triage, PR analysis, merge queue"
             homepage "https://wshm.dev"
-            version "${VERSION}"
+            version "VERSION_PLACEHOLDER"
             license "SSPL-1.0"
 
             on_linux do
               on_intel do
-                url "https://github.com/wshm-dev/wshm/releases/download/${TAG}/wshm-x86_64-unknown-linux-gnu.tar.gz"
-                sha256 "${SHA_X86}"
+                url "https://github.com/wshm-dev/wshm/releases/download/TAG_PLACEHOLDER/wshm-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_X86_PLACEHOLDER"
               end
               on_arm do
-                url "https://github.com/wshm-dev/wshm/releases/download/${TAG}/wshm-aarch64-unknown-linux-gnu.tar.gz"
-                sha256 "${SHA_ARM}"
+                url "https://github.com/wshm-dev/wshm/releases/download/TAG_PLACEHOLDER/wshm-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_ARM_PLACEHOLDER"
               end
             end
 
@@ -177,11 +175,22 @@ jobs:
               assert_match version.to_s, shell_output("#{bin}/wshm --version")
             end
           end
-          EOF
+          FORMULA
+          sed -i "s/VERSION_PLACEHOLDER/$VERSION/g" wshm.rb
+          sed -i "s/TAG_PLACEHOLDER/$TAG/g" wshm.rb
+          sed -i "s/SHA_X86_PLACEHOLDER/$SHA_X86/g" wshm.rb
+          sed -i "s/SHA_ARM_PLACEHOLDER/$SHA_ARM/g" wshm.rb
+          sed -i 's/^          //' wshm.rb
 
-          cd tap
-          git config user.email "release-bot@wshm.dev"
-          git config user.name "wshm release bot"
-          git add Formula/wshm.rb
-          git commit -m "chore: update wshm formula to ${VERSION}"
-          git push
+          CONTENT=$(base64 -w 0 wshm.rb)
+          SHA=$(gh api repos/wshm-dev/homebrew-tap/contents/Formula/wshm.rb --jq '.sha' 2>/dev/null || echo "")
+          if [ -n "$SHA" ]; then
+            gh api -X PUT repos/wshm-dev/homebrew-tap/contents/Formula/wshm.rb \
+              -f message="chore: update wshm formula to ${VERSION}" \
+              -f content="$CONTENT" \
+              -f sha="$SHA"
+          else
+            gh api -X PUT repos/wshm-dev/homebrew-tap/contents/Formula/wshm.rb \
+              -f message="chore: update wshm formula to ${VERSION}" \
+              -f content="$CONTENT"
+          fi
