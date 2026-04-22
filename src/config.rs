@@ -651,7 +651,8 @@ impl WebConfig {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600));
+                let _ =
+                    std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600));
             }
         }
 
@@ -754,7 +755,10 @@ impl Default for BrandingConfig {
         Self {
             name: default_bot_name(),
             url: default_bot_url(),
-            avatar_url: Some("https://raw.githubusercontent.com/wshm-dev/wshm/main/assets/wizard-icon.png".to_string()),
+            avatar_url: Some(
+                "https://raw.githubusercontent.com/wshm-dev/wshm/main/assets/wizard-icon.png"
+                    .to_string(),
+            ),
             tagline: None,
             command_prefix: default_command_prefix(),
             footer_template: None,
@@ -1097,10 +1101,8 @@ impl GlobalConfig {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let content = toml::to_string_pretty(self)
-            .context("Failed to serialize global config")?;
-        fs::write(path, content)
-            .with_context(|| format!("Failed to write {}", path.display()))?;
+        let content = toml::to_string_pretty(self).context("Failed to serialize global config")?;
+        fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))?;
         Ok(())
     }
 
@@ -1162,7 +1164,9 @@ impl Config {
         // If label definitions exist, enforce allowlist
         if !self.labels.is_empty() {
             filtered.retain(|l| {
-                self.labels.iter().any(|def| def.name.eq_ignore_ascii_case(l))
+                self.labels
+                    .iter()
+                    .any(|def| def.name.eq_ignore_ascii_case(l))
             });
         }
 
@@ -1217,16 +1221,18 @@ impl Config {
                         let global = GlobalConfig::load(&global_path)
                             .context("Failed to load ~/.wshm/global.toml")?;
 
-                        let enabled_repos: Vec<_> = global.repos.iter()
-                            .filter(|r| r.enabled)
-                            .collect();
+                        let enabled_repos: Vec<_> =
+                            global.repos.iter().filter(|r| r.enabled).collect();
 
                         if enabled_repos.len() == 1 {
                             // Exactly one repo: use it automatically
                             let repo = enabled_repos[0];
                             let parts: Vec<&str> = repo.slug.splitn(2, '/').collect();
                             if parts.len() != 2 {
-                                anyhow::bail!("Invalid repo slug in global.toml: {} (expected owner/repo)", repo.slug);
+                                anyhow::bail!(
+                                    "Invalid repo slug in global.toml: {} (expected owner/repo)",
+                                    repo.slug
+                                );
                             }
                             config.repo_owner = parts[0].to_string();
                             config.repo_name = parts[1].to_string();

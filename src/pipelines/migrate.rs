@@ -8,7 +8,13 @@ use crate::cli::MigrateArgs;
 fn sanitize_schema_name(slug: &str) -> String {
     let sanitized: String = slug
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("wshm_{}", sanitized)
 }
@@ -178,9 +184,16 @@ async fn migrate_one(
                 reactions_total = EXCLUDED.reactions_total"
         );
         sqlx::query(&q)
-            .bind(row.0).bind(&row.1).bind(&row.2).bind(&row.3)
-            .bind(&row.4).bind(&row.5).bind(&row.6).bind(&row.7)
-            .bind(row.8 as i32).bind(row.9 as i32)
+            .bind(row.0)
+            .bind(&row.1)
+            .bind(&row.2)
+            .bind(&row.3)
+            .bind(&row.4)
+            .bind(&row.5)
+            .bind(&row.6)
+            .bind(&row.7)
+            .bind(row.8 as i32)
+            .bind(row.9 as i32)
             .execute(pool)
             .await?;
     }
@@ -228,22 +241,31 @@ async fn migrate_one(
                 updated_at = EXCLUDED.updated_at"
         );
         sqlx::query(&q)
-            .bind(row.0).bind(&row.1).bind(&row.2).bind(&row.3)
-            .bind(&row.4).bind(&row.5).bind(&row.6).bind(&row.7)
-            .bind(&row.8).bind(&row.9).bind(row.10).bind(&row.11)
-            .bind(&row.12).bind(&row.13)
+            .bind(row.0)
+            .bind(&row.1)
+            .bind(&row.2)
+            .bind(&row.3)
+            .bind(&row.4)
+            .bind(&row.5)
+            .bind(&row.6)
+            .bind(&row.7)
+            .bind(&row.8)
+            .bind(&row.9)
+            .bind(row.10)
+            .bind(&row.11)
+            .bind(&row.12)
+            .bind(&row.13)
             .execute(pool)
             .await?;
     }
     summary.pull_requests = pulls.len();
 
     // --- Comments ---
-    let comments: Vec<(i64, i64, String, Option<String>, String)> =
-        db.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, issue_number, body, author, created_at FROM comments"
-            )?;
-            let rows = stmt.query_map([], |row| {
+    let comments: Vec<(i64, i64, String, Option<String>, String)> = db.with_conn(|conn| {
+        let mut stmt =
+            conn.prepare("SELECT id, issue_number, body, author, created_at FROM comments")?;
+        let rows = stmt
+            .query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
@@ -251,9 +273,10 @@ async fn migrate_one(
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, String>(4)?,
                 ))
-            })?.collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })?;
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })?;
 
     for row in &comments {
         let q = format!(
@@ -263,27 +286,30 @@ async fn migrate_one(
                 body = EXCLUDED.body, author = EXCLUDED.author"
         );
         sqlx::query(&q)
-            .bind(row.0).bind(row.1).bind(&row.2).bind(&row.3).bind(&row.4)
+            .bind(row.0)
+            .bind(row.1)
+            .bind(&row.2)
+            .bind(&row.3)
+            .bind(&row.4)
             .execute(pool)
             .await?;
     }
     summary.comments = comments.len();
 
     // --- Labels ---
-    let labels: Vec<(String, Option<String>, Option<String>)> =
-        db.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT name, color, description FROM labels"
-            )?;
-            let rows = stmt.query_map([], |row| {
+    let labels: Vec<(String, Option<String>, Option<String>)> = db.with_conn(|conn| {
+        let mut stmt = conn.prepare("SELECT name, color, description FROM labels")?;
+        let rows = stmt
+            .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
                 ))
-            })?.collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })?;
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })?;
 
     for row in &labels {
         let q = format!(
@@ -293,7 +319,9 @@ async fn migrate_one(
                 color = EXCLUDED.color, description = EXCLUDED.description"
         );
         sqlx::query(&q)
-            .bind(&row.0).bind(&row.1).bind(&row.2)
+            .bind(&row.0)
+            .bind(&row.1)
+            .bind(&row.2)
             .execute(pool)
             .await?;
     }
@@ -334,9 +362,16 @@ async fn migrate_one(
                 acted_at = EXCLUDED.acted_at"
         );
         sqlx::query(&q)
-            .bind(row.0).bind(&row.1).bind(row.2).bind(&row.3)
-            .bind(&row.4).bind(&row.5).bind(row.6).bind(row.7)
-            .bind(&row.8).bind(&row.9)
+            .bind(row.0)
+            .bind(&row.1)
+            .bind(row.2)
+            .bind(&row.3)
+            .bind(&row.4)
+            .bind(&row.5)
+            .bind(row.6)
+            .bind(row.7)
+            .bind(&row.8)
+            .bind(&row.9)
             .execute(pool)
             .await?;
     }
@@ -371,28 +406,31 @@ async fn migrate_one(
                 analyzed_at = EXCLUDED.analyzed_at"
         );
         sqlx::query(&q)
-            .bind(row.0).bind(&row.1).bind(&row.2).bind(&row.3)
-            .bind(&row.4).bind(&row.5)
+            .bind(row.0)
+            .bind(&row.1)
+            .bind(&row.2)
+            .bind(&row.3)
+            .bind(&row.4)
+            .bind(&row.5)
             .execute(pool)
             .await?;
     }
     summary.pr_analyses = analyses.len();
 
     // --- Sync Log ---
-    let sync_entries: Vec<(String, String, Option<String>)> =
-        db.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT table_name, last_synced_at, etag FROM sync_log"
-            )?;
-            let rows = stmt.query_map([], |row| {
+    let sync_entries: Vec<(String, String, Option<String>)> = db.with_conn(|conn| {
+        let mut stmt = conn.prepare("SELECT table_name, last_synced_at, etag FROM sync_log")?;
+        let rows = stmt
+            .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
                 ))
-            })?.collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })?;
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })?;
 
     for row in &sync_entries {
         let q = format!(
@@ -402,7 +440,9 @@ async fn migrate_one(
                 last_synced_at = EXCLUDED.last_synced_at, etag = EXCLUDED.etag"
         );
         sqlx::query(&q)
-            .bind(&row.0).bind(&row.1).bind(&row.2)
+            .bind(&row.0)
+            .bind(&row.1)
+            .bind(&row.2)
             .execute(pool)
             .await?;
     }
@@ -439,8 +479,14 @@ async fn migrate_one(
                 processed_at = EXCLUDED.processed_at"
         );
         sqlx::query(&q)
-            .bind(row.0).bind(&row.1).bind(&row.2).bind(row.3)
-            .bind(&row.4).bind(&row.5).bind(&row.6).bind(&row.7)
+            .bind(row.0)
+            .bind(&row.1)
+            .bind(&row.2)
+            .bind(row.3)
+            .bind(&row.4)
+            .bind(&row.5)
+            .bind(&row.6)
+            .bind(&row.7)
             .bind(&row.8)
             .execute(pool)
             .await?;
@@ -485,12 +531,15 @@ impl std::fmt::Display for MigrationSummary {
 /// Entry point for `wshm migrate`.
 #[cfg(feature = "export-postgres")]
 pub async fn run(args: &MigrateArgs, cli: &crate::cli::Cli) -> Result<()> {
-    use anyhow::Context;
     use crate::config;
     use crate::db::Database;
+    use anyhow::Context;
 
     if args.to != "postgresql" {
-        anyhow::bail!("Unsupported target '{}'. Currently only 'postgresql' is supported.", args.to);
+        anyhow::bail!(
+            "Unsupported target '{}'. Currently only 'postgresql' is supported.",
+            args.to
+        );
     }
 
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -501,9 +550,16 @@ pub async fn run(args: &MigrateArgs, cli: &crate::cli::Cli) -> Result<()> {
 
     if args.all {
         // Multi-repo mode: read global config
-        let config_path = args.config.clone().unwrap_or_else(config::GlobalConfig::default_path);
-        let global = config::GlobalConfig::load(&config_path)
-            .with_context(|| format!("Failed to load global config from {}", config_path.display()))?;
+        let config_path = args
+            .config
+            .clone()
+            .unwrap_or_else(config::GlobalConfig::default_path);
+        let global = config::GlobalConfig::load(&config_path).with_context(|| {
+            format!(
+                "Failed to load global config from {}",
+                config_path.display()
+            )
+        })?;
 
         let enabled_repos: Vec<_> = global.repos.iter().filter(|r| r.enabled).collect();
         if enabled_repos.is_empty() {
@@ -516,14 +572,19 @@ pub async fn run(args: &MigrateArgs, cli: &crate::cli::Cli) -> Result<()> {
         for repo in &enabled_repos {
             let db_path = repo.path.join(".wshm").join("state.db");
             if !db_path.exists() {
-                println!("  [skip] {}: no state.db at {}", repo.slug, db_path.display());
+                println!(
+                    "  [skip] {}: no state.db at {}",
+                    repo.slug,
+                    db_path.display()
+                );
                 continue;
             }
 
             let db = Database::open_path(&db_path)
                 .with_context(|| format!("Failed to open SQLite at {}", db_path.display()))?;
 
-            let summary = migrate_one(&db, &repo.slug, &pool).await
+            let summary = migrate_one(&db, &repo.slug, &pool)
+                .await
                 .with_context(|| format!("Failed to migrate {}", repo.slug))?;
 
             println!("  {}", summary);
@@ -560,8 +621,8 @@ pub async fn run(args: &MigrateArgs, _cli: &crate::cli::Cli) -> Result<()> {
 /// Migrate from a specific SQLite path (used by tests or scripts).
 #[cfg(feature = "export-postgres")]
 pub async fn migrate_from_path(db_path: &std::path::Path, slug: &str, pg_uri: &str) -> Result<()> {
-    use anyhow::Context;
     use crate::db::Database;
+    use anyhow::Context;
 
     let db = Database::open_path(db_path)?;
 
@@ -585,7 +646,10 @@ mod tests {
     #[test]
     fn test_sanitize_schema_name() {
         assert_eq!(sanitize_schema_name("rtk-ai/rtk"), "wshm_rtk_ai_rtk");
-        assert_eq!(sanitize_schema_name("my-org/my-repo"), "wshm_my_org_my_repo");
+        assert_eq!(
+            sanitize_schema_name("my-org/my-repo"),
+            "wshm_my_org_my_repo"
+        );
         assert_eq!(sanitize_schema_name("simple"), "wshm_simple");
         assert_eq!(
             sanitize_schema_name("org/repo.with.dots"),

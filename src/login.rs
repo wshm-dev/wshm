@@ -71,7 +71,10 @@ fn load_credentials() -> std::collections::HashMap<String, String> {
     let content = match fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Warning: could not read credentials file {}: {e}", path.display());
+            eprintln!(
+                "Warning: could not read credentials file {}: {e}",
+                path.display()
+            );
             return std::collections::HashMap::new();
         }
     };
@@ -147,7 +150,10 @@ fn ensure_gitignore() {
             return;
         }
         if let Err(e) = fs::write(gitignore, format!("{content}\ncredentials\n")) {
-            eprintln!("Warning: could not update {}: {e} — credentials may not be gitignored", gitignore.display());
+            eprintln!(
+                "Warning: could not update {}: {e} — credentials may not be gitignored",
+                gitignore.display()
+            );
         }
     } else {
         if let Err(e) = fs::create_dir_all(".wshm") {
@@ -155,7 +161,10 @@ fn ensure_gitignore() {
             return;
         }
         if let Err(e) = fs::write(gitignore, "logs/\ncredentials\n") {
-            eprintln!("Warning: could not create {}: {e} — credentials may not be gitignored", gitignore.display());
+            eprintln!(
+                "Warning: could not create {}: {e} — credentials may not be gitignored",
+                gitignore.display()
+            );
         }
     }
 }

@@ -73,7 +73,9 @@ fn run_loop(
                                 if app.input_mode == Some(app::InputMode::EditSetting) {
                                     // Apply edited value to settings
                                     if let Some(ref mut settings) = app.settings_popup {
-                                        if let Some(item) = settings.items.get_mut(settings.selected) {
+                                        if let Some(item) =
+                                            settings.items.get_mut(settings.selected)
+                                        {
                                             item.value = app.input_buffer.clone();
                                         }
                                     }
@@ -84,7 +86,9 @@ fn run_loop(
                                 }
                             }
                             KeyCode::Esc => app.cancel_input(),
-                            KeyCode::Backspace => { app.input_buffer.pop(); }
+                            KeyCode::Backspace => {
+                                app.input_buffer.pop();
+                            }
                             KeyCode::Char(c) => app.input_buffer.push(c),
                             _ => {}
                         }
@@ -94,7 +98,9 @@ fn run_loop(
                     // Action detail popup
                     if app.action_detail.is_some() {
                         match key.code {
-                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => app.close_action_detail(),
+                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                                app.close_action_detail()
+                            }
                             KeyCode::Up | KeyCode::Char('k') => app.action_detail_scroll_up(),
                             KeyCode::Down | KeyCode::Char('j') => app.action_detail_scroll_down(),
                             _ => {}
@@ -119,7 +125,10 @@ fn run_loop(
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                         KeyCode::Char('1') => app.active_tab = app::Tab::Repos,
-                        KeyCode::Char('2') => { app.load_actions(); app.active_tab = app::Tab::Action; }
+                        KeyCode::Char('2') => {
+                            app.load_actions();
+                            app.active_tab = app::Tab::Action;
+                        }
                         KeyCode::Char('3') => app.active_tab = app::Tab::Issues,
                         KeyCode::Char('4') => app.active_tab = app::Tab::PullRequests,
                         KeyCode::Char('5') => app.active_tab = app::Tab::Queue,

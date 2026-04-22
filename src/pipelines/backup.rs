@@ -41,8 +41,8 @@ pub fn backup(args: &BackupArgs) -> Result<()> {
     }
 
     // Create tar.gz
-    let file = fs::File::create(&output)
-        .with_context(|| format!("Cannot create {}", output.display()))?;
+    let file =
+        fs::File::create(&output).with_context(|| format!("Cannot create {}", output.display()))?;
     let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut tar = tar::Builder::new(enc);
 
@@ -108,7 +108,8 @@ pub fn restore(args: &RestoreArgs) -> Result<()> {
             fs::create_dir_all(parent)?;
         }
 
-        entry.unpack(&target)
+        entry
+            .unpack(&target)
             .with_context(|| format!("Failed to extract {}", path.display()))?;
         restored += 1;
     }

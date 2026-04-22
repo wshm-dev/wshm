@@ -181,41 +181,7 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             let slug = config.repo_slug();
             crate::pipelines::context::run(&db, &slug)?;
         }
-        Some(Command::Model(model_cmd)) => match model_cmd {
-            crate::cli::ModelCommand::Pull { name } => {
-                crate::ai::local::pull_model(name)?;
-            }
-            crate::cli::ModelCommand::List => {
-                let models = crate::ai::local::list_models()?;
-                if models.is_empty() {
-                    println!("No models available.");
-                } else {
-                    println!("{:<20} {:<10} STATUS", "MODEL", "SIZE");
-                    println!("{}", "-".repeat(45));
-                    for (name, size, downloaded) in &models {
-                        let size_str = format!("{:.0} MB", *size as f64 / 1_000_000.0);
-                        let status = if *downloaded { "downloaded" } else { "available" };
-                        println!("{:<20} {:<10} {}", name, size_str, status);
-                    }
-                }
-            }
-            crate::cli::ModelCommand::Remove { name } => {
-                let spec = crate::ai::local::KNOWN_MODELS
-                    .iter()
-                    .find(|m| m.name == name);
-                let filename = spec.map(|s| s.filename).unwrap_or(name.as_str());
-                if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
-                    anyhow::bail!("Invalid model name: {name}");
-                }
-                let path = crate::ai::local::models_dir().join(filename);
-                if path.exists() {
-                    std::fs::remove_file(&path)?;
-                    println!("Removed model: {name}");
-                } else {
-                    println!("Model '{name}' not found locally.");
-                }
-            }
-        },
+
         Some(Command::Login(args)) => {
             if args.license {
                 crate::license::login()?;

@@ -44,7 +44,7 @@ pub async fn run(
     }
 
     let mut scored: Vec<ScoredPr> = pulls.into_iter().map(|pr| score_pr(&pr, config)).collect();
-    scored.sort_by(|a, b| b.score.cmp(&a.score));
+    scored.sort_by_key(|b| std::cmp::Reverse(b.score));
 
     if !json {
         println!("Merge Queue ({} PRs):", scored.len());

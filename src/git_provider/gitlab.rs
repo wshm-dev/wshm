@@ -60,7 +60,10 @@ impl GitLabProvider {
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
-            anyhow::bail!("GitLab API error ({status}): {}", &text[..text.len().min(200)]);
+            anyhow::bail!(
+                "GitLab API error ({status}): {}",
+                &text[..text.len().min(200)]
+            );
         }
         Ok(serde_json::from_str(&text)?)
     }
@@ -78,7 +81,10 @@ impl GitLabProvider {
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
-            anyhow::bail!("GitLab API error ({status}): {}", &text[..text.len().min(200)]);
+            anyhow::bail!(
+                "GitLab API error ({status}): {}",
+                &text[..text.len().min(200)]
+            );
         }
         Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
     }
@@ -145,7 +151,11 @@ impl GitProvider for GitLabProvider {
                 state: "open".to_string(),
                 labels: i["labels"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 author: i["author"]["username"].as_str().map(String::from),
                 created_at: i["created_at"].as_str().unwrap_or("").to_string(),
@@ -160,7 +170,11 @@ impl GitProvider for GitLabProvider {
         let current = self.get(&format!("issues/{number}")).await?;
         let mut existing: Vec<String> = current["labels"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         for l in labels {
             if !existing.iter().any(|e| e.eq_ignore_ascii_case(l)) {
@@ -178,9 +192,16 @@ impl GitProvider for GitLabProvider {
         let current = self.get(&format!("issues/{number}")).await?;
         let existing: Vec<String> = current["labels"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        let filtered: Vec<&String> = existing.iter().filter(|l| !l.eq_ignore_ascii_case(label)).collect();
+        let filtered: Vec<&String> = existing
+            .iter()
+            .filter(|l| !l.eq_ignore_ascii_case(label))
+            .collect();
         self.put(
             &format!("issues/{number}"),
             &serde_json::json!({ "labels": filtered.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",") }),
@@ -212,7 +233,9 @@ impl GitProvider for GitLabProvider {
     }
 
     async fn find_comment_with_marker(&self, number: u64, marker: &str) -> Result<Option<u64>> {
-        let notes = self.get(&format!("issues/{number}/notes?per_page=100")).await?;
+        let notes = self
+            .get(&format!("issues/{number}/notes?per_page=100"))
+            .await?;
         if let Some(arr) = notes.as_array() {
             for note in arr {
                 let body = note["body"].as_str().unwrap_or("");
@@ -264,7 +287,11 @@ impl GitProvider for GitLabProvider {
                 state: "open".to_string(),
                 labels: mr["labels"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 author: mr["author"]["username"].as_str().map(String::from),
                 head_sha: mr["sha"].as_str().map(String::from),
@@ -296,7 +323,11 @@ impl GitProvider for GitLabProvider {
                 body: mr["description"].as_str().map(String::from),
                 labels: mr["labels"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default(),
             })
             .collect())
@@ -388,7 +419,11 @@ impl GitProvider for GitLabProvider {
         let current = self.get(&format!("merge_requests/{number}")).await?;
         let mut existing: Vec<String> = current["labels"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         for l in labels {
             if !existing.iter().any(|e| e.eq_ignore_ascii_case(l)) {
@@ -404,7 +439,9 @@ impl GitProvider for GitLabProvider {
 
     async fn comment_pr(&self, number: u64, body: &str, marker: &str) -> Result<()> {
         // Find existing note with marker
-        let notes = self.get(&format!("merge_requests/{number}/notes?per_page=100")).await?;
+        let notes = self
+            .get(&format!("merge_requests/{number}/notes?per_page=100"))
+            .await?;
         if let Some(arr) = notes.as_array() {
             for note in arr {
                 let note_body = note["body"].as_str().unwrap_or("");

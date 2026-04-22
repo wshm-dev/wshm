@@ -27,11 +27,7 @@ pub fn set_feature_gate(f: FeatureGateFn) {
 /// Check if a pro feature is available.
 /// Returns false in OSS build (no hook registered).
 pub fn has_feature(feature: &str) -> bool {
-    FEATURE_GATE.with(|cell| {
-        cell.borrow()
-            .map(|f| f(feature))
-            .unwrap_or(false)
-    })
+    FEATURE_GATE.with(|cell| cell.borrow().map(|f| f(feature)).unwrap_or(false))
 }
 
 /// Returns true if running as pro edition.
@@ -76,11 +72,9 @@ pub fn set_output_hook(f: OutputHookFn) {
 }
 
 pub fn apply_output_hook(text: &str) -> String {
-    OUTPUT_HOOK.with(|cell| {
-        match *cell.borrow() {
-            Some(f) => f(text),
-            None => text.to_string(),
-        }
+    OUTPUT_HOOK.with(|cell| match *cell.borrow() {
+        Some(f) => f(text),
+        None => text.to_string(),
     })
 }
 
@@ -99,12 +93,8 @@ pub fn apply_output_hook(text: &str) -> String {
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-pub type AutoFixHook = for<'a> fn(
-    &'a Config,
-    &'a Database,
-    &'a GhClient,
-    u64,
-) -> BoxFuture<'a, anyhow::Result<()>>;
+pub type AutoFixHook =
+    for<'a> fn(&'a Config, &'a Database, &'a GhClient, u64) -> BoxFuture<'a, anyhow::Result<()>>;
 
 pub type ReviewHook = for<'a> fn(
     &'a Config,

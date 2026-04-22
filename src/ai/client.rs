@@ -348,7 +348,10 @@ impl AiClient {
         if self.provider.api_url.contains("openai.azure.com") {
             req = req.header("api-key", self.provider.api_key.as_str());
         } else if !self.provider.api_key.is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", self.provider.api_key.as_str()));
+            req = req.header(
+                "Authorization",
+                format!("Bearer {}", self.provider.api_key.as_str()),
+            );
         }
 
         let response = req
@@ -453,7 +456,11 @@ fn truncate_error_body(body: &str) -> String {
         trimmed.to_string()
     } else {
         // Find a safe UTF-8 boundary near 200 chars
-        let end = trimmed.char_indices().nth(200).map(|(i, _)| i).unwrap_or(trimmed.len());
+        let end = trimmed
+            .char_indices()
+            .nth(200)
+            .map(|(i, _)| i)
+            .unwrap_or(trimmed.len());
         format!("{}… (truncated)", &trimmed[..end])
     }
 }

@@ -86,7 +86,9 @@ pub fn prompt_consent_if_needed() -> ConsentState {
     }
 
     // Non-interactive detection: CI, non-TTY, or env override
-    if std::env::var("CI").is_ok() || std::env::var("WSHM_TELEMETRY_DISABLED").ok().as_deref() == Some("1") {
+    if std::env::var("CI").is_ok()
+        || std::env::var("WSHM_TELEMETRY_DISABLED").ok().as_deref() == Some("1")
+    {
         let _ = set_consent(false);
         return ConsentState::Declined;
     }
@@ -133,7 +135,9 @@ pub fn prompt_consent_if_needed() -> ConsentState {
     let _ = set_consent(accepted);
 
     if accepted {
-        println!("\nThank you! You can withdraw consent anytime with `wshm telemetry --decline`.\n");
+        println!(
+            "\nThank you! You can withdraw consent anytime with `wshm telemetry --decline`.\n"
+        );
         ConsentState::Accepted
     } else {
         println!("\nNo telemetry will be sent. You can enable it later with `wshm telemetry --accept`.\n");
@@ -315,10 +319,15 @@ fn detect_install_method() -> &'static str {
         .to_string_lossy()
         .to_string();
 
-    if path.contains("homebrew") || path.contains("Cellar") { "homebrew" }
-    else if path.contains("cargo") { "cargo" }
-    else if path.contains(".local/bin") { "manual" }
-    else { "unknown" }
+    if path.contains("homebrew") || path.contains("Cellar") {
+        "homebrew"
+    } else if path.contains("cargo") {
+        "cargo"
+    } else if path.contains(".local/bin") {
+        "manual"
+    } else {
+        "unknown"
+    }
 }
 
 fn telemetry_marker_path() -> PathBuf {

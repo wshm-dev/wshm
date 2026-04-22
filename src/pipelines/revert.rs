@@ -17,10 +17,16 @@ pub async fn run(db: &Database, gh: &GhClient, apply: bool) -> Result<()> {
         // Find and remove wshm comment
         if let Ok(Some(comment_id)) = gh.find_wshm_comment(issue.number, &gh.comment_marker).await {
             if apply {
-                info!("Deleting wshm comment {comment_id} on issue #{}", issue.number);
+                info!(
+                    "Deleting wshm comment {comment_id} on issue #{}",
+                    issue.number
+                );
                 gh.delete_comment(comment_id).await?;
             } else {
-                println!("[DRY-RUN] Would delete wshm comment on issue #{}", issue.number);
+                println!(
+                    "[DRY-RUN] Would delete wshm comment on issue #{}",
+                    issue.number
+                );
             }
             comment_count += 1;
         }
@@ -31,10 +37,16 @@ pub async fn run(db: &Database, gh: &GhClient, apply: bool) -> Result<()> {
             if apply {
                 info!("Removing label '{}' from issue #{}", label, issue.number);
                 if let Err(e) = gh.remove_label(issue.number, label).await {
-                    tracing::warn!("Failed to remove label '{label}' from #{}: {e}", issue.number);
+                    tracing::warn!(
+                        "Failed to remove label '{label}' from #{}: {e}",
+                        issue.number
+                    );
                 }
             } else {
-                println!("[DRY-RUN] Would remove label '{}' from issue #{}", label, issue.number);
+                println!(
+                    "[DRY-RUN] Would remove label '{}' from issue #{}",
+                    label, issue.number
+                );
             }
             label_count += 1;
         }
@@ -64,7 +76,10 @@ pub async fn run(db: &Database, gh: &GhClient, apply: bool) -> Result<()> {
     }
 
     if apply {
-        println!("Reverted: {} comments deleted, {} labels removed.", comment_count, label_count);
+        println!(
+            "Reverted: {} comments deleted, {} labels removed.",
+            comment_count, label_count
+        );
     } else {
         println!(
             "Dry-run: would delete {} comments, remove {} labels, clear triage_results + pr_analyses.",

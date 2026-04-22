@@ -23,13 +23,25 @@ pub async fn full_sync(gh: &Client, db: &Database) -> Result<()> {
 pub async fn incremental_sync_full(gh: &Client, db: &Database) -> Result<()> {
     info!("Starting incremental sync...");
 
-    let issues_since = db.get_sync_entry("issues").ok().flatten().map(|e| e.last_synced_at);
-    let pulls_since = db.get_sync_entry("pulls").ok().flatten().map(|e| e.last_synced_at);
+    let issues_since = db
+        .get_sync_entry("issues")
+        .ok()
+        .flatten()
+        .map(|e| e.last_synced_at);
+    let pulls_since = db
+        .get_sync_entry("pulls")
+        .ok()
+        .flatten()
+        .map(|e| e.last_synced_at);
 
     if issues_since.is_none() && pulls_since.is_none() {
         info!("First sync — fetching all data");
     } else {
-        info!("Incremental: issues since {:?}, pulls since {:?}", issues_since.as_deref(), pulls_since.as_deref());
+        info!(
+            "Incremental: issues since {:?}, pulls since {:?}",
+            issues_since.as_deref(),
+            pulls_since.as_deref()
+        );
     }
 
     sync_issues(gh, db, issues_since.as_deref()).await?;
@@ -42,7 +54,10 @@ pub async fn incremental_sync_full(gh: &Client, db: &Database) -> Result<()> {
 /// Forever-incremental PR sync: stops paginating once we hit PRs older than `since`.
 async fn sync_pulls_incremental(gh: &Client, db: &Database, since: Option<&str>) -> Result<()> {
     if since.is_some() {
-        info!("Syncing pull requests (incremental, since {})", since.unwrap_or(""));
+        info!(
+            "Syncing pull requests (incremental, since {})",
+            since.unwrap_or("")
+        );
     } else {
         info!("Syncing pull requests (first sync, full fetch)");
     }
@@ -116,7 +131,11 @@ async fn sync_pulls(gh: &Client, db: &Database) -> Result<()> {
 }
 
 /// Shared finalize step: fetch mergeable status, upsert, update sync log.
-async fn sync_pulls_finalize(gh: &Client, db: &Database, pulls: &mut [crate::db::pulls::PullRequest]) -> Result<()> {
+async fn sync_pulls_finalize(
+    gh: &Client,
+    db: &Database,
+    pulls: &mut [crate::db::pulls::PullRequest],
+) -> Result<()> {
     let count = pulls.len();
 
     // Fetch mergeable status concurrently (GitHub only returns it on single-PR endpoint)
@@ -128,17 +147,24 @@ async fn sync_pulls_finalize(gh: &Client, db: &Database, pulls: &mut [crate::db:
         .collect();
 
     if !needs_mergeable.is_empty() {
-        info!("Fetching mergeable status for {} PRs (concurrent)...", needs_mergeable.len());
-        let results: Vec<(usize, Result<Option<bool>>)> =
-            futures::future::join_all(needs_mergeable.iter().map(|&(idx, number)| async move {
-                (idx, gh.fetch_pr_mergeable(number).await)
-            }))
-            .await;
+        info!(
+            "Fetching mergeable status for {} PRs (concurrent)...",
+            needs_mergeable.len()
+        );
+        let results: Vec<(usize, Result<Option<bool>>)> = futures::future::join_all(
+            needs_mergeable
+                .iter()
+                .map(|&(idx, number)| async move { (idx, gh.fetch_pr_mergeable(number).await) }),
+        )
+        .await;
 
         for (idx, result) in results {
             match result {
                 Ok(m) => pulls[idx].mergeable = m,
-                Err(e) => tracing::warn!("Failed to fetch mergeable for PR #{}: {e}", pulls[idx].number),
+                Err(e) => tracing::warn!(
+                    "Failed to fetch mergeable for PR #{}: {e}",
+                    pulls[idx].number
+                ),
             }
         }
     }

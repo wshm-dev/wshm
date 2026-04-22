@@ -112,18 +112,14 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         .prepare("SELECT content_hash FROM triage_results LIMIT 0")
         .is_ok();
     if !has_triage_hash {
-        conn.execute_batch(
-            "ALTER TABLE triage_results ADD COLUMN content_hash TEXT;",
-        )?;
+        conn.execute_batch("ALTER TABLE triage_results ADD COLUMN content_hash TEXT;")?;
     }
 
     let has_pr_hash: bool = conn
         .prepare("SELECT content_hash FROM pr_analyses LIMIT 0")
         .is_ok();
     if !has_pr_hash {
-        conn.execute_batch(
-            "ALTER TABLE pr_analyses ADD COLUMN content_hash TEXT;",
-        )?;
+        conn.execute_batch("ALTER TABLE pr_analyses ADD COLUMN content_hash TEXT;")?;
     }
 
     Ok(())
@@ -148,7 +144,12 @@ pub fn compute_issue_hash(title: &str, body: Option<&str>, labels: &[String]) ->
 }
 
 /// Compute a stable content hash for a PR.
-pub fn compute_pr_hash(title: &str, body: Option<&str>, head_sha: Option<&str>, labels: &[String]) -> String {
+pub fn compute_pr_hash(
+    title: &str,
+    body: Option<&str>,
+    head_sha: Option<&str>,
+    labels: &[String],
+) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(title.as_bytes());

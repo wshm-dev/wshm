@@ -7,8 +7,6 @@ license = "SSPL-1.0"
 
 [features]
 default = []
-metal = ["llama-cpp-2/metal"]
-cuda = ["llama-cpp-2/cuda"]
 
 # Export sinks (cloud storage)
 export-s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
@@ -53,13 +51,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 git2 = "0.19"
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
-llama-cpp-2 = "0.1"
 encoding_rs = "0.8"
-hf-hub = "0.4"
-indicatif = "0.17"
 dirs = "6.0.0"
 getrandom = "0.2"
-ureq = "2"
+ureq = { version = "2", features = ["json"] }
 hostname = "0.4"
 base64 = "0.22"
 regex = "1.12.3"

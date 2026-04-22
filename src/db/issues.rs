@@ -65,7 +65,11 @@ impl Database {
         self.with_conn(|conn| {
             // Read current labels
             let current: String = conn
-                .query_row("SELECT labels FROM issues WHERE number = ?1", params![number], |row| row.get(0))
+                .query_row(
+                    "SELECT labels FROM issues WHERE number = ?1",
+                    params![number],
+                    |row| row.get(0),
+                )
                 .unwrap_or_else(|_| "[]".to_string());
             let mut labels: Vec<String> = serde_json::from_str(&current).unwrap_or_default();
 
@@ -156,7 +160,9 @@ pub fn get_open_issues(conn: &Connection) -> Result<Vec<Issue>> {
          FROM issues WHERE state = 'open' ORDER BY number DESC",
     )?;
 
-    let issues = stmt.query_map([], row_to_issue)?.collect::<Result<Vec<_>, _>>()?;
+    let issues = stmt
+        .query_map([], row_to_issue)?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(issues)
 }
 
@@ -170,7 +176,9 @@ pub fn get_untriaged_issues(conn: &Connection) -> Result<Vec<Issue>> {
          LIMIT 20",
     )?;
 
-    let issues = stmt.query_map([], row_to_issue)?.collect::<Result<Vec<_>, _>>()?;
+    let issues = stmt
+        .query_map([], row_to_issue)?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(issues)
 }
 
@@ -307,7 +315,8 @@ mod tests {
             relevant_files: vec![],
         };
         let hash2 = compute_issue_hash(&issue2.title, issue2.body.as_deref(), &issue2.labels);
-        db.upsert_triage_result_with_hash(&classification, 2, Some(&hash2)).unwrap();
+        db.upsert_triage_result_with_hash(&classification, 2, Some(&hash2))
+            .unwrap();
 
         // Issue 3: triaged, but content changed
         let mut issue3 = test_issue();
@@ -315,7 +324,8 @@ mod tests {
         issue3.title = "Content changed".to_string();
         db.upsert_issue(&issue3).unwrap();
         let hash3_old = compute_issue_hash(&issue3.title, issue3.body.as_deref(), &issue3.labels);
-        db.upsert_triage_result_with_hash(&classification, 3, Some(&hash3_old)).unwrap();
+        db.upsert_triage_result_with_hash(&classification, 3, Some(&hash3_old))
+            .unwrap();
 
         // Now modify issue 3's title (simulates content change)
         issue3.title = "Content changed - UPDATED".to_string();
