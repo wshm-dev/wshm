@@ -213,15 +213,3 @@ wshm revert --apply
 - All triage results and PR analyses from the local database
 
 **Web UI:** `/revert` tab — preview with counts before executing.
-
----
-
-## Daemon Webhook Mode
-
-Run wshm as a persistent service that reacts to GitHub webhooks in real-time.
-
-```bash
-wshm daemon
-```
-
-See [Daemon](daemon.md) for setup.

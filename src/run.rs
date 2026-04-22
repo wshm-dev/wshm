@@ -181,7 +181,6 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             let slug = config.repo_slug();
             crate::pipelines::context::run(&db, &slug)?;
         }
-
         Some(Command::Login(args)) => {
             if args.license {
                 crate::license::login()?;
@@ -249,6 +248,30 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
                 crate::tui::run(&config, &db).await?;
             }
         },
+        Some(Command::Daemon(args)) => {
+            // Handle systemd install/uninstall first
+            if args.install {
+                return crate::daemon::systemd::install(args);
+            }
+            if args.uninstall {
+                return crate::daemon::systemd::uninstall();
+            }
+
+            // Multi-repo mode: load global config if provided or if present at default path
+            let global_path = args
+                .config
+                .clone()
+                .unwrap_or_else(crate::config::GlobalConfig::default_path);
+
+            if global_path.exists() {
+                let global = crate::config::GlobalConfig::load(&global_path)?;
+                crate::daemon::run_multi(global, args.clone()).await?;
+            } else {
+                // Single-repo mode: load per-repo config
+                let config = crate::Config::load(&cli)?;
+                crate::daemon::run(config, args.clone()).await?;
+            }
+        }
         None => {
             let config = crate::Config::load(&cli)?;
             let db = crate::Database::open(&config)?;

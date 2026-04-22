@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86:
+    name: Build Linux x86_64 (self-hosted)
+    runs-on: [self-hosted, linux, x86_64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Build
+        run: cargo build --release --bin wshm --target x86_64-unknown-linux-gnu
+      - name: Package
+        run: |
+          cd target/x86_64-unknown-linux-gnu/release
+          tar czf wshm-x86_64-unknown-linux-gnu.tar.gz wshm
+          mv wshm-x86_64-unknown-linux-gnu.tar.gz $GITHUB_WORKSPACE/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wshm-x86_64-unknown-linux-gnu
+          path: wshm-x86_64-unknown-linux-gnu.tar.gz
+
+  build-linux-arm:
+    name: Build Linux aarch64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: Build
+        run: cargo build --release --bin wshm --target aarch64-unknown-linux-gnu
+      - name: Package
+        run: |
+          cd target/aarch64-unknown-linux-gnu/release
+          tar czf wshm-aarch64-unknown-linux-gnu.tar.gz wshm
+          mv wshm-aarch64-unknown-linux-gnu.tar.gz $GITHUB_WORKSPACE/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wshm-aarch64-unknown-linux-gnu
+          path: wshm-aarch64-unknown-linux-gnu.tar.gz
+
+  build-windows:
+    name: Build Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build
+        run: cargo build --release --bin wshm --target x86_64-pc-windows-msvc
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/wshm.exe -DestinationPath wshm-x86_64-pc-windows-msvc.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wshm-x86_64-pc-windows-msvc
+          path: wshm-x86_64-pc-windows-msvc.zip
+
+  release:
+    name: Create GitHub Release
+    needs:
+      - build-linux-x86
+      - build-linux-arm
+      - build-windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Compute checksums
+        run: sha256sum *.tar.gz *.zip > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            wshm-*.tar.gz
+            wshm-*.zip
+            checksums.txt
+          generate_release_notes: true
+
+      - name: Update Homebrew tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          SHA_X86=$(sha256sum wshm-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')
+          SHA_ARM=$(sha256sum wshm-aarch64-unknown-linux-gnu.tar.gz | awk '{print $1}')
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/wshm-dev/homebrew-tap.git" tap
+
+          cat > tap/Formula/wshm.rb << EOF
+          class Wshm < Formula
+            desc "AI-powered GitHub agent — triage, PR analysis, merge queue"
+            homepage "https://wshm.dev"
+            version "${VERSION}"
+            license "SSPL-1.0"
+
+            on_linux do
+              on_intel do
+                url "https://github.com/wshm-dev/wshm/releases/download/${TAG}/wshm-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_X86}"
+              end
+              on_arm do
+                url "https://github.com/wshm-dev/wshm/releases/download/${TAG}/wshm-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_ARM}"
+              end
+            end
+
+            def install
+              bin.install "wshm"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/wshm --version")
+            end
+          end
+          EOF
+
+          cd tap
+          git config user.email "release-bot@wshm.dev"
+          git config user.name "wshm release bot"
+          git add Formula/wshm.rb
+          git commit -m "chore: update wshm formula to ${VERSION}"
+          git push

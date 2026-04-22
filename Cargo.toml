@@ -5,6 +5,10 @@ edition = "2021"
 description = "Core library for wshm"
 license = "SSPL-1.0"
 
+[[bin]]
+name = "wshm"
+path = "src/main.rs"
+
 [features]
 default = []
 
@@ -70,6 +74,8 @@ zip = "2"
 async-trait = "0.1"
 is-terminal = "0.4"
 zeroize = "1"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", features = ["ring"] }
 
 # Optional: Export - Cloud Storage
 aws-sdk-s3 = { version = "1", optional = true }
