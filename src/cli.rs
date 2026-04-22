@@ -57,9 +57,6 @@ pub enum Command {
     /// Authenticate with GitHub and AI provider
     Login(LoginArgs),
 
-    /// Manage local AI models
-    #[command(subcommand)]
-    Model(ModelCommand),
 
     /// Check for updates and install latest release
     Update(UpdateArgs),
@@ -231,18 +228,3 @@ pub enum ConfigCommand {
     Init,
 }
 
-#[derive(Subcommand)]
-pub enum ModelCommand {
-    /// Download a model for local inference
-    Pull {
-        /// Model name (phi4-mini, smollm3-3b, qwen3-4b, gemma3-4b, llama3-3b)
-        name: String,
-    },
-    /// List available and downloaded models
-    List,
-    /// Remove a downloaded model
-    Remove {
-        /// Model name
-        name: String,
-    },
-}
