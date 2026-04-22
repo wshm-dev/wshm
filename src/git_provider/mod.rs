@@ -1,7 +1,7 @@
+pub mod azure_devops;
+pub mod gitea;
 pub mod github;
 pub mod gitlab;
-pub mod gitea;
-pub mod azure_devops;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -120,7 +120,11 @@ pub fn build_provider(config: &crate::config::Config) -> Result<Box<dyn GitProvi
         "github" => Ok(Box::new(github::GitHubProvider::new(config)?)),
         "gitlab" => Ok(Box::new(gitlab::GitLabProvider::new(config, base_url)?)),
         "gitea" => Ok(Box::new(gitea::GiteaProvider::new(config, base_url)?)),
-        "azure-devops" | "azure" => Ok(Box::new(azure_devops::AzureDevOpsProvider::new(config, base_url)?)),
-        _ => anyhow::bail!("Unknown git provider: {provider}. Supported: github, gitlab, gitea, azure-devops"),
+        "azure-devops" | "azure" => Ok(Box::new(azure_devops::AzureDevOpsProvider::new(
+            config, base_url,
+        )?)),
+        _ => anyhow::bail!(
+            "Unknown git provider: {provider}. Supported: github, gitlab, gitea, azure-devops"
+        ),
     }
 }

@@ -149,7 +149,9 @@ pub async fn run(
             println!("{}", serde_json::to_string_pretty(&results)?);
         }
         OutputFormat::Csv => {
-            println!("issue,title,category,confidence,priority,labels,simple_fix,relevant_files,summary");
+            println!(
+                "issue,title,category,confidence,priority,labels,simple_fix,relevant_files,summary"
+            );
             for r in &results {
                 let c = &r.classification;
                 println!(
@@ -185,11 +187,8 @@ async fn triage_issue(
     exporter: Option<&ExportManager>,
 ) -> Result<IssueClassification> {
     // Content hash cache: skip LLM call if content hasn't changed since last triage
-    let content_hash = crate::db::schema::compute_issue_hash(
-        &issue.title,
-        issue.body.as_deref(),
-        &issue.labels,
-    );
+    let content_hash =
+        crate::db::schema::compute_issue_hash(&issue.title, issue.body.as_deref(), &issue.labels);
 
     if let Ok(Some(existing)) = db.get_triage_result(issue.number) {
         if existing.content_hash.as_deref() == Some(content_hash.as_str()) {
@@ -235,11 +234,13 @@ async fn triage_issue(
         ));
     }
 
-    let system_prompt = config.triage.system_prompt.as_deref()
+    let system_prompt = config
+        .triage
+        .system_prompt
+        .as_deref()
         .unwrap_or(issue_classify::SYSTEM);
 
-    let classification: IssueClassification =
-        ai.complete(system_prompt, &user_prompt).await?;
+    let classification: IssueClassification = ai.complete(system_prompt, &user_prompt).await?;
 
     // Only persist triage result and ICM context when applying
     if apply {
@@ -288,7 +289,10 @@ async fn triage_issue(
         // Remove stale wshm labels from GitHub
         for label in &to_remove {
             if let Err(e) = gh.remove_label(issue.number, label).await {
-                tracing::warn!("Failed to remove label '{label}' from #{}: {e}", issue.number);
+                tracing::warn!(
+                    "Failed to remove label '{label}' from #{}: {e}",
+                    issue.number
+                );
             }
         }
 
@@ -304,7 +308,8 @@ async fn triage_issue(
         if config.assign.enabled {
             if let Some(assignee) = crate::config::AssignConfig::pick(&config.assign.issues) {
                 info!("Auto-assigning issue #{} to {assignee}", issue.number);
-                gh.add_assignees(issue.number, &[assignee.to_string()]).await?;
+                gh.add_assignees(issue.number, &[assignee.to_string()])
+                    .await?;
             }
         }
 
@@ -326,7 +331,10 @@ async fn triage_issue(
             "wontfix" => {
                 // Do NOT auto-close on wontfix — AI classification can be manipulated
                 // by prompt injection. Leave closing to human maintainers.
-                info!("Issue #{} classified as wontfix (not auto-closing)", issue.number);
+                info!(
+                    "Issue #{} classified as wontfix (not auto-closing)",
+                    issue.number
+                );
             }
             _ => {}
         }
@@ -413,7 +421,11 @@ fn format_triage_comment(c: &IssueClassification, config: &Config) -> String {
     let relevant_files = if c.relevant_files.is_empty() {
         String::new()
     } else {
-        let files: Vec<String> = c.relevant_files.iter().map(|f| format!("- `{f}`")).collect();
+        let files: Vec<String> = c
+            .relevant_files
+            .iter()
+            .map(|f| format!("- `{f}`"))
+            .collect();
         format!(
             "<details>\n<summary>📁 Relevant files</summary>\n\n{}\n\n</details>",
             files.join("\n")
@@ -509,7 +521,9 @@ fn print_classification(issue: &Issue, c: &IssueClassification, applied: bool) {
     let labels = if c.suggested_labels.is_empty() {
         String::new()
     } else {
-        let colored: Vec<String> = c.suggested_labels.iter()
+        let colored: Vec<String> = c
+            .suggested_labels
+            .iter()
             .map(|l| format!("\x1b[35m{l}\x1b[0m"))
             .collect();
         format!(" [{}]", colored.join(", "))

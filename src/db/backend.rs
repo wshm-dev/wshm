@@ -35,11 +35,7 @@ pub trait DatabaseBackend: Send + Sync {
 
     // ── Triage ──────────────────────────────────────────────────
 
-    fn upsert_triage_result(
-        &self,
-        result: &IssueClassification,
-        issue_number: u64,
-    ) -> Result<()>;
+    fn upsert_triage_result(&self, result: &IssueClassification, issue_number: u64) -> Result<()>;
     fn get_triage_result(&self, issue_number: u64) -> Result<Option<TriageResultRow>>;
     fn get_stale_triage_results(&self, max_age_hours: u32) -> Result<Vec<TriageResultRow>>;
     fn get_wshm_applied_labels(&self, issue_number: u64) -> Result<Vec<String>>;
@@ -125,11 +121,7 @@ impl DatabaseBackend for super::Database {
         self.get_pr_analysis(pr_number)
     }
 
-    fn upsert_triage_result(
-        &self,
-        result: &IssueClassification,
-        issue_number: u64,
-    ) -> Result<()> {
+    fn upsert_triage_result(&self, result: &IssueClassification, issue_number: u64) -> Result<()> {
         self.upsert_triage_result(result, issue_number)
     }
 

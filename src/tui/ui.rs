@@ -22,7 +22,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(3), // Header + tabs
             Constraint::Length(3), // Stats bar
-            Constraint::Min(10),  // Content
+            Constraint::Min(10),   // Content
             Constraint::Length(1), // Footer
         ])
         .split(f.area());
@@ -123,11 +123,8 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         ),
     ];
 
-    let para = Paragraph::new(Line::from(stats)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Overview "),
-    );
+    let para = Paragraph::new(Line::from(stats))
+        .block(Block::default().borders(Borders::ALL).title(" Overview "));
     f.render_widget(para, area);
 }
 
@@ -163,8 +160,12 @@ fn draw_issues(f: &mut Frame, app: &App, area: Rect) {
                     _ => Style::default(),
                 };
                 let pri_style = match t.priority.as_deref() {
-                    Some("critical") => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    Some("high") => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Some("critical") => {
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    }
+                    Some("high") => Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                     Some("medium") => Style::default().fg(Color::Yellow),
                     Some("low") => Style::default().fg(Color::Green),
                     _ => Style::default(),
@@ -172,7 +173,8 @@ fn draw_issues(f: &mut Frame, app: &App, area: Rect) {
                 (
                     Cell::from(t.category.clone()).style(cat_style),
                     Cell::from(format!("{:.0}%", t.confidence * 100.0)),
-                    Cell::from(t.priority.clone().unwrap_or_else(|| "-".to_string())).style(pri_style),
+                    Cell::from(t.priority.clone().unwrap_or_else(|| "-".to_string()))
+                        .style(pri_style),
                     Cell::from(r.issue.labels.join(", ")),
                 )
             } else {
@@ -184,10 +186,17 @@ fn draw_issues(f: &mut Frame, app: &App, area: Rect) {
                 )
             };
 
-            let age_days = r.issue.created_at
+            let age_days = r
+                .issue
+                .created_at
                 .parse::<chrono::DateTime<chrono::Utc>>()
                 .ok()
-                .map(|dt| chrono::Utc::now().signed_duration_since(dt).num_days().max(0) as u64)
+                .map(|dt| {
+                    chrono::Utc::now()
+                        .signed_duration_since(dt)
+                        .num_days()
+                        .max(0) as u64
+                })
                 .unwrap_or(0);
             let age_style = if age_days <= 3 {
                 Style::default().fg(Color::Green)
@@ -255,11 +264,11 @@ fn draw_pulls(f: &mut Frame, app: &App, area: Rect) {
         sort_header(app, "Merge(m)", SortField::Mergeable),
         "CI".to_string(),
     ])
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let rows: Vec<Row> = app
         .pulls
@@ -297,24 +306,21 @@ fn draw_pulls(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(10),
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Pull Requests ({}) ", app.open_pr_count)),
-        );
+    let table = Table::new(rows, widths).header(header).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Pull Requests ({}) ", app.open_pr_count)),
+    );
 
     f.render_widget(table, area);
 }
 
 fn draw_queue(f: &mut Frame, app: &App, area: Rect) {
-    let header = Row::new(vec!["#", "Title", "Mergeable", "CI", "Author"])
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
+    let header = Row::new(vec!["#", "Title", "Mergeable", "CI", "Author"]).style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
 
     // Show only mergeable PRs
     let rows: Vec<Row> = app
@@ -326,12 +332,16 @@ fn draw_queue(f: &mut Frame, app: &App, area: Rect) {
             Row::new(vec![
                 Cell::from(format!("#{}", pr.number)),
                 Cell::from(truncate(&pr.title, 50)),
-                Cell::from(if pr.mergeable == Some(true) { "ready" } else { "pending" })
-                    .style(if pr.mergeable == Some(true) {
-                        Style::default().fg(Color::Green)
-                    } else {
-                        Style::default().fg(Color::Yellow)
-                    }),
+                Cell::from(if pr.mergeable == Some(true) {
+                    "ready"
+                } else {
+                    "pending"
+                })
+                .style(if pr.mergeable == Some(true) {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                }),
                 Cell::from(pr.ci_status.clone().unwrap_or_else(|| "-".to_string())),
                 Cell::from(pr.author.clone().unwrap_or_else(|| "-".to_string())),
             ])
@@ -346,13 +356,11 @@ fn draw_queue(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(15),
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Merge Queue "),
-        );
+    let table = Table::new(rows, widths).header(header).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Merge Queue "),
+    );
 
     f.render_widget(table, area);
 }
@@ -371,109 +379,167 @@ fn draw_stats_tab(f: &mut Frame, app: &App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5),  // Summary + age stats
-            Constraint::Min(5),    // Category breakdown
-            Constraint::Min(5),    // Priority breakdown
+            Constraint::Min(5),     // Category breakdown
+            Constraint::Min(5),     // Priority breakdown
             Constraint::Length(10), // Age buckets
         ])
         .split(chunks[0]);
 
     // Summary + age overview
     let drift_color = |days: u64| -> Color {
-        if days > 180 { Color::Red }
-        else if days > 90 { Color::Yellow }
-        else { Color::Green }
+        if days > 180 {
+            Color::Red
+        } else if days > 90 {
+            Color::Yellow
+        } else {
+            Color::Green
+        }
     };
 
     let summary = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled(format!(" Triaged: {} ", app.stats.total_triaged), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" Triaged: {} ", app.stats.total_triaged),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
-            Span::styled(format!("Avg confidence: {:.0}%", app.stats.avg_confidence * 100.0), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("Avg confidence: {:.0}%", app.stats.avg_confidence * 100.0),
+                Style::default().fg(Color::Cyan),
+            ),
         ]),
         Line::from(vec![
             Span::raw(" Issues: oldest "),
-            Span::styled(format!("{}d", app.stats.oldest_issue_days), Style::default().fg(drift_color(app.stats.oldest_issue_days))),
+            Span::styled(
+                format!("{}d", app.stats.oldest_issue_days),
+                Style::default().fg(drift_color(app.stats.oldest_issue_days)),
+            ),
             Span::raw(format!("  avg {}d", app.stats.avg_issue_age_days)),
         ]),
         Line::from(vec![
             Span::raw(" PRs:    oldest "),
-            Span::styled(format!("{}d", app.stats.oldest_pr_days), Style::default().fg(drift_color(app.stats.oldest_pr_days))),
+            Span::styled(
+                format!("{}d", app.stats.oldest_pr_days),
+                Style::default().fg(drift_color(app.stats.oldest_pr_days)),
+            ),
             Span::raw(format!("  avg {}d", app.stats.avg_pr_age_days)),
         ]),
     ])
-    .block(Block::default().borders(Borders::ALL).title(" Summary & Drift "));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Summary & Drift "),
+    );
     f.render_widget(summary, left_chunks[0]);
 
     // Category breakdown with bar chart
     let max_cat = app.stats.by_category.first().map(|(_, c)| *c).unwrap_or(1);
-    let cat_rows: Vec<Row> = app.stats.by_category.iter().map(|(cat, count)| {
-        let bar_len = (*count as f64 / max_cat as f64 * 20.0) as usize;
-        let bar = "█".repeat(bar_len);
-        let cat_style = match cat.as_str() {
-            "bug" => Style::default().fg(Color::Red),
-            "feature" => Style::default().fg(Color::Cyan),
-            "question" => Style::default().fg(Color::Yellow),
-            "docs" => Style::default().fg(Color::Blue),
-            _ => Style::default().fg(Color::DarkGray),
-        };
-        Row::new(vec![
-            Cell::from(cat.clone()).style(cat_style),
-            Cell::from(count.to_string()),
-            Cell::from(bar).style(cat_style),
-        ])
-    }).collect();
+    let cat_rows: Vec<Row> = app
+        .stats
+        .by_category
+        .iter()
+        .map(|(cat, count)| {
+            let bar_len = (*count as f64 / max_cat as f64 * 20.0) as usize;
+            let bar = "█".repeat(bar_len);
+            let cat_style = match cat.as_str() {
+                "bug" => Style::default().fg(Color::Red),
+                "feature" => Style::default().fg(Color::Cyan),
+                "question" => Style::default().fg(Color::Yellow),
+                "docs" => Style::default().fg(Color::Blue),
+                _ => Style::default().fg(Color::DarkGray),
+            };
+            Row::new(vec![
+                Cell::from(cat.clone()).style(cat_style),
+                Cell::from(count.to_string()),
+                Cell::from(bar).style(cat_style),
+            ])
+        })
+        .collect();
 
     let cat_table = Table::new(
         cat_rows,
-        [Constraint::Length(12), Constraint::Length(5), Constraint::Min(10)],
+        [
+            Constraint::Length(12),
+            Constraint::Length(5),
+            Constraint::Min(10),
+        ],
     )
-    .block(Block::default().borders(Borders::ALL).title(" By Category "));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" By Category "),
+    );
     f.render_widget(cat_table, left_chunks[1]);
 
     // Priority breakdown
     let max_pri = app.stats.by_priority.first().map(|(_, c)| *c).unwrap_or(1);
-    let pri_rows: Vec<Row> = app.stats.by_priority.iter().map(|(pri, count)| {
-        let bar_len = (*count as f64 / max_pri as f64 * 20.0) as usize;
-        let bar = "█".repeat(bar_len);
-        let pri_style = match pri.as_str() {
-            "critical" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            "high" => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            "medium" => Style::default().fg(Color::Yellow),
-            "low" => Style::default().fg(Color::Green),
-            _ => Style::default().fg(Color::DarkGray),
-        };
-        Row::new(vec![
-            Cell::from(pri.clone()).style(pri_style),
-            Cell::from(count.to_string()),
-            Cell::from(bar).style(pri_style),
-        ])
-    }).collect();
+    let pri_rows: Vec<Row> = app
+        .stats
+        .by_priority
+        .iter()
+        .map(|(pri, count)| {
+            let bar_len = (*count as f64 / max_pri as f64 * 20.0) as usize;
+            let bar = "█".repeat(bar_len);
+            let pri_style = match pri.as_str() {
+                "critical" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                "high" => Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+                "medium" => Style::default().fg(Color::Yellow),
+                "low" => Style::default().fg(Color::Green),
+                _ => Style::default().fg(Color::DarkGray),
+            };
+            Row::new(vec![
+                Cell::from(pri.clone()).style(pri_style),
+                Cell::from(count.to_string()),
+                Cell::from(bar).style(pri_style),
+            ])
+        })
+        .collect();
 
     let pri_table = Table::new(
         pri_rows,
-        [Constraint::Length(12), Constraint::Length(5), Constraint::Min(10)],
+        [
+            Constraint::Length(12),
+            Constraint::Length(5),
+            Constraint::Min(10),
+        ],
     )
-    .block(Block::default().borders(Borders::ALL).title(" By Priority "));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" By Priority "),
+    );
     f.render_widget(pri_table, left_chunks[2]);
 
     // Age buckets
-    let max_age_count = app.stats.age_buckets.iter()
+    let max_age_count = app
+        .stats
+        .age_buckets
+        .iter()
         .map(|b| b.issue_count.max(b.pr_count))
         .max()
         .unwrap_or(1)
         .max(1);
 
-    let age_rows: Vec<Row> = app.stats.age_buckets.iter().map(|b| {
-        let issue_bar_len = (b.issue_count as f64 / max_age_count as f64 * 12.0) as usize;
-        let pr_bar_len = (b.pr_count as f64 / max_age_count as f64 * 12.0) as usize;
-        Row::new(vec![
-            Cell::from(b.label),
-            Cell::from(format!("{:>3}", b.issue_count)),
-            Cell::from("█".repeat(issue_bar_len)).style(Style::default().fg(Color::Cyan)),
-            Cell::from(format!("{:>3}", b.pr_count)),
-            Cell::from("█".repeat(pr_bar_len)).style(Style::default().fg(Color::Magenta)),
-        ])
-    }).collect();
+    let age_rows: Vec<Row> = app
+        .stats
+        .age_buckets
+        .iter()
+        .map(|b| {
+            let issue_bar_len = (b.issue_count as f64 / max_age_count as f64 * 12.0) as usize;
+            let pr_bar_len = (b.pr_count as f64 / max_age_count as f64 * 12.0) as usize;
+            Row::new(vec![
+                Cell::from(b.label),
+                Cell::from(format!("{:>3}", b.issue_count)),
+                Cell::from("█".repeat(issue_bar_len)).style(Style::default().fg(Color::Cyan)),
+                Cell::from(format!("{:>3}", b.pr_count)),
+                Cell::from("█".repeat(pr_bar_len)).style(Style::default().fg(Color::Magenta)),
+            ])
+        })
+        .collect();
 
     let age_table = Table::new(
         age_rows,
@@ -486,31 +552,51 @@ fn draw_stats_tab(f: &mut Frame, app: &App, area: Rect) {
         ],
     )
     .header(
-        Row::new(vec!["Age", "Iss", "", "PRs", ""])
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Row::new(vec!["Age", "Iss", "", "PRs", ""]).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
     )
-    .block(Block::default().borders(Borders::ALL).title(" Age Distribution "));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Age Distribution "),
+    );
     f.render_widget(age_table, left_chunks[3]);
 
     // Right panel: recent triages
-    let header = Row::new(vec!["#", "Category", "Conf", "Priority", "When"])
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let header = Row::new(vec!["#", "Category", "Conf", "Priority", "When"]).style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
 
-    let rows: Vec<Row> = app.stats.recent_triages.iter().skip(app.scroll_offset).map(|t| {
-        let cat_style = match t.category.as_str() {
-            "bug" => Style::default().fg(Color::Red),
-            "feature" => Style::default().fg(Color::Cyan),
-            _ => Style::default(),
-        };
-        let when = if t.acted_at.len() >= 16 { &t.acted_at[..16] } else { &t.acted_at };
-        Row::new(vec![
-            Cell::from(format!("#{}", t.issue_number)),
-            Cell::from(t.category.clone()).style(cat_style),
-            Cell::from(format!("{:.0}%", t.confidence * 100.0)),
-            Cell::from(t.priority.clone().unwrap_or_else(|| "-".to_string())),
-            Cell::from(when.to_string()),
-        ])
-    }).collect();
+    let rows: Vec<Row> = app
+        .stats
+        .recent_triages
+        .iter()
+        .skip(app.scroll_offset)
+        .map(|t| {
+            let cat_style = match t.category.as_str() {
+                "bug" => Style::default().fg(Color::Red),
+                "feature" => Style::default().fg(Color::Cyan),
+                _ => Style::default(),
+            };
+            let when = if t.acted_at.len() >= 16 {
+                &t.acted_at[..16]
+            } else {
+                &t.acted_at
+            };
+            Row::new(vec![
+                Cell::from(format!("#{}", t.issue_number)),
+                Cell::from(t.category.clone()).style(cat_style),
+                Cell::from(format!("{:.0}%", t.confidence * 100.0)),
+                Cell::from(t.priority.clone().unwrap_or_else(|| "-".to_string())),
+                Cell::from(when.to_string()),
+            ])
+        })
+        .collect();
 
     let recent_table = Table::new(
         rows,
@@ -523,14 +609,22 @@ fn draw_stats_tab(f: &mut Frame, app: &App, area: Rect) {
         ],
     )
     .header(header)
-    .block(Block::default().borders(Borders::ALL).title(" Recent Triages "));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Recent Triages "),
+    );
     f.render_widget(recent_table, chunks[1]);
 }
 
 fn draw_action_plan(f: &mut Frame, app: &App, area: Rect) {
     if app.actions.is_empty() {
         let text = Paragraph::new("No action items. All clear!")
-            .block(Block::default().borders(Borders::ALL).title(" Action Plan "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Action Plan "),
+            )
             .style(Style::default().fg(Color::Green));
         f.render_widget(text, area);
         return;
@@ -545,7 +639,11 @@ fn draw_action_plan(f: &mut Frame, app: &App, area: Rect) {
         Cell::from("PR"),
         Cell::from("Title"),
     ])
-    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let rows: Vec<Row> = app
         .actions
@@ -572,7 +670,13 @@ fn draw_action_plan(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 format!("{}d", item.age_days)
             };
-            let pr = if item.has_pr { "✓" } else if item.is_simple_fix { "⚡" } else { "" };
+            let pr = if item.has_pr {
+                "✓"
+            } else if item.is_simple_fix {
+                "⚡"
+            } else {
+                ""
+            };
             let repo_short = item.repo.split('/').next_back().unwrap_or(&item.repo);
 
             let row_style = if selected {
@@ -588,13 +692,24 @@ fn draw_action_plan(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(age),
                 Cell::from(pr).style(Style::default().fg(Color::Green)),
                 Cell::from(item.title.chars().take(60).collect::<String>()),
-            ]).style(row_style)
+            ])
+            .style(row_style)
         })
         .collect();
 
-    let critical_count = app.actions.iter().filter(|a| a.priority == "critical").count();
+    let critical_count = app
+        .actions
+        .iter()
+        .filter(|a| a.priority == "critical")
+        .count();
     let high_count = app.actions.iter().filter(|a| a.priority == "high").count();
-    let title_color = if critical_count > 0 { Color::Red } else if high_count > 0 { Color::Yellow } else { Color::Green };
+    let title_color = if critical_count > 0 {
+        Color::Red
+    } else if high_count > 0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
 
     let table = Table::new(
         rows,
@@ -609,25 +724,22 @@ fn draw_action_plan(f: &mut Frame, app: &App, area: Rect) {
         ],
     )
     .header(header)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(Span::styled(
-                format!(" Action Plan ({}) — 🔴{} 🟠{} 🟡{} ",
+    .block(Block::default().borders(Borders::ALL).title(Span::styled(
+        format!(" Action Plan ({}) — 🔴{} 🟠{} 🟡{} ",
                     app.actions.len(), critical_count, high_count,
                     app.actions.iter().filter(|a| a.priority == "medium").count()),
-                Style::default().fg(title_color),
-            )),
-    );
+        Style::default().fg(title_color),
+    )));
 
     f.render_widget(table, area);
 }
 
 fn draw_repos(f: &mut Frame, app: &App, area: Rect) {
     if app.repos.is_empty() {
-        let text = Paragraph::new("No repos configured. Edit ~/.wshm/global.toml to add [[repos]].")
-            .block(Block::default().borders(Borders::ALL).title(" Repos "))
-            .style(Style::default().fg(Color::DarkGray));
+        let text =
+            Paragraph::new("No repos configured. Edit ~/.wshm/global.toml to add [[repos]].")
+                .block(Block::default().borders(Borders::ALL).title(" Repos "))
+                .style(Style::default().fg(Color::DarkGray));
         f.render_widget(text, area);
         return;
     }
@@ -642,7 +754,11 @@ fn draw_repos(f: &mut Frame, app: &App, area: Rect) {
         Cell::from("PRs"),
         Cell::from("Triaged"),
     ])
-    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let rows: Vec<Row> = app
         .repos
@@ -651,7 +767,11 @@ fn draw_repos(f: &mut Frame, app: &App, area: Rect) {
         .map(|(i, r)| {
             let selected = i == app.scroll_offset;
             let toggle = if r.enabled { "◉" } else { "○" };
-            let toggle_color = if r.enabled { Color::Green } else { Color::DarkGray };
+            let toggle_color = if r.enabled {
+                Color::Green
+            } else {
+                Color::DarkGray
+            };
             let status = if !r.exists {
                 ("✗ missing", Color::Red)
             } else if !r.has_wshm {
@@ -716,14 +836,13 @@ fn draw_repos(f: &mut Frame, app: &App, area: Rect) {
     // Input prompt or help
     if let Some(ref mode) = app.input_mode {
         let (prompt, _hint) = match mode {
-            InputMode::AddRepoSlug => ("Repo slug (owner/repo): ", "Enter to confirm, Esc to cancel"),
+            InputMode::AddRepoSlug => (
+                "Repo slug (owner/repo): ",
+                "Enter to confirm, Esc to cancel",
+            ),
             InputMode::AddRepoPath => ("Local path: ", "Enter to confirm, Esc to cancel"),
-            InputMode::DeleteConfirm => {
-                ("Delete? (y/N): ", "")
-            }
-            InputMode::EditSetting => {
-                ("New value: ", "Enter to confirm, Esc to cancel")
-            }
+            InputMode::DeleteConfirm => ("Delete? (y/N): ", ""),
+            InputMode::EditSetting => ("New value: ", "Enter to confirm, Esc to cancel"),
         };
         let input = Paragraph::new(Line::from(vec![
             Span::styled(prompt, Style::default().fg(Color::Yellow)),
@@ -745,11 +864,19 @@ fn draw_action_detail_popup(f: &mut Frame, detail: &app::ActionDetailPopup) {
     let area = f.area();
     let popup = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(5), Constraint::Percentage(90), Constraint::Percentage(5)])
+        .constraints([
+            Constraint::Percentage(5),
+            Constraint::Percentage(90),
+            Constraint::Percentage(5),
+        ])
         .split(area);
     let popup = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(10), Constraint::Percentage(80), Constraint::Percentage(10)])
+        .constraints([
+            Constraint::Percentage(10),
+            Constraint::Percentage(80),
+            Constraint::Percentage(10),
+        ])
         .split(popup[1]);
     let area = popup[1];
 
@@ -760,7 +887,12 @@ fn draw_action_detail_popup(f: &mut Frame, detail: &app::ActionDetailPopup) {
 
     // Header
     lines.push(Line::from(vec![
-        Span::styled(format!("#{} ", item.issue_number), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("#{} ", item.issue_number),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(&item.title, Style::default().add_modifier(Modifier::BOLD)),
     ]));
     lines.push(Line::from(""));
@@ -810,7 +942,12 @@ fn draw_action_detail_popup(f: &mut Frame, detail: &app::ActionDetailPopup) {
     // AI Summary
     if !item.summary.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("AI Summary", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled(
+            "AI Summary",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
         for line in item.summary.lines() {
             lines.push(Line::from(format!("  {line}")));
         }
@@ -819,12 +956,20 @@ fn draw_action_detail_popup(f: &mut Frame, detail: &app::ActionDetailPopup) {
     // Body
     if !item.body.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("Description", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled(
+            "Description",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
         for line in item.body.lines().take(30) {
             lines.push(Line::from(format!("  {line}")));
         }
         if item.body.lines().count() > 30 {
-            lines.push(Line::from(Span::styled("  ... (truncated)", Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(
+                "  ... (truncated)",
+                Style::default().fg(Color::DarkGray),
+            )));
         }
     }
 
@@ -833,20 +978,34 @@ fn draw_action_detail_popup(f: &mut Frame, detail: &app::ActionDetailPopup) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("Comments ({})", item.comments.len()),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )));
         for comment in &item.comments {
-            let time = if comment.created_at.len() > 16 { &comment.created_at[..16] } else { &comment.created_at };
+            let time = if comment.created_at.len() > 16 {
+                &comment.created_at[..16]
+            } else {
+                &comment.created_at
+            };
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
-                Span::styled(format!("  {} ", comment.author), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("  {} ", comment.author),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(time, Style::default().fg(Color::DarkGray)),
             ]));
             for line in comment.body.lines().take(10) {
                 lines.push(Line::from(format!("    {line}")));
             }
             if comment.body.lines().count() > 10 {
-                lines.push(Line::from(Span::styled("    ...", Style::default().fg(Color::DarkGray))));
+                lines.push(Line::from(Span::styled(
+                    "    ...",
+                    Style::default().fg(Color::DarkGray),
+                )));
             }
         }
     }
@@ -872,7 +1031,12 @@ fn draw_action_detail_popup(f: &mut Frame, detail: &app::ActionDetailPopup) {
     f.render_widget(help, help_area);
 }
 
-fn draw_settings_popup(f: &mut Frame, settings: &app::RepoSettings, input_mode: &Option<InputMode>, input_buffer: &str) {
+fn draw_settings_popup(
+    f: &mut Frame,
+    settings: &app::RepoSettings,
+    input_mode: &Option<InputMode>,
+    input_buffer: &str,
+) {
     let area = f.area();
     let popup = Layout::default()
         .direction(Direction::Vertical)
@@ -906,7 +1070,9 @@ fn draw_settings_popup(f: &mut Frame, settings: &app::RepoSettings, input_mode: 
             }
             rows.push(ListItem::new(Line::from(Span::styled(
                 format!("  [{}]", item.section),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ))));
             last_section = item.section.clone();
         }
@@ -927,13 +1093,26 @@ fn draw_settings_popup(f: &mut Frame, settings: &app::RepoSettings, input_mode: 
         };
 
         let toggle_indicator = match item.kind {
-            SettingKind::Toggle => if item.value == "true" { " ◉" } else { " ○" },
+            SettingKind::Toggle => {
+                if item.value == "true" {
+                    " ◉"
+                } else {
+                    " ○"
+                }
+            }
             _ => "",
         };
 
         let line = Line::from(vec![
             Span::raw(cursor),
-            Span::styled(&item.key, if selected { Style::default().add_modifier(Modifier::BOLD) } else { Style::default() }),
+            Span::styled(
+                &item.key,
+                if selected {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            ),
             Span::raw(" = "),
             Span::styled(&item.value, value_style),
             Span::styled(toggle_indicator, value_style),
@@ -1065,9 +1244,7 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Action Required",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )));
         for i in summary.high_priority_issues.iter().take(10) {
             let prio = i.priority.as_deref().unwrap_or("?");
@@ -1081,10 +1258,7 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
                     format!("  #{} ", i.number),
                     Style::default().fg(Color::Yellow),
                 ),
-                Span::styled(
-                    format!("{prio}{age} "),
-                    Style::default().fg(Color::Red),
-                ),
+                Span::styled(format!("{prio}{age} "), Style::default().fg(Color::Red)),
                 Span::raw(i.title.clone()),
             ]));
         }
@@ -1203,12 +1377,15 @@ fn draw_footer(f: &mut Frame, area: Rect) {
     f.render_widget(footer, area);
 }
 
-
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
-        let end = s.char_indices().nth(max - 1).map(|(i, _)| i).unwrap_or(s.len());
+        let end = s
+            .char_indices()
+            .nth(max - 1)
+            .map(|(i, _)| i)
+            .unwrap_or(s.len());
         format!("{}…", &s[..end])
     }
 }

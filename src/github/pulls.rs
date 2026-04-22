@@ -99,7 +99,11 @@ impl Client {
     ///
     /// `since` is an RFC3339 timestamp (e.g. "2026-04-01T00:00:00Z").
     /// If None, fetches all PRs (used for first-time sync).
-    pub async fn fetch_pulls_incremental(&self, state: &str, since: Option<&str>) -> Result<Vec<PullRequest>> {
+    pub async fn fetch_pulls_incremental(
+        &self,
+        state: &str,
+        since: Option<&str>,
+    ) -> Result<Vec<PullRequest>> {
         let mut all_pulls = Vec::with_capacity(64);
         let mut page = 1u32;
 

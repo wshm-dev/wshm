@@ -40,7 +40,10 @@ impl Client {
     /// Check if a user is a collaborator (write access or above) on the repo.
     pub async fn is_collaborator(&self, username: &str) -> Result<bool> {
         // Validate username to prevent URL path injection
-        if !username.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        if !username
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
             anyhow::bail!("Invalid GitHub username: {username}");
         }
         let url = format!(
@@ -52,10 +55,18 @@ impl Client {
 
         match response {
             Ok(resp) => {
-                let body = self.octocrab.body_to_string(resp).await
-                    .unwrap_or_else(|e| { tracing::warn!("Failed to read collaborator response: {e}"); String::new() });
-                let json: serde_json::Value = serde_json::from_str(&body)
-                    .unwrap_or_else(|e| { tracing::warn!("Failed to parse collaborator JSON: {e}"); serde_json::Value::default() });
+                let body = self
+                    .octocrab
+                    .body_to_string(resp)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Failed to read collaborator response: {e}");
+                        String::new()
+                    });
+                let json: serde_json::Value = serde_json::from_str(&body).unwrap_or_else(|e| {
+                    tracing::warn!("Failed to parse collaborator JSON: {e}");
+                    serde_json::Value::default()
+                });
                 let permission = json["permission"].as_str().unwrap_or("none");
                 debug!("User {username} permission: {permission}");
                 Ok(matches!(permission, "admin" | "write" | "maintain"))
@@ -67,7 +78,9 @@ impl Client {
                     Ok(false)
                 } else {
                     tracing::warn!("Failed to check collaborator status for {username}: {e}");
-                    Err(anyhow::anyhow!("Failed to check collaborator status for {username}: {e}"))
+                    Err(anyhow::anyhow!(
+                        "Failed to check collaborator status for {username}: {e}"
+                    ))
                 }
             }
         }

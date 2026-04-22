@@ -57,7 +57,6 @@ pub enum Command {
     /// Authenticate with GitHub and AI provider
     Login(LoginArgs),
 
-
     /// Check for updates and install latest release
     Update(UpdateArgs),
 
@@ -227,4 +226,3 @@ pub enum ConfigCommand {
     /// Create .wshm/config.toml template
     Init,
 }
-

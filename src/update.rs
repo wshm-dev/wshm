@@ -132,7 +132,12 @@ async fn download_asset(
 }
 
 /// Download checksums file from a release (via API for private repo support).
-async fn fetch_checksums(http: &reqwest::Client, tag: &str, token: Option<&str>, assets: &[(String, String)]) -> Result<String> {
+async fn fetch_checksums(
+    http: &reqwest::Client,
+    tag: &str,
+    token: Option<&str>,
+    assets: &[(String, String)],
+) -> Result<String> {
     // Look for checksums file in assets
     let checksums_name = format!("checksums-{tag}.sha256");
     let asset_url = assets

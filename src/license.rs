@@ -37,7 +37,10 @@ pub enum ResolvedLicense {
 /// 2. Environment variable `WSHM_LICENSE_KEY`
 /// 3. Config `[license] path = "..."` (JWT file)
 /// 4. Fallback `~/.wshm/license.jwt`
-pub async fn resolve(config: &LicenseConfig, vault_config: Option<&crate::config::VaultConfig>) -> ResolvedLicense {
+pub async fn resolve(
+    config: &LicenseConfig,
+    vault_config: Option<&crate::config::VaultConfig>,
+) -> ResolvedLicense {
     // Step 1: Check config key field (may contain vault placeholder)
     if let Some(ref key_value) = config.key {
         let key_value = key_value.trim();
@@ -162,7 +165,10 @@ pub fn resolve_sync(config: &LicenseConfig) -> ResolvedLicense {
     ResolvedLicense::None
 }
 
-async fn resolve_from_vault(placeholder: &str, vault_config: Option<&crate::config::VaultConfig>) -> Option<String> {
+async fn resolve_from_vault(
+    placeholder: &str,
+    vault_config: Option<&crate::config::VaultConfig>,
+) -> Option<String> {
     let vc = vault_config?;
     let resolver = crate::vault::build_resolver(vc).ok()??;
     crate::vault::resolve_placeholders(placeholder, resolver.as_ref())

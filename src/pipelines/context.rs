@@ -55,7 +55,10 @@ pub fn build_context(db: &Database, slug: &str) -> Result<String> {
                 format!(" [{}]", issue.labels.join(", "))
             };
 
-            out.push_str(&format!("### #{} — {}{}\n", issue.number, issue.title, labels));
+            out.push_str(&format!(
+                "### #{} — {}{}\n",
+                issue.number, issue.title, labels
+            ));
 
             // Add triage info if available
             if let Ok(Some(triage)) = db.get_triage_result(issue.number) {
@@ -150,7 +153,10 @@ pub fn build_context(db: &Database, slug: &str) -> Result<String> {
             } else {
                 title.to_string()
             };
-            out.push_str(&format!("| {} | #{num} | {score} | {title_short} |\n", i + 1));
+            out.push_str(&format!(
+                "| {} | #{num} | {score} | {title_short} |\n",
+                i + 1
+            ));
         }
         out.push('\n');
     }

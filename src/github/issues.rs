@@ -26,7 +26,8 @@ impl Client {
         let mut page = 1u32;
 
         loop {
-            let mut url = format!(
+            let mut url =
+                format!(
                 "https://api.github.com/repos/{}/{}/issues?state={state}&per_page={pp}&page={page}",
                 self.owner, self.repo, pp = super::GITHUB_PER_PAGE
             );

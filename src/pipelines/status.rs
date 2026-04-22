@@ -123,10 +123,7 @@ pub fn build_summary(config: &Config, db: &Database) -> Result<Summary> {
     let mut high_priority_issues = Vec::new();
     for issue in &open_issues {
         if let Ok(Some(triage)) = db.get_triage_result(issue.number) {
-            let is_high = matches!(
-                triage.priority.as_deref(),
-                Some("high") | Some("critical")
-            );
+            let is_high = matches!(triage.priority.as_deref(), Some("high") | Some("critical"));
             if !is_high {
                 continue;
             }
@@ -265,10 +262,7 @@ fn format_terminal(summary: &Summary) -> String {
             } else {
                 String::new()
             };
-            output.push_str(&format!(
-                "  #{} {}{} — {}\n",
-                i.number, prio, age, i.title
-            ));
+            output.push_str(&format!("  #{} {}{} — {}\n", i.number, prio, age, i.title));
         }
     }
 

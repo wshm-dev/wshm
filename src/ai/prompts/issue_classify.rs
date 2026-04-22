@@ -63,12 +63,20 @@ pub fn truncate_body(body: &str, max_chars: usize) -> String {
     if body.chars().count() <= max_chars {
         body.to_string()
     } else {
-        let end = body.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(body.len());
+        let end = body
+            .char_indices()
+            .nth(max_chars)
+            .map(|(i, _)| i)
+            .unwrap_or(body.len());
         format!("{}...\n(truncated)", &body[..end])
     }
 }
 
-pub fn build_user_prompt(issue: &Issue, existing_issues: &[Issue], open_prs: &[PullRequest]) -> String {
+pub fn build_user_prompt(
+    issue: &Issue,
+    existing_issues: &[Issue],
+    open_prs: &[PullRequest],
+) -> String {
     let body = issue.body.as_deref().unwrap_or("(no description)");
     let safe_body = sanitize_user_content(&truncate_body(body, 8000));
 
@@ -112,7 +120,11 @@ pub fn build_user_prompt(issue: &Issue, existing_issues: &[Issue], open_prs: &[P
     if !existing_issues.is_empty() {
         prompt.push_str("\n## Existing open issues (for duplicate detection):\n");
         for existing in existing_issues.iter().take(50) {
-            prompt.push_str(&format!("- #{}: {}\n", existing.number, sanitize_user_content(&existing.title)));
+            prompt.push_str(&format!(
+                "- #{}: {}\n",
+                existing.number,
+                sanitize_user_content(&existing.title)
+            ));
         }
     }
 

@@ -172,7 +172,9 @@ pub fn get_open_pulls(conn: &Connection) -> Result<Vec<PullRequest>> {
          FROM pull_requests WHERE state = 'open' ORDER BY number DESC",
     )?;
 
-    let pulls = stmt.query_map([], row_to_pull)?.collect::<Result<Vec<_>, _>>()?;
+    let pulls = stmt
+        .query_map([], row_to_pull)?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(pulls)
 }
 
@@ -185,6 +187,8 @@ pub fn get_unanalyzed_pulls(conn: &Connection) -> Result<Vec<PullRequest>> {
          ORDER BY p.number DESC",
     )?;
 
-    let pulls = stmt.query_map([], row_to_pull)?.collect::<Result<Vec<_>, _>>()?;
+    let pulls = stmt
+        .query_map([], row_to_pull)?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(pulls)
 }

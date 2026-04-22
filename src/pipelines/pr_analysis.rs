@@ -128,7 +128,10 @@ async fn analyze_pr(
         ));
     }
 
-    let system_prompt = config.pr.system_prompt.as_deref()
+    let system_prompt = config
+        .pr
+        .system_prompt
+        .as_deref()
         .unwrap_or(pr_analyze::SYSTEM);
 
     let analysis: PrAnalysis = ai.complete(system_prompt, &user_prompt).await?;
@@ -242,7 +245,10 @@ fn format_analysis_comment(a: &PrAnalysis, config: &Config) -> String {
             .replace("{type_emoji}", type_emoji)
             .replace("{risk_emoji}", risk_emoji)
             .replace("{tests_present}", check(a.review_checklist.tests_present))
-            .replace("{breaking_change}", check(a.review_checklist.breaking_change))
+            .replace(
+                "{breaking_change}",
+                check(a.review_checklist.breaking_change),
+            )
             .replace("{docs_updated}", check(a.review_checklist.docs_updated))
             .replace("{linked_issues}", &linked_issues)
             .replace("{header}", &header)

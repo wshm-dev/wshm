@@ -28,14 +28,13 @@ pub fn build_user_prompt(issue: &Issue, relevant_code: &[(String, String)]) -> S
     use super::issue_classify::{sanitize_user_content, truncate_body};
     let safe_title = sanitize_user_content(&issue.title);
     let safe_body = sanitize_user_content(&truncate_body(
-        issue.body.as_deref().unwrap_or("(no description)"), 8000,
+        issue.body.as_deref().unwrap_or("(no description)"),
+        8000,
     ));
 
     let mut prompt = format!(
         "<issue>\n## Bug Report (Issue #{}):\n**{}**\n\n{}\n</issue>\n",
-        issue.number,
-        safe_title,
-        safe_body,
+        issue.number, safe_title, safe_body,
     );
 
     if !relevant_code.is_empty() {
