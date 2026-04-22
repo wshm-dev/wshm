@@ -74,13 +74,21 @@ pub async fn run_multi(
 }
 
 /// Guard against concurrent processing of the same (repo, issue/PR number).
-async fn process_guarded(state: &DaemonState, event: &WebhookEvent, in_flight: &InFlight, slug: &str) {
+async fn process_guarded(
+    state: &DaemonState,
+    event: &WebhookEvent,
+    in_flight: &InFlight,
+    slug: &str,
+) {
     if let Some(number) = event.number {
         let key = (slug.to_string(), number);
         {
             let mut set = in_flight.lock().await;
             if !set.insert(key.clone()) {
-                warn!("Skipping event id={} for #{number} (already in-flight)", event.id);
+                warn!(
+                    "Skipping event id={} for #{number} (already in-flight)",
+                    event.id
+                );
                 return;
             }
         }
@@ -162,7 +170,15 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
         retriage: false,
     };
 
-    pipelines::triage::run(&state.config, &state.db, &state.gh, &args, pipelines::triage::OutputFormat::Text, None).await?;
+    pipelines::triage::run(
+        &state.config,
+        &state.db,
+        &state.gh,
+        &args,
+        pipelines::triage::OutputFormat::Text,
+        None,
+    )
+    .await?;
 
     // Store in ICM if enabled
     if state.config.daemon.icm_enabled {
@@ -199,10 +215,16 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
                 return Ok(());
             }
             // For synchronize: throttle re-analysis (max once per 5 min)
-            if let Ok(last) = analysis.analyzed_at.parse::<chrono::DateTime<chrono::Utc>>() {
+            if let Ok(last) = analysis
+                .analyzed_at
+                .parse::<chrono::DateTime<chrono::Utc>>()
+            {
                 let elapsed = chrono::Utc::now().signed_duration_since(last);
                 if elapsed.num_minutes() < 5 {
-                    info!("PR #{n} analyzed {}s ago, throttling re-analysis", elapsed.num_seconds());
+                    info!(
+                        "PR #{n} analyzed {}s ago, throttling re-analysis",
+                        elapsed.num_seconds()
+                    );
                     return Ok(());
                 }
             }

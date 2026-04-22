@@ -67,9 +67,7 @@ pub async fn run(state: Arc<DaemonState>) {
                 error!("Periodic sync failed ({sync_failures}x): {e:#}");
 
                 if sync_failures >= ALERT_THRESHOLD && !sync_alert_sent {
-                    warn!(
-                        "GitHub sync has failed {sync_failures} times in a row. Last error: {e}"
-                    );
+                    warn!("GitHub sync has failed {sync_failures} times in a row. Last error: {e}");
                     sync_alert_sent = true;
                 }
                 continue;
@@ -84,8 +82,15 @@ pub async fn run(state: Arc<DaemonState>) {
                 retriage: false,
             };
 
-            match pipelines::triage::run(&state.config, &state.db, &state.gh, &args, pipelines::triage::OutputFormat::Text, None)
-                .await
+            match pipelines::triage::run(
+                &state.config,
+                &state.db,
+                &state.gh,
+                &args,
+                pipelines::triage::OutputFormat::Text,
+                None,
+            )
+            .await
             {
                 Ok(()) => {
                     info!("Scheduled triage complete");
@@ -124,8 +129,15 @@ pub async fn run(state: Arc<DaemonState>) {
                 retriage: true,
             };
 
-            match pipelines::triage::run(&state.config, &state.db, &state.gh, &args, pipelines::triage::OutputFormat::Text, None)
-                .await
+            match pipelines::triage::run(
+                &state.config,
+                &state.db,
+                &state.gh,
+                &args,
+                pipelines::triage::OutputFormat::Text,
+                None,
+            )
+            .await
             {
                 Ok(()) => info!("Scheduled retriage complete"),
                 Err(e) => error!("Scheduled retriage failed: {e:#}"),

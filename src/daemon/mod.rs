@@ -36,7 +36,9 @@ pub struct MultiDaemonState {
 }
 
 pub async fn run(mut config: Config, args: DaemonArgs) -> Result<()> {
-    rustls::crypto::ring::default_provider().install_default().ok();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
 
     let apply = args.apply || config.daemon.apply;
     let bind = args
@@ -107,7 +109,9 @@ pub async fn run(mut config: Config, args: DaemonArgs) -> Result<()> {
         let server_tx = tx.clone();
         Some(tokio::spawn(async move {
             let tls = config.web.resolve_tls();
-            if let Err(e) = server::run(server_state, server_tx, &bind, secret.as_deref(), tls).await {
+            if let Err(e) =
+                server::run(server_state, server_tx, &bind, secret.as_deref(), tls).await
+            {
                 tracing::error!("Server error: {e}");
             }
         }))
@@ -152,7 +156,10 @@ pub async fn run(mut config: Config, args: DaemonArgs) -> Result<()> {
     let drain_timeout = std::time::Duration::from_secs(10);
     match tokio::time::timeout(drain_timeout, processor_handle).await {
         Ok(_) => info!("Processor drained cleanly."),
-        Err(_) => warn!("Processor did not drain within {}s.", drain_timeout.as_secs()),
+        Err(_) => warn!(
+            "Processor did not drain within {}s.",
+            drain_timeout.as_secs()
+        ),
     }
 
     info!("Daemon stopped.");
@@ -162,7 +169,9 @@ pub async fn run(mut config: Config, args: DaemonArgs) -> Result<()> {
 /// Run daemon in multi-repo mode from a global config file.
 pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
     // Install rustls crypto provider early (needed even before TLS handshake)
-    rustls::crypto::ring::default_provider().install_default().ok();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
 
     let global_apply = args.apply || global.daemon.apply;
     let bind = args
@@ -266,11 +275,18 @@ pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
         Some(tokio::spawn(async move {
             // TLS: resolve from env vars (multi-repo doesn't have per-repo web config)
             let tls = {
-                let cert = std::env::var("WSHM_TLS_CERT").ok().filter(|s| !s.is_empty());
+                let cert = std::env::var("WSHM_TLS_CERT")
+                    .ok()
+                    .filter(|s| !s.is_empty());
                 let key = std::env::var("WSHM_TLS_KEY").ok().filter(|s| !s.is_empty());
-                match (cert, key) { (Some(c), Some(k)) => Some((c, k)), _ => None }
+                match (cert, key) {
+                    (Some(c), Some(k)) => Some((c, k)),
+                    _ => None,
+                }
             };
-            if let Err(e) = server::run_multi(server_multi, server_tx, &bind, secret.as_deref(), tls).await {
+            if let Err(e) =
+                server::run_multi(server_multi, server_tx, &bind, secret.as_deref(), tls).await
+            {
                 tracing::error!("Server error: {e}");
             }
         }))
@@ -345,7 +361,10 @@ pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
     match tokio::time::timeout(drain_timeout, processor_handle).await {
         Ok(_) => info!("Processor drained cleanly."),
         Err(_) => {
-            warn!("Processor did not drain within {}s, aborting.", drain_timeout.as_secs());
+            warn!(
+                "Processor did not drain within {}s, aborting.",
+                drain_timeout.as_secs()
+            );
         }
     }
 

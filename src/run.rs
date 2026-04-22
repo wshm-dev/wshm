@@ -181,7 +181,6 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             let slug = config.repo_slug();
             crate::pipelines::context::run(&db, &slug)?;
         }
-)
         Some(Command::Login(args)) => {
             if args.license {
                 crate::license::login()?;
@@ -259,9 +258,10 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             }
 
             // Multi-repo mode: load global config if provided or if present at default path
-            let global_path = args.config.clone().unwrap_or_else(|| {
-                crate::config::GlobalConfig::default_path()
-            });
+            let global_path = args
+                .config
+                .clone()
+                .unwrap_or_else(|| crate::config::GlobalConfig::default_path());
 
             if global_path.exists() {
                 let global = crate::config::GlobalConfig::load(&global_path)?;

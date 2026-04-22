@@ -58,7 +58,8 @@ pub async fn run(
 
     if let Some((cert_path, key_path)) = tls {
         // crypto provider already installed in run_multi/run
-        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await?;
+        let tls_config =
+            axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await?;
         let addr: std::net::SocketAddr = bind.parse()?;
         info!("Webhook server listening on https://{bind} (TLS enabled)");
         axum_server::bind_rustls(addr, tls_config)
@@ -74,8 +75,10 @@ pub async fn run(
 }
 
 async fn handle_health(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
-    let pending = state.daemon.db.pending_event_count()
-        .unwrap_or_else(|e| { tracing::warn!("Failed to query pending events: {e}"); 0 });
+    let pending = state.daemon.db.pending_event_count().unwrap_or_else(|e| {
+        tracing::warn!("Failed to query pending events: {e}");
+        0
+    });
     Json(json!({
         "status": "ok",
         "apply": state.daemon.apply,
@@ -202,7 +205,8 @@ pub async fn run_multi(
 
     if let Some((cert_path, key_path)) = tls {
         // crypto provider already installed in run_multi/run
-        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await?;
+        let tls_config =
+            axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await?;
         let addr: std::net::SocketAddr = bind.parse()?;
         info!("Multi-repo server listening on https://{bind} (TLS enabled)");
         axum_server::bind_rustls(addr, tls_config)
@@ -223,8 +227,10 @@ async fn handle_health_multi(State(state): State<Arc<MultiServerState>>) -> impl
         .repos
         .iter()
         .map(|(slug, ds)| {
-            let pending = ds.db.pending_event_count()
-                .unwrap_or_else(|e| { tracing::warn!("[{slug}] Failed to query pending events: {e}"); 0 });
+            let pending = ds.db.pending_event_count().unwrap_or_else(|e| {
+                tracing::warn!("[{slug}] Failed to query pending events: {e}");
+                0
+            });
             json!({
                 "repo": slug,
                 "apply": ds.apply,

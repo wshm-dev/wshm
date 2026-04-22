@@ -20,7 +20,10 @@ fn generate_unit(
     let mut args = Vec::<String>::new();
     if let Some(r) = repo {
         // Validate repo format (owner/name only) to prevent injection
-        if !r.chars().all(|c| c.is_alphanumeric() || c == '/' || c == '-' || c == '_' || c == '.') {
+        if !r
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '/' || c == '-' || c == '_' || c == '.')
+        {
             tracing::warn!("Suspicious repo name: {r} — skipping --repo flag");
         } else {
             args.push(format!("--repo {r}"));
@@ -51,14 +54,19 @@ fn generate_unit(
 
     let mut env_lines = String::new();
     // Pass RUST_LOG
-    env_lines.push_str("Environment=RUST_LOG=wshm=info
-");
+    env_lines.push_str(
+        "Environment=RUST_LOG=wshm=info
+",
+    );
 
     // Load credentials from .wshm/credentials in workdir
     let creds_path = Path::new(workdir).join(".wshm/credentials");
     if creds_path.exists() {
-        env_lines.push_str(&format!("EnvironmentFile=-{}
-", creds_path.display()));
+        env_lines.push_str(&format!(
+            "EnvironmentFile=-{}
+",
+            creds_path.display()
+        ));
     }
 
     // Note: We intentionally do NOT inline env var values into the unit file.
@@ -223,7 +231,10 @@ fn is_root() -> bool {
         .ok()
         .and_then(|o| {
             if o.status.success() {
-                String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok()
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
             } else {
                 None
             }

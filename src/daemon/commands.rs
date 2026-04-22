@@ -154,7 +154,15 @@ pub async fn execute(
                 apply,
                 retriage: false,
             };
-            pipelines::triage::run(config, db, gh, &args, pipelines::triage::OutputFormat::Text, None).await?;
+            pipelines::triage::run(
+                config,
+                db,
+                gh,
+                &args,
+                pipelines::triage::OutputFormat::Text,
+                None,
+            )
+            .await?;
             Ok(format!(
                 "Re-triaged issue #{number}. {}",
                 if apply {
@@ -292,8 +300,10 @@ pub async fn execute(
                                 i + 1
                             ))
                             .collect::<Vec<_>>()
-                            .join("
-")
+                            .join(
+                                "
+"
+                            )
                     ))
                 }
                 None => Ok(format!("PR #{number} is not in the merge queue.")),

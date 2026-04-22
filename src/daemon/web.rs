@@ -93,11 +93,7 @@ async fn auth_middleware(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Basic "))
-        .and_then(|b64| {
-            base64::engine::general_purpose::STANDARD
-                .decode(b64)
-                .ok()
-        })
+        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .map(|decoded| {
             if let Some((user, pass)) = decoded.split_once(':') {
@@ -248,7 +244,8 @@ async fn api_issues(
         if let Ok(issues) = ds.db.get_open_issues() {
             // Build a map: issue_number -> list of linked PRs (from open PRs bodies)
             let open_prs = ds.db.get_open_pulls().unwrap_or_default();
-            let mut issue_prs: std::collections::HashMap<u64, Vec<serde_json::Value>> = std::collections::HashMap::new();
+            let mut issue_prs: std::collections::HashMap<u64, Vec<serde_json::Value>> =
+                std::collections::HashMap::new();
             for pr in &open_prs {
                 let body = pr.body.as_deref().unwrap_or("");
                 let linked = crate::pipelines::extract_linked_issue_numbers(body);
@@ -271,12 +268,19 @@ async fn api_issues(
                     None => "no_pr",
                     Some(prs) => {
                         let has_ready = prs.iter().any(|p| {
-                            let ci_ok = p["ci_status"].as_str().map(|s| s == "success").unwrap_or(false);
+                            let ci_ok = p["ci_status"]
+                                .as_str()
+                                .map(|s| s == "success")
+                                .unwrap_or(false);
                             let mergeable = p["mergeable"].as_bool().unwrap_or(true);
                             let not_draft = !p["draft"].as_bool().unwrap_or(false);
                             ci_ok && mergeable && not_draft
                         });
-                        if has_ready { "pr_ready" } else { "has_pr" }
+                        if has_ready {
+                            "pr_ready"
+                        } else {
+                            "has_pr"
+                        }
                     }
                 };
                 all_issues.push(json!({
@@ -527,7 +531,11 @@ async fn serve_asset(path: &str) -> Response {
 async fn serve_index() -> Response {
     match WebAssets::get("index.html") {
         Some(file) => Html(String::from_utf8_lossy(&file.data).to_string()).into_response(),
-        None => (StatusCode::NOT_FOUND, "index.html not found in embedded assets").into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            "index.html not found in embedded assets",
+        )
+            .into_response(),
     }
 }
 
@@ -546,7 +554,6 @@ async fn handle_spa_fallback(req: Request<Body>) -> Response {
 
     serve_asset(path).await
 }
-
 
 /// GET /api/v1/changelog -- changelog from closed/merged PRs.
 async fn api_changelog(
@@ -614,7 +621,10 @@ async fn api_changelog(
                     .any(|l| l.contains("feature") || l.contains("enhancement"))
                 {
                     "Features"
-                } else if labels.iter().any(|l| l.contains("bug") || l.contains("fix")) {
+                } else if labels
+                    .iter()
+                    .any(|l| l.contains("bug") || l.contains("fix"))
+                {
                     "Bug Fixes"
                 } else if labels.iter().any(|l| l.contains("docs")) {
                     "Documentation"
@@ -624,10 +634,7 @@ async fn api_changelog(
 
                 let mut entry = pr.clone();
                 entry["repo"] = json!(slug);
-                sections
-                    .entry(section.to_string())
-                    .or_default()
-                    .push(entry);
+                sections.entry(section.to_string()).or_default().push(entry);
             }
         }
     }
@@ -763,9 +770,7 @@ async fn api_create_backup() -> impl IntoResponse {
 }
 
 /// POST /api/v1/restore -- restore from backup.
-async fn api_restore_backup(
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+async fn api_restore_backup(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     let path = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => {
@@ -799,12 +804,36 @@ async fn api_license() -> impl IntoResponse {
     let is_pro = crate::pro_hooks::is_pro();
 
     let pro_features = [
-        ("review", "Inline code review", is_pro && crate::pro_hooks::has_feature("review")),
-        ("auto-fix", "Auto-generate fix PRs", is_pro && crate::pro_hooks::has_feature("auto-fix")),
-        ("improve", "Propose improvements", is_pro && crate::pro_hooks::has_feature("improve")),
-        ("conflicts", "Conflict resolution", is_pro && crate::pro_hooks::has_feature("conflicts")),
-        ("reports", "HTML/PDF reports", is_pro && crate::pro_hooks::has_feature("reports")),
-        ("daemon-webhook", "Daemon webhook mode", is_pro && crate::pro_hooks::has_feature("daemon")),
+        (
+            "review",
+            "Inline code review",
+            is_pro && crate::pro_hooks::has_feature("review"),
+        ),
+        (
+            "auto-fix",
+            "Auto-generate fix PRs",
+            is_pro && crate::pro_hooks::has_feature("auto-fix"),
+        ),
+        (
+            "improve",
+            "Propose improvements",
+            is_pro && crate::pro_hooks::has_feature("improve"),
+        ),
+        (
+            "conflicts",
+            "Conflict resolution",
+            is_pro && crate::pro_hooks::has_feature("conflicts"),
+        ),
+        (
+            "reports",
+            "HTML/PDF reports",
+            is_pro && crate::pro_hooks::has_feature("reports"),
+        ),
+        (
+            "daemon-webhook",
+            "Daemon webhook mode",
+            is_pro && crate::pro_hooks::has_feature("daemon"),
+        ),
     ];
 
     let features: Vec<serde_json::Value> = pro_features
@@ -824,12 +853,16 @@ async fn api_license() -> impl IntoResponse {
 }
 
 /// POST /api/v1/license -- activate a license key from the web UI.
-async fn api_license_activate(
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+async fn api_license_activate(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     let key = match body.get("license_key").and_then(|v| v.as_str()) {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
-        _ => return (StatusCode::BAD_REQUEST, Json(json!({"error": "license_key is required"}))).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "license_key is required"})),
+            )
+                .into_response()
+        }
     };
 
     // Try to activate via the license module
@@ -838,11 +871,16 @@ async fn api_license_activate(
             "status": "ok",
             "plan": plan,
             "message": "License activated successfully",
-        })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({
-            "status": "error",
-            "message": format!("{e}"),
-        }))).into_response(),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error",
+                "message": format!("{e}"),
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -875,7 +913,9 @@ fn activate_license(key: &str) -> Result<String, String> {
         )
         .map_err(|e| format!("Cannot reach license server: {e}"))?;
 
-    let body: serde_json::Value = resp.into_json().map_err(|e| format!("Invalid response: {e}"))?;
+    let body: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| format!("Invalid response: {e}"))?;
 
     if let Some(token) = body["token"].as_str() {
         // Cache JWT
@@ -899,7 +939,10 @@ fn activate_license(key: &str) -> Result<String, String> {
             .to_string();
         Ok(plan)
     } else {
-        Err(body["error"].as_str().unwrap_or("Activation failed").to_string())
+        Err(body["error"]
+            .as_str()
+            .unwrap_or("Activation failed")
+            .to_string())
     }
 }
 
@@ -940,11 +983,7 @@ pub fn default_spa_routes() -> Router<Arc<WebState>> {
 ///
 /// Extension crates can use this to apply the same auth semantics when
 /// building their own router with [`oss_api_routes`].
-pub async fn auth_layer(
-    state: State<Arc<WebState>>,
-    req: Request<Body>,
-    next: Next,
-) -> Response {
+pub async fn auth_layer(state: State<Arc<WebState>>, req: Request<Body>, next: Next) -> Response {
     auth_middleware(state, req, next).await
 }
 
