@@ -243,46 +243,38 @@ wshm daemon --config /etc/wshm/global.toml --poll
 
 ### Install
 
-> **Heads up** — the current release (`v0.27.0`) only ships prebuilt binaries for **Linux x86_64** and **Windows x86_64**. Full native coverage (Intel Mac, Apple Silicon, ARM Linux) and the multi-arch Docker image arrive with the next tagged release once the extended build pipeline runs. Track [#22](https://github.com/wshm-dev/wshm/issues/22).
-
-#### Linux x86_64 — Homebrew
+#### Linux — Homebrew
 
 ```bash
 brew tap wshm-dev/tap
 brew install wshm
 ```
 
+#### Linux — .deb (amd64 / arm64)
+
+```bash
+# amd64
+curl -LO https://github.com/wshm-dev/wshm/releases/latest/download/wshm_$(curl -s https://api.github.com/repos/wshm-dev/wshm/releases/latest | grep tag_name | cut -d'"' -f4 | tr -d v)_amd64.deb
+sudo dpkg -i wshm_*_amd64.deb
+```
+
 #### Windows x86_64 — direct download
 
 ```powershell
-Invoke-WebRequest -Uri https://github.com/wshm-dev/wshm/releases/download/v0.27.0/wshm-x86_64-pc-windows-msvc.zip -OutFile wshm.zip
+Invoke-WebRequest -Uri https://github.com/wshm-dev/wshm/releases/download/v0.28.1/wshm-x86_64-pc-windows-msvc.zip -OutFile wshm.zip
 Expand-Archive wshm.zip -DestinationPath $env:USERPROFILE\.wshm\bin
 # then add %USERPROFILE%\.wshm\bin to your PATH
 ```
 
-#### Docker (any x86_64 or ARM64 host) — ships with v0.28.0
+#### Release pipeline (v0.28.1)
 
-```bash
-docker pull ghcr.io/wshm-dev/wshm:latest
-docker run --rm ghcr.io/wshm-dev/wshm --version
-```
-
-The image will be multi-arch (`linux/amd64` + `linux/arm64`), default `CMD` is `wshm daemon` so it's drop-in for Compose / Kubernetes, and is published to GHCR on every release (pipeline landed in `wshm-pro#7`, first push fires on the `v0.28.0` tag).
-
-#### Everything else
-
-- **Intel Mac, Apple Silicon, ARM Linux** (native binaries) — arriving with the next release; `brew install wshm` will work on all of them once v0.28.0 ships. Docker above works on these hosts today.
-- **`cargo install`, install.sh, Scoop/winget** — not yet published, tracked in [#22](https://github.com/wshm-dev/wshm/issues/22).
-
-#### Release pipeline
-
-| Target                       | Prebuilt today | After v0.28.0 |
-|------------------------------|----------------|---------------|
-| `x86_64-unknown-linux-gnu`   | ✓              | ✓             |
-| `x86_64-pc-windows-msvc`     | ✓              | ✓             |
-| `x86_64-apple-darwin`        | ✗              | ✓             |
-| `aarch64-apple-darwin`       | ✗              | ✓             |
-| `aarch64-unknown-linux-gnu`  | ✗              | ✓             |
+| Target                       | Binary | .deb |
+|------------------------------|--------|------|
+| `x86_64-unknown-linux-gnu`   | ✓      | ✓    |
+| `aarch64-unknown-linux-gnu`  | ✓      | ✓    |
+| `x86_64-pc-windows-msvc`     | ✓      | —    |
+| `x86_64-apple-darwin`        | —      | —    |
+| `aarch64-apple-darwin`       | —      | —    |
 
 ### Configure
 
