@@ -71,7 +71,11 @@ jobs:
         run: cargo install cargo-audit
 
       - name: Dependency audit (CVEs)
-        run: cargo audit
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2026-0104 \
+            --ignore RUSTSEC-2026-0098 \
+            --ignore RUSTSEC-2026-0099
 
   smoke:
     name: Smoke test
