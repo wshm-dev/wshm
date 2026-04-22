@@ -145,7 +145,7 @@ pub fn build_context(db: &Database, slug: &str) -> Result<String> {
                 (pr.number, pr.title.as_str(), score)
             })
             .collect();
-        scored.sort_by(|a, b| b.2.cmp(&a.2));
+        scored.sort_by_key(|b| std::cmp::Reverse(b.2));
 
         for (i, (num, title, score)) in scored.iter().enumerate() {
             let title_short = if title.len() > 60 {

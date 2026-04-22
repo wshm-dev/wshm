@@ -225,7 +225,7 @@ fn detect_duplicates(pulls: &[PullRequest]) -> Vec<DuplicateGroup> {
             .collect();
 
         // Sort by score descending
-        members.sort_by(|a, b| b.score.cmp(&a.score));
+        members.sort_by_key(|b| std::cmp::Reverse(b.score));
         let best = members[0].number;
 
         // Determine reason
@@ -239,7 +239,7 @@ fn detect_duplicates(pulls: &[PullRequest]) -> Vec<DuplicateGroup> {
     }
 
     // Sort groups by size descending
-    result.sort_by(|a, b| b.members.len().cmp(&a.members.len()));
+    result.sort_by_key(|b| std::cmp::Reverse(b.members.len()));
     result
 }
 
@@ -269,7 +269,7 @@ fn detect_stale(pulls: &[PullRequest], threshold_days: i64) -> Vec<StalePr> {
         })
         .collect();
 
-    stale.sort_by(|a, b| b.days_stale.cmp(&a.days_stale));
+    stale.sort_by_key(|b| std::cmp::Reverse(b.days_stale));
     stale
 }
 

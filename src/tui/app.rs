@@ -333,7 +333,7 @@ impl App {
             *cat_map.entry(t.category.clone()).or_default() += 1;
         }
         self.stats.by_category = cat_map.into_iter().collect();
-        self.stats.by_category.sort_by(|a, b| b.1.cmp(&a.1));
+        self.stats.by_category.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         // Priority breakdown
         let mut pri_map: HashMap<String, usize> = HashMap::new();
@@ -342,7 +342,7 @@ impl App {
             *pri_map.entry(pri).or_default() += 1;
         }
         self.stats.by_priority = pri_map.into_iter().collect();
-        self.stats.by_priority.sort_by(|a, b| b.1.cmp(&a.1));
+        self.stats.by_priority.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         // Average confidence
         if !triaged.is_empty() {
@@ -791,27 +791,23 @@ impl App {
 
     pub fn confirm_input(&mut self) {
         match self.input_mode.clone() {
-            Some(InputMode::AddRepoSlug) => {
-                if !self.input_buffer.is_empty() {
-                    self.input_tmp_slug = self.input_buffer.clone();
-                    self.input_buffer.clear();
-                    // Default path: ~/slug.split('/').last()
-                    let default_path = format!(
-                        "{}/{}",
-                        dirs::home_dir().unwrap_or_default().display(),
-                        self.input_tmp_slug.split('/').next_back().unwrap_or("repo")
-                    );
-                    self.input_buffer = default_path;
-                    self.input_mode = Some(InputMode::AddRepoPath);
-                }
+            Some(InputMode::AddRepoSlug) if !self.input_buffer.is_empty() => {
+                self.input_tmp_slug = self.input_buffer.clone();
+                self.input_buffer.clear();
+                // Default path: ~/slug.split('/').last()
+                let default_path = format!(
+                    "{}/{}",
+                    dirs::home_dir().unwrap_or_default().display(),
+                    self.input_tmp_slug.split('/').next_back().unwrap_or("repo")
+                );
+                self.input_buffer = default_path;
+                self.input_mode = Some(InputMode::AddRepoPath);
             }
-            Some(InputMode::AddRepoPath) => {
-                if !self.input_buffer.is_empty() {
-                    let path = self.input_buffer.clone();
-                    self.add_repo(&self.input_tmp_slug.clone(), &path);
-                    self.input_mode = None;
-                    self.input_buffer.clear();
-                }
+            Some(InputMode::AddRepoPath) if !self.input_buffer.is_empty() => {
+                let path = self.input_buffer.clone();
+                self.add_repo(&self.input_tmp_slug.clone(), &path);
+                self.input_mode = None;
+                self.input_buffer.clear();
             }
             Some(InputMode::DeleteConfirm) => {
                 if self.input_buffer.to_lowercase() == "y" {
@@ -823,7 +819,7 @@ impl App {
             Some(InputMode::EditSetting) => {
                 // Handled in mod.rs directly
             }
-            None => {}
+            _ => {}
         }
     }
 

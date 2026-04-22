@@ -141,7 +141,7 @@ pub fn build_summary(config: &Config, db: &Database) -> Result<Summary> {
         }
     }
     // Oldest first = most urgent at the top
-    high_priority_issues.sort_by(|a, b| b.age_days.cmp(&a.age_days));
+    high_priority_issues.sort_by_key(|b| std::cmp::Reverse(b.age_days));
 
     // Top 10 issues to do — sorted by priority (critical > high > medium > low) then oldest first
     let priority_rank = |p: Option<&str>| match p {
