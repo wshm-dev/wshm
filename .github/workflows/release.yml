@@ -32,20 +32,14 @@ jobs:
 
   build-linux-arm:
     name: Build Linux aarch64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust + cross-compilation tools
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
-      - name: Install cross linker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Build
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --bin wshm --target aarch64-unknown-linux-gnu
       - name: Package
         run: |
@@ -56,48 +50,6 @@ jobs:
         with:
           name: wshm-aarch64-unknown-linux-gnu
           path: wshm-aarch64-unknown-linux-gnu.tar.gz
-
-  build-macos-x86:
-    name: Build macOS x86_64
-    runs-on: macos-13
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin
-      - name: Build
-        run: cargo build --release --bin wshm --target x86_64-apple-darwin
-      - name: Package
-        run: |
-          cd target/x86_64-apple-darwin/release
-          tar czf wshm-x86_64-apple-darwin.tar.gz wshm
-          mv wshm-x86_64-apple-darwin.tar.gz $GITHUB_WORKSPACE/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wshm-x86_64-apple-darwin
-          path: wshm-x86_64-apple-darwin.tar.gz
-
-  build-macos-arm:
-    name: Build macOS aarch64
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-      - name: Build
-        run: cargo build --release --bin wshm --target aarch64-apple-darwin
-      - name: Package
-        run: |
-          cd target/aarch64-apple-darwin/release
-          tar czf wshm-aarch64-apple-darwin.tar.gz wshm
-          mv wshm-aarch64-apple-darwin.tar.gz $GITHUB_WORKSPACE/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wshm-aarch64-apple-darwin
-          path: wshm-aarch64-apple-darwin.tar.gz
 
   build-windows:
     name: Build Windows x86_64
@@ -124,8 +76,6 @@ jobs:
     needs:
       - build-linux-x86
       - build-linux-arm
-      - build-macos-x86
-      - build-macos-arm
       - build-windows
     runs-on: ubuntu-latest
     steps:
@@ -136,8 +86,7 @@ jobs:
           merge-multiple: true
 
       - name: Compute checksums
-        run: |
-          sha256sum *.tar.gz *.zip > checksums.txt
+        run: sha256sum *.tar.gz *.zip > checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -154,15 +103,11 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           VERSION="${TAG#v}"
+          SHA_X86=$(sha256sum wshm-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')
+          SHA_ARM=$(sha256sum wshm-aarch64-unknown-linux-gnu.tar.gz | awk '{print $1}')
 
-          # Compute SHA256 for macOS bottles
-          SHA_ARM=$(sha256sum wshm-aarch64-apple-darwin.tar.gz | awk '{print $1}')
-          SHA_X86=$(sha256sum wshm-x86_64-apple-darwin.tar.gz | awk '{print $1}')
-
-          # Clone tap
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/wshm-dev/homebrew-tap.git" tap
 
-          # Write updated formula
           cat > tap/Formula/wshm.rb << EOF
           class Wshm < Formula
             desc "AI-powered GitHub agent — triage, PR analysis, merge queue"
@@ -170,14 +115,14 @@ jobs:
             version "${VERSION}"
             license "SSPL-1.0"
 
-            on_macos do
-              on_arm do
-                url "https://github.com/wshm-dev/wshm/releases/download/${TAG}/wshm-aarch64-apple-darwin.tar.gz"
-                sha256 "${SHA_ARM}"
-              end
+            on_linux do
               on_intel do
-                url "https://github.com/wshm-dev/wshm/releases/download/${TAG}/wshm-x86_64-apple-darwin.tar.gz"
+                url "https://github.com/wshm-dev/wshm/releases/download/${TAG}/wshm-x86_64-unknown-linux-gnu.tar.gz"
                 sha256 "${SHA_X86}"
+              end
+              on_arm do
+                url "https://github.com/wshm-dev/wshm/releases/download/${TAG}/wshm-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_ARM}"
               end
             end
 
@@ -191,7 +136,6 @@ jobs:
           end
           EOF
 
-          # Commit and push
           cd tap
           git config user.email "release-bot@wshm.dev"
           git config user.name "wshm release bot"
