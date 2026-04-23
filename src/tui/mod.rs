@@ -169,7 +169,7 @@ fn run_loop(
                         // 'u' — check for update (non-blocking: spawn and poll)
                         KeyCode::Char('u') => {
                             let handle = tokio::runtime::Handle::current();
-                            let _ = handle.block_on(app.check_update());
+                            handle.block_on(app.check_update());
                         }
                         // 'U' — apply update (spawned so the TUI isn't blocked)
                         KeyCode::Char('U') => {
