@@ -76,11 +76,7 @@ jobs:
             --ignore RUSTSEC-2026-0099
 
       - name: Check for unsafe code
-        run: |
-          cargo audit \
-            --ignore RUSTSEC-2026-0104 \
-            --ignore RUSTSEC-2026-0098 \
-            --ignore RUSTSEC-2026-0099
+        run: grep -rn "unsafe " src/ --include="*.rs" && echo "⚠️ unsafe blocks found" >> $GITHUB_STEP_SUMMARY || echo "✅ No unsafe code" >> $GITHUB_STEP_SUMMARY
 
       - name: Scan for command injection risks
         run: |

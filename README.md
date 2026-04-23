@@ -10,11 +10,10 @@
 
 Works with GitHub, GitLab, Gitea, and Azure DevOps. Plug in Claude Max, OpenAI, or a local Ollama — your call. Your AI keys. Your data. No SaaS dependency.
 
-**Runs on macOS (Intel & Apple Silicon), Linux (x86_64 & ARM64), and Windows (x86_64).**
+**Runs on Linux (x86_64 & ARM64) and Windows (x86_64).**
 
 [![License: SSPL](https://img.shields.io/badge/License-SSPL--1.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
-![macOS](https://img.shields.io/badge/macOS-Intel%20%7C%20ARM-black?logo=apple)
 ![Linux](https://img.shields.io/badge/Linux-x64%20%7C%20ARM-yellow?logo=linux)
 ![Windows](https://img.shields.io/badge/Windows-x64-blue?logo=windows)
 ![AI providers](https://img.shields.io/badge/AI%20providers-14-purple)
