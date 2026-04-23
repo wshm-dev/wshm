@@ -301,11 +301,11 @@ pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
         info!("Auto-update enabled (every {interval_hours}h, checking now...)");
         Some(tokio::spawn(async move {
             // Check immediately on startup
-            crate::update::auto_check_and_update().await;
+            crate::pro_hooks::run_auto_update().await;
             let interval = std::time::Duration::from_secs(interval_hours as u64 * 3600);
             loop {
                 tokio::time::sleep(interval).await;
-                crate::update::auto_check_and_update().await;
+                crate::pro_hooks::run_auto_update().await;
             }
         }))
     } else {

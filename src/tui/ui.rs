@@ -57,7 +57,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
         f.render_widget(warning, chunks[3]);
     } else {
-        draw_footer(f, chunks[3]);
+        draw_footer(f, app, chunks[3]);
     }
 }
 
@@ -843,6 +843,7 @@ fn draw_repos(f: &mut Frame, app: &App, area: Rect) {
             InputMode::AddRepoPath => ("Local path: ", "Enter to confirm, Esc to cancel"),
             InputMode::DeleteConfirm => ("Delete? (y/N): ", ""),
             InputMode::EditSetting => ("New value: ", "Enter to confirm, Esc to cancel"),
+            InputMode::RestorePath => ("Backup file path: ", "Enter to restore, Esc to cancel"),
         };
         let input = Paragraph::new(Line::from(vec![
             Span::styled(prompt, Style::default().fg(Color::Yellow)),
@@ -1360,8 +1361,8 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(content, area);
 }
 
-fn draw_footer(f: &mut Frame, area: Rect) {
-    let footer = Paragraph::new(Line::from(vec![
+fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
+    let mut spans = vec![
         Span::styled(" 1-5 ", Style::default().fg(Color::Cyan)),
         Span::raw("tabs  "),
         Span::styled("j/k ", Style::default().fg(Color::Cyan)),
@@ -1370,10 +1371,37 @@ fn draw_footer(f: &mut Frame, area: Rect) {
         Span::raw("sort  "),
         Span::styled("r ", Style::default().fg(Color::Cyan)),
         Span::raw("refresh  "),
+        Span::styled("b ", Style::default().fg(Color::Cyan)),
+        Span::raw("backup  "),
+        Span::styled("B ", Style::default().fg(Color::Cyan)),
+        Span::raw("restore  "),
+        Span::styled("u ", Style::default().fg(Color::Cyan)),
+        Span::raw("update  "),
         Span::styled("q ", Style::default().fg(Color::Cyan)),
         Span::raw("quit"),
-    ]));
+    ];
 
+    if let Some(ref msg) = app.status_message {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!(" {msg} "),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if let Some(ref ver) = app.update_available {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!(" [u] Update available: {ver} "),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let footer = Paragraph::new(Line::from(spans));
     f.render_widget(footer, area);
 }
 

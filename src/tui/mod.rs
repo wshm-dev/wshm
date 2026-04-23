@@ -166,6 +166,25 @@ fn run_loop(
                         KeyCode::Char('a') => app.set_sort(app::SortField::Age),
                         KeyCode::Char('o') => app.set_sort(app::SortField::Confidence),
                         KeyCode::Char('m') => app.set_sort(app::SortField::Mergeable),
+                        // 'u' — check for update (non-blocking: spawn and poll)
+                        KeyCode::Char('u') => {
+                            let handle = tokio::runtime::Handle::current();
+                            handle.block_on(app.check_update());
+                        }
+                        // 'U' — apply update (spawned so the TUI isn't blocked)
+                        KeyCode::Char('U') => {
+                            tokio::spawn(async {
+                                let _ = crate::pro_hooks::run_update(true, false).await;
+                            });
+                        }
+                        // 'b' — backup state.db to default path
+                        KeyCode::Char('b') => {
+                            app.run_backup();
+                        }
+                        // 'B' — restore: prompt for backup file path
+                        KeyCode::Char('B') => {
+                            app.start_restore();
+                        }
                         _ => {}
                     }
                 }

@@ -150,6 +150,42 @@ pub async fn run_review(
     }
 }
 
+// --- Update hooks ---
+// Allow wshm-pro to override the update target (binary name, repo, version
+// suffix) without duplicating the download/verify/replace logic.
+
+pub type UpdateFn = fn(bool, bool) -> BoxFuture<'static, anyhow::Result<Option<String>>>;
+pub type AutoUpdateFn = fn() -> BoxFuture<'static, ()>;
+
+static UPDATE_HOOK: OnceLock<UpdateFn> = OnceLock::new();
+static AUTO_UPDATE_HOOK: OnceLock<AutoUpdateFn> = OnceLock::new();
+
+pub fn set_update_hook(f: UpdateFn) {
+    let _ = UPDATE_HOOK.set(f);
+}
+
+pub fn set_auto_update_hook(f: AutoUpdateFn) {
+    let _ = AUTO_UPDATE_HOOK.set(f);
+}
+
+/// Check/apply an update. Falls back to the OSS config if no hook is registered.
+pub async fn run_update(apply: bool, json: bool) -> anyhow::Result<Option<String>> {
+    match UPDATE_HOOK.get() {
+        Some(f) => f(apply, json).await,
+        None => {
+            crate::update::check_and_update(&crate::update::UpdateConfig::oss(), apply, json).await
+        }
+    }
+}
+
+/// Silent background update. Falls back to the OSS config if no hook is registered.
+pub async fn run_auto_update() {
+    match AUTO_UPDATE_HOOK.get() {
+        Some(f) => f().await,
+        None => crate::update::auto_check_and_update(&crate::update::UpdateConfig::oss()).await,
+    }
+}
+
 // --- Web extensions hook ---
 // NOTE: In OSS build, daemon and web functionality are not available.
 // This hook is preserved for Pro builds which will provide the daemon types.

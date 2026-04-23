@@ -190,7 +190,7 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             }
         }
         Some(Command::Update(args)) => {
-            crate::update::check_and_update(args.apply, cli.json).await?;
+            crate::pro_hooks::run_update(args.apply, cli.json).await?;
         }
         Some(Command::Config(config_cmd)) => match config_cmd {
             crate::cli::ConfigCommand::Init => {

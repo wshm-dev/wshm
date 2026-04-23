@@ -5,7 +5,6 @@ use tracing::{error, info, warn};
 use crate::cli::TriageArgs;
 use crate::github;
 use crate::pipelines;
-use crate::update;
 
 use super::DaemonState;
 
@@ -43,7 +42,7 @@ pub async fn run(state: Arc<DaemonState>) {
             "Auto-update enabled (every {}h, checking now...)",
             state.config.update.interval_hours
         );
-        update::auto_check_and_update().await;
+        crate::pro_hooks::run_auto_update().await;
     }
 
     loop {
@@ -152,7 +151,7 @@ pub async fn run(state: Arc<DaemonState>) {
         // Auto-update check
         if state.config.update.enabled && last_update_check.elapsed() >= update_interval {
             last_update_check = Instant::now();
-            update::auto_check_and_update().await;
+            crate::pro_hooks::run_auto_update().await;
         }
 
         // Daily notification recap (OSS: log only — Pro has full notify pipeline)
