@@ -96,11 +96,15 @@ Rank  PR    Title                             Risk   Score  CI   Reviews  Action
 ## Try it in 30 seconds
 
 ```bash
+# Homebrew (macOS / Linux)
 brew tap wshm-dev/tap && brew install wshm
+# …or one-shot install with SHA256 verification (Linux x86_64/aarch64, Windows via Git Bash)
+curl -fsSL https://raw.githubusercontent.com/wshm-dev/wshm/main/install.sh | sh
+
 cd your-repo
 wshm config init
 export GITHUB_TOKEN=ghp_xxxxx
-wshm login              # pick Claude Max, API key, or any of 14 providers
+wshm login              # pick Claude Max, API key, or any supported provider
 wshm sync
 wshm triage             # dry-run — no --apply yet, just see what it would do
 ```
@@ -127,10 +131,11 @@ One static binary. No SaaS dependency. Runs where your code lives.
 | Platform       | How                                                              |
 |----------------|------------------------------------------------------------------|
 | **VM / VPS**   | systemd service, auto-update via Homebrew, any Linux             |
-| **Docker**     | `docker run innovtech/wshm:latest` — multi-arch (amd64 + arm64)                            |
+| **Docker**     | `docker run innovtech/wshm:latest` — multi-arch (amd64 + arm64)  |
+| **Kubernetes** | Helm chart, Kustomize overlays, or raw `Job`/`CronJob` manifests under [`deploy/`](./deploy) |
 | **Local dev**  | `wshm tui` / `wshm triage` — works offline with Ollama           |
 
-Kubernetes manifests and a GitHub Action are planned — follow [#22](https://github.com/wshm-dev/wshm/issues/22).
+A GitHub Action is planned — follow [#22](https://github.com/wshm-dev/wshm/issues/22).
 
 Forge support: **GitHub** (personal + org), **GitLab** (.com + self-managed), **Gitea / Forgejo / Codeberg**, **Azure DevOps** (Services + Server).
 
@@ -242,12 +247,22 @@ wshm daemon --config /etc/wshm/global.toml --poll
 
 ### Install
 
-#### Linux — Homebrew
+#### Linux / macOS — Homebrew
 
 ```bash
 brew tap wshm-dev/tap
 brew install wshm
 ```
+
+The Homebrew formula currently ships Linux bottles only (x86_64 + arm64); macOS users should use `cargo install wshm-core` until darwin builds are added.
+
+#### Linux — install script (SHA256-verified)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wshm-dev/wshm/main/install.sh | sh
+```
+
+Re-run to upgrade. Pin a version with `sh -s -- --version v0.28.2`. Every download is verified against the release's `checksums.txt`.
 
 #### Linux — .deb (amd64 / arm64)
 
@@ -260,12 +275,12 @@ sudo dpkg -i wshm_*_amd64.deb
 #### Windows x86_64 — direct download
 
 ```powershell
-Invoke-WebRequest -Uri https://github.com/wshm-dev/wshm/releases/download/v0.28.1/wshm-x86_64-pc-windows-msvc.zip -OutFile wshm.zip
+Invoke-WebRequest -Uri https://github.com/wshm-dev/wshm/releases/latest/download/wshm-x86_64-pc-windows-msvc.zip -OutFile wshm.zip
 Expand-Archive wshm.zip -DestinationPath $env:USERPROFILE\.wshm\bin
 # then add %USERPROFILE%\.wshm\bin to your PATH
 ```
 
-#### Release pipeline (v0.28.1)
+#### Release pipeline
 
 | Target                       | Binary | .deb |
 |------------------------------|--------|------|
@@ -329,6 +344,7 @@ Full guides in [`docs/`](./docs):
 - [Getting Started](docs/getting-started.md)
 - [Configuration](docs/configuration.md)
 - [CLI Reference](docs/cli-reference.md)
+- [Deployment](docs/deployment.md) — Helm, Kustomize, Docker, install script
 - [Daemon & Web UI](docs/daemon.md)
 - [License & Activation](docs/license.md)
 - [Vault / Key Vault Integration](docs/vault.md) (Pro)
@@ -346,10 +362,10 @@ Full guides in [`docs/`](./docs):
 │    │        │        │       │              │
 │    └────────┴────────┴───────┘              │
 │              │                               │
-│     12 OSS pipelines                         │
+│     10 OSS pipelines                         │
 │     (triage, pr_analysis, merge_queue,       │
-│      notify, changelog, dashboard,           │
-│      revert, backup, pr_health, ...)         │
+│      pr_health, status, context,             │
+│      revert, backup, migrate)                │
 │              │                               │
 │    ┌─────────┴─────────┐                     │
 │    ▼                   ▼                     │
