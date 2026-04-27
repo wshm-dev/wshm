@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: wshm-staging
+
+resources:
+  - ../../base
+
+namePrefix: staging-
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/instance: wshm-staging
+      environment: staging
+
+# Faster cadence for staging — useful to surface regressions early.
+patches:
+  - target:
+      kind: CronJob
+      name: wshm
+    patch: |-
+      - op: replace
+        path: /spec/schedule
+        value: "*/15 * * * *"
+      - op: replace
+        path: /spec/jobTemplate/spec/template/spec/containers/0/args
+        value:
+          - --config
+          - /etc/wshm/config.toml
+          - run

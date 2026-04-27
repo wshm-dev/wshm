@@ -1,0 +1,113 @@
+# Standalone CronJob for wshm. Apply with:
+#   kubectl apply -f deploy/k8s/configmap.yaml
+#   kubectl apply -f deploy/k8s/secret.example.yaml   # edit first
+#   kubectl apply -f deploy/k8s/cronjob.yaml
+#
+# Runs `wshm run --apply` every 30 minutes against the repo configured
+# in the wshm-config ConfigMap (or set via WSHM_REPO env).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wshm
+  namespace: wshm
+  labels:
+    app.kubernetes.io/name: wshm
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: wshm
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: wshm
+              image: innovtech/wshm:0.28.2
+              imagePullPolicy: IfNotPresent
+              args:
+                - --config
+                - /etc/wshm/config.toml
+                - run
+                - --apply
+              workingDir: /data
+              env:
+                - name: GITHUB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: wshm-secrets
+                      key: GITHUB_TOKEN
+                - name: ANTHROPIC_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: wshm-secrets
+                      key: ANTHROPIC_API_KEY
+                      optional: true
+                - name: WSHM_LICENSE_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: wshm-secrets
+                      key: WSHM_LICENSE_KEY
+                      optional: true
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                - name: config
+                  mountPath: /etc/wshm
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              resources:
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: wshm-data
+            - name: config
+              configMap:
+                name: wshm-config
+            - name: tmp
+              emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wshm
+  namespace: wshm
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wshm-data
+  namespace: wshm
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

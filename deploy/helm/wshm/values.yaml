@@ -1,0 +1,130 @@
+# Default values for wshm.
+# This chart focuses on Job/CronJob patterns. For the persistent daemon +
+# web UI, use the wshm-pro chart.
+
+image:
+  repository: innovtech/wshm
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Repo target. Either set this (rendered as --repo flag) or rely on a
+# config.toml / WSHM_REPO env in extraEnv.
+repo: ""  # e.g. "myorg/myrepo"
+
+# CronJob: scheduled triage / full-cycle runs.
+cronjob:
+  enabled: true
+  schedule: "*/30 * * * *"
+  # Args passed to the wshm binary. Common: ["run", "--apply"], ["triage", "--apply"], ["sync"].
+  args:
+    - run
+    - --apply
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  startingDeadlineSeconds: 300
+  backoffLimit: 2
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 86400
+  suspend: false
+
+# Job: optional one-shot run (e.g. initial sync). Disabled by default.
+job:
+  enabled: false
+  args:
+    - sync
+  backoffLimit: 1
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 3600
+
+# Persistence for .wshm/state.db across runs.
+persistence:
+  enabled: true
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  # Set to use a pre-existing PVC instead of creating one.
+  existingClaim: ""
+  annotations: {}
+
+# Secrets — STRONGLY prefer existingSecret in production
+# (use external-secrets-operator, sealed-secrets, or vault).
+secrets:
+  # Existing Secret containing keys: GITHUB_TOKEN, ANTHROPIC_API_KEY, WSHM_LICENSE_KEY (optional)
+  existingSecret: ""
+  # Or let the chart create one from these values (NOT for prod).
+  create: false
+  githubToken: ""
+  anthropicApiKey: ""
+  licenseKey: ""
+
+# Extra environment variables (raw env entries — supports value or valueFrom).
+extraEnv: []
+  # - name: WSHM_LOG
+  #   value: info
+  # - name: OPENAI_API_KEY
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: my-openai-secret
+  #       key: api-key
+
+# config.toml mounted at /etc/wshm/config.toml. When enabled, the binary is
+# launched with --config /etc/wshm/config.toml.
+config:
+  enabled: false
+  # Inline content. See docs/configuration.md for the schema.
+  content: |
+    # [github]
+    # repo = "owner/repo"
+    #
+    # [ai]
+    # provider = "anthropic"
+    # model = "claude-sonnet-4-6"
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Optional: top-level priority class for the CronJob/Job pods.
+priorityClassName: ""
+
+# Restart policy applied to the Job/CronJob pod template.
+restartPolicy: OnFailure

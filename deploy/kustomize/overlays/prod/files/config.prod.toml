@@ -1,0 +1,15 @@
+# Production wshm config (Kustomize overlay).
+# See docs/configuration.md for the full schema.
+
+[github]
+# repo = "myorg/myrepo"
+
+[ai]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[triage]
+auto_apply_high_confidence = true
+
+[merge_queue]
+auto_merge_threshold = 80

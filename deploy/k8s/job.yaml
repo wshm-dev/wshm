@@ -1,0 +1,70 @@
+# One-shot Job — useful for an initial sync or to test credentials.
+#   kubectl apply -f deploy/k8s/job.yaml
+#   kubectl logs -n wshm -l job-name=wshm-oneshot -f
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wshm-oneshot
+  namespace: wshm
+  labels:
+    app.kubernetes.io/name: wshm
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: wshm
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wshm
+          image: innovtech/wshm:0.28.2
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config
+            - /etc/wshm/config.toml
+            - sync
+          workingDir: /data
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: wshm-secrets
+                  key: GITHUB_TOKEN
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/wshm
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: wshm-data
+        - name: config
+          configMap:
+            name: wshm-config
+        - name: tmp
+          emptyDir: {}

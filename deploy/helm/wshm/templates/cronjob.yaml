@@ -1,0 +1,75 @@
+{{- if .Values.cronjob.enabled -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "wshm.fullname" . }}
+  labels:
+    {{- include "wshm.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronjob.schedule | quote }}
+  concurrencyPolicy: {{ .Values.cronjob.concurrencyPolicy | default "Forbid" }}
+  successfulJobsHistoryLimit: {{ .Values.cronjob.successfulJobsHistoryLimit | default 3 }}
+  failedJobsHistoryLimit: {{ .Values.cronjob.failedJobsHistoryLimit | default 1 }}
+  startingDeadlineSeconds: {{ .Values.cronjob.startingDeadlineSeconds | default 300 }}
+  suspend: {{ .Values.cronjob.suspend | default false }}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "wshm.selectorLabels" . | nindent 8 }}
+    spec:
+      backoffLimit: {{ .Values.cronjob.backoffLimit | default 2 }}
+      activeDeadlineSeconds: {{ .Values.cronjob.activeDeadlineSeconds | default 1800 }}
+      ttlSecondsAfterFinished: {{ .Values.cronjob.ttlSecondsAfterFinished | default 86400 }}
+      template:
+        metadata:
+          labels:
+            {{- include "wshm.selectorLabels" . | nindent 12 }}
+            {{- with .Values.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          serviceAccountName: {{ include "wshm.serviceAccountName" . }}
+          restartPolicy: {{ .Values.restartPolicy | default "OnFailure" }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.priorityClassName }}
+          priorityClassName: {{ . }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: wshm
+              image: {{ include "wshm.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args:
+                {{- include "wshm.args" (dict "userArgs" .Values.cronjob.args "Values" .Values) | nindent 16 }}
+              workingDir: /data
+              env:
+                {{- include "wshm.containerEnv" . | nindent 16 }}
+              volumeMounts:
+                {{- include "wshm.volumeMounts" . | nindent 16 }}
+              securityContext:
+                {{- toYaml .Values.containerSecurityContext | nindent 16 }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+          volumes:
+            {{- include "wshm.volumes" . | nindent 12 }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

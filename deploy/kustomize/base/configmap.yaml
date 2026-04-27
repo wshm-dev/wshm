@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wshm-config
+data:
+  config.toml: |
+    # See docs/configuration.md for the full schema.
+    # Override this ConfigMap in your overlay.
+    #
+    # [github]
+    # repo = "owner/repo"
+    #
+    # [ai]
+    # provider = "anthropic"
+    # model = "claude-sonnet-4-6"

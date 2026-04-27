@@ -1,0 +1,44 @@
+wshm has been installed.
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+Chart: {{ .Chart.Name }}-{{ .Chart.Version }} (app {{ .Chart.AppVersion }})
+
+Resources created:
+{{- if .Values.cronjob.enabled }}
+  - CronJob {{ include "wshm.fullname" . }} (schedule: {{ .Values.cronjob.schedule }})
+{{- end }}
+{{- if .Values.job.enabled }}
+  - Job {{ include "wshm.fullname" . }}-oneshot
+{{- end }}
+{{- if .Values.persistence.enabled }}
+{{- if not .Values.persistence.existingClaim }}
+  - PersistentVolumeClaim {{ include "wshm.pvcName" . }} ({{ .Values.persistence.size }})
+{{- end }}
+{{- end }}
+{{- if .Values.config.enabled }}
+  - ConfigMap {{ include "wshm.fullname" . }}-config
+{{- end }}
+{{- if and .Values.secrets.create (not .Values.secrets.existingSecret) }}
+  - Secret {{ include "wshm.fullname" . }}
+
+  WARNING: secrets.create=true stores credentials in plaintext values.
+  For production, use secrets.existingSecret with external-secrets-operator,
+  sealed-secrets, or your cloud KMS.
+{{- end }}
+
+Useful commands:
+
+  # Inspect the next scheduled run
+  kubectl get cronjobs -n {{ .Release.Namespace }} {{ include "wshm.fullname" . }}
+
+  # Trigger an ad-hoc run from the CronJob
+  kubectl create job -n {{ .Release.Namespace }} \
+    --from=cronjob/{{ include "wshm.fullname" . }} \
+    {{ include "wshm.fullname" . }}-manual-$(date +%s)
+
+  # Tail the latest run
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }} --tail=200 -f
+
+This chart only ships Job/CronJob patterns (OSS surface). For the persistent
+daemon + Web UI, install the wshm-pro chart from the Pro repo.

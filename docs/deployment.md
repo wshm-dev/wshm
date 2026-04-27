@@ -19,11 +19,12 @@ All deployment artifacts live under `deploy/` in this repo, one subdirectory per
 
 ```
 deploy/
-  helm/           # Helm chart for Kubernetes
-  kustomize/      # Kustomize base + overlays
-  compose/        # docker-compose.yml for single-host
-  ansible/        # Ansible role for VM/bare-metal
-  cloud-init/     # cloud-init snippets for cloud VMs
+  helm/wshm/      # Helm chart for Kubernetes (Job/CronJob)
+  kustomize/      # Kustomize base + prod/staging overlays
+  k8s/            # Raw manifests (CronJob, Job, ConfigMap, Secret example)
+  compose/        # docker-compose.yml for single-host        (planned)
+  ansible/        # Ansible role for VM/bare-metal            (planned)
+  cloud-init/     # cloud-init snippets for cloud VMs         (planned)
 ```
 
 ## Status
@@ -34,8 +35,9 @@ deploy/
 | `.deb`        | Debian/Ubuntu                    | Shipped  |
 | Homebrew      | macOS, Linux                     | Shipped  |
 | Docker        | Any Docker host                  | Shipped  |
-| Helm          | Kubernetes                       | Planned  |
-| Kustomize     | Kubernetes                       | Planned  |
+| Helm          | Kubernetes (`Job`/`CronJob`)     | Shipped  |
+| Kustomize     | Kubernetes (base + prod/staging) | Shipped  |
+| Raw manifests | Kubernetes                       | Shipped  |
 | docker-compose| Single-host self-hosted          | Planned  |
 | Ansible role  | VM / bare-metal                  | Planned  |
 | cloud-init    | AWS/GCP/Azure/Hetzner VMs        | Planned  |

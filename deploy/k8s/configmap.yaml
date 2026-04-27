@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wshm
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wshm-config
+  namespace: wshm
+data:
+  config.toml: |
+    # See docs/configuration.md for the full schema.
+    [github]
+    repo = "owner/repo"
+
+    [ai]
+    provider = "anthropic"
+    model = "claude-sonnet-4-6"
+
+    [triage]
+    auto_apply_high_confidence = true
+
+    [merge_queue]
+    auto_merge_threshold = 80

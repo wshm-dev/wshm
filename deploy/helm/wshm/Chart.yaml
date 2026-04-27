@@ -1,0 +1,27 @@
+apiVersion: v2
+name: wshm
+description: |
+  AI-powered GitHub agent — triage, PR analysis, merge queue.
+  This chart focuses on Job/CronJob patterns for periodic triage runs.
+  The persistent daemon + Web UI lives in the wshm-pro chart.
+type: application
+version: 0.1.0
+appVersion: "0.28.2"
+kubeVersion: ">=1.21.0-0"
+keywords:
+  - github
+  - ai
+  - triage
+  - pull-requests
+  - automation
+  - cronjob
+home: https://wshm.dev
+sources:
+  - https://github.com/wshm-dev/wshm
+maintainers:
+  - name: wshm-dev
+    email: contact@wshm.dev
+icon: https://raw.githubusercontent.com/wshm-dev/wshm/main/assets/logo.png
+annotations:
+  category: DevOps
+  licenses: SSPL-1.0
