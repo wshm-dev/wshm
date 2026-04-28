@@ -5,8 +5,8 @@ description: |
   This chart focuses on Job/CronJob patterns for periodic triage runs.
   The persistent daemon + Web UI lives in the wshm-pro chart.
 type: application
-version: 0.1.0
-appVersion: "0.28.2"
+version: 0.1.1
+appVersion: "0.28.3"
 kubeVersion: ">=1.21.0-0"
 keywords:
   - github

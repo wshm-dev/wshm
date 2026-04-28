@@ -254,7 +254,7 @@ brew tap wshm-dev/tap
 brew install wshm
 ```
 
-The Homebrew formula currently ships Linux bottles only (x86_64 + arm64); macOS users should use `cargo install wshm-core` until darwin builds are added.
+The Homebrew formula currently ships Linux bottles only (x86_64 + arm64); macOS support is tracked in [#22](https://github.com/wshm-dev/wshm/issues/22).
 
 #### Linux — install script (SHA256-verified)
 
@@ -262,7 +262,7 @@ The Homebrew formula currently ships Linux bottles only (x86_64 + arm64); macOS 
 curl -fsSL https://raw.githubusercontent.com/wshm-dev/wshm/main/install.sh | sh
 ```
 
-Re-run to upgrade. Pin a version with `sh -s -- --version v0.28.2`. Every download is verified against the release's `checksums.txt`.
+Re-run to upgrade. Pin a version with `sh -s -- --version v0.28.3`. Every download is verified against the release's `checksums.txt`.
 
 #### Linux — .deb (amd64 / arm64)
 
@@ -585,7 +585,8 @@ jobs:
 ## Deploy on a VM
 
 ```bash
-cargo install wshm
+# Install via Homebrew, the SHA256-verified script, or the .deb package — see Quick Start above.
+brew tap wshm-dev/tap && brew install wshm
 wshm login
 wshm config init
 wshm daemon --apply --poll

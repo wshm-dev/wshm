@@ -19,4 +19,4 @@ labels:
 
 images:
   - name: innovtech/wshm
-    newTag: 0.28.2
+    newTag: 0.28.3
