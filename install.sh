@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/wshm-dev/wshm/main/install.sh | sh
 #
 # Re-run to upgrade. Pass flags via `sh -s --`:
-#   curl -fsSL https://raw.githubusercontent.com/wshm-dev/wshm/main/install.sh | sh -s -- --version v0.28.2
+#   curl -fsSL https://raw.githubusercontent.com/wshm-dev/wshm/main/install.sh | sh -s -- --version v0.28.3
 #   curl -fsSL https://raw.githubusercontent.com/wshm-dev/wshm/main/install.sh | sh -s -- --dir /usr/local/bin
 #
 # Every download is verified against the release's checksums.txt (SHA256).
@@ -14,8 +14,8 @@
 #   - Linux x86_64  (x86_64-unknown-linux-gnu)
 #   - Linux aarch64 (aarch64-unknown-linux-gnu)
 #   - Windows x86_64 via Git Bash / MSYS / Cygwin (x86_64-pc-windows-msvc)
-# macOS is not currently published as a binary release — install via Homebrew
-# (`brew tap wshm-dev/tap && brew install wshm`) or `cargo install wshm-core`.
+# macOS is not currently published as a binary release — see
+# https://github.com/wshm-dev/wshm/issues/22 for tracking.
 
 set -eu
 
@@ -41,7 +41,7 @@ Usage: install.sh [--dir <path>] [--version <tag>] [--help]
 
 Options:
   --dir <path>      Install directory (default: \$HOME/.local/bin)
-  --version <tag>   Release tag to install (default: latest, e.g. v0.28.2)
+  --version <tag>   Release tag to install (default: latest, e.g. v0.28.3)
   -h, --help        Show this help
 
 Re-running this script upgrades an existing installation in place.
@@ -77,7 +77,7 @@ detect_os() {
     case "$(uname -s)" in
         Linux*)  OS="linux";   TARGET_SUFFIX="unknown-linux-gnu";;
         MINGW*|MSYS*|CYGWIN*) OS="windows"; TARGET_SUFFIX="pc-windows-msvc";;
-        Darwin*) error "macOS is not published as a binary release. Install via Homebrew: 'brew tap wshm-dev/tap && brew install wshm', or 'cargo install wshm-core'.";;
+        Darwin*) error "macOS is not published as a binary release yet. Track https://github.com/wshm-dev/wshm/issues/22 for updates.";;
         *)       error "Unsupported OS: $(uname -s). wshm supports Linux and Windows binary releases.";;
     esac
 }

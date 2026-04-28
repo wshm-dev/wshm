@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/wshm-dev/wshm/main/install.sh | sh
 Re-run the same command to upgrade. Pin a specific version with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wshm-dev/wshm/main/install.sh | sh -s -- --version v0.28.2
+curl -fsSL https://raw.githubusercontent.com/wshm-dev/wshm/main/install.sh | sh -s -- --version v0.28.3
 ```
 
 Every download is verified against the release's `checksums.txt`.
@@ -30,14 +30,6 @@ brew install wshm
 curl -LO https://github.com/wshm-dev/wshm/releases/latest/download/wshm_$(curl -s https://api.github.com/repos/wshm-dev/wshm/releases/latest | grep tag_name | cut -d'"' -f4 | tr -d v)_amd64.deb
 sudo dpkg -i wshm_*_amd64.deb
 ```
-
-### Cargo
-
-```bash
-cargo install wshm-core
-```
-
-The crate is `wshm-core`; it ships the `wshm` binary.
 
 ### Docker (Docker Hub)
 
