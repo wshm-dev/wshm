@@ -40,34 +40,34 @@
 </div>
 
 {#if error}
-	<Card class="border-red-500 bg-gray-800">
+	<Card class="border-red-500 bg-gray-800 max-w-none">
 		<p class="text-red-400">{error}</p>
 		<p class="mt-2 text-sm text-gray-500">The wshm daemon must expose <code>/api/v1/summary</code>.</p>
 	</Card>
 {:else if summary}
 	<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-		<Card class="bg-gray-800 border-gray-700 text-center">
+		<Card class="bg-gray-800 border-gray-700 text-center max-w-none">
 			<div class="text-xs uppercase tracking-wider text-gray-500 mb-2">Open Issues</div>
 			<div class="text-3xl font-bold text-gray-100 mono">{summary.open_issues}</div>
 			<div class="text-xs text-gray-500 mt-1">{summary.untriaged_issues} untriaged</div>
 		</Card>
-		<Card class="bg-gray-800 border-gray-700 text-center">
+		<Card class="bg-gray-800 border-gray-700 text-center max-w-none">
 			<div class="text-xs uppercase tracking-wider text-gray-500 mb-2">Open PRs</div>
 			<div class="text-3xl font-bold text-gray-100 mono">{summary.open_prs}</div>
 			<div class="text-xs text-gray-500 mt-1">{summary.unanalyzed_prs} unanalyzed</div>
 		</Card>
-		<Card class="bg-gray-800 border-gray-700 text-center">
+		<Card class="bg-gray-800 border-gray-700 text-center max-w-none">
 			<div class="text-xs uppercase tracking-wider text-gray-500 mb-2">Conflicts</div>
 			<div class="text-3xl font-bold {summary.conflicts > 0 ? 'text-red-400' : 'text-gray-100'} mono">{summary.conflicts}</div>
 		</Card>
-		<Card class="bg-gray-800 border-gray-700 text-center">
+		<Card class="bg-gray-800 border-gray-700 text-center max-w-none">
 			<div class="text-xs uppercase tracking-wider text-gray-500 mb-2">Action Required</div>
 			<div class="text-3xl font-bold {summary.high_priority_issues.length > 0 ? 'text-red-400' : 'text-gray-100'} mono">{summary.high_priority_issues.length}</div>
 		</Card>
 	</div>
 
 	{#if summary.high_priority_issues.length > 0}
-		<Card class="bg-gray-800 border-gray-700 mb-4">
+		<Card class="bg-gray-800 border-gray-700 mb-4 max-w-none">
 			<h3 class="text-lg font-semibold text-red-400 mb-3">Action Required</h3>
 			<ul class="space-y-2">
 				{#each summary.high_priority_issues.slice(0, 10) as issue (issue.number)}
@@ -83,7 +83,7 @@
 	{/if}
 
 	{#if summary.high_risk_prs.length > 0}
-		<Card class="bg-gray-800 border-gray-700 mb-4">
+		<Card class="bg-gray-800 border-gray-700 mb-4 max-w-none">
 			<h3 class="text-lg font-semibold text-purple-400 mb-3">Attention PRs</h3>
 			<ul class="space-y-2">
 				{#each summary.high_risk_prs.slice(0, 10) as pr (pr.number)}
@@ -100,7 +100,7 @@
 	{/if}
 
 	{#if summary.top_issues.length > 0}
-		<Card class="bg-gray-800 border-gray-700 mb-4">
+		<Card class="bg-gray-800 border-gray-700 mb-4 max-w-none">
 			<h3 class="text-lg font-semibold text-cyan-400 mb-3">Issues TODO</h3>
 			<ul class="space-y-2">
 				{#each summary.top_issues as issue (issue.number)}
@@ -117,7 +117,7 @@
 	{/if}
 
 	{#if summary.top_prs.length > 0}
-		<Card class="bg-gray-800 border-gray-700 mb-4">
+		<Card class="bg-gray-800 border-gray-700 mb-4 max-w-none">
 			<h3 class="text-lg font-semibold text-cyan-400 mb-3">PRs TODO</h3>
 			<ul class="space-y-2">
 				{#each summary.top_prs as pr (pr.number)}

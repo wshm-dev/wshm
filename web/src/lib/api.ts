@@ -301,3 +301,57 @@ export async function activateLicense(key: string): Promise<{ status: string; pl
 	});
 	return res.json();
 }
+
+// ---------------------------------------------------------------------------
+// Repos & Auth (Settings page)
+// ---------------------------------------------------------------------------
+
+export interface RepoListEntry {
+	slug: string;
+	apply: boolean;
+	wshm_dir: string;
+}
+
+export interface ReposListResponse {
+	repos: RepoListEntry[];
+	dynamic_add_supported: boolean;
+}
+
+export function fetchRepos(): Promise<ReposListResponse> {
+	return apiGet<ReposListResponse>('/repos');
+}
+
+async function apiPost<T>(path: string, body: unknown): Promise<T> {
+	const res = await fetch(`${BASE}${path}`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	});
+	const json = await res.json();
+	if (!res.ok) {
+		const msg = (json && (json.error || json.message)) || `HTTP ${res.status}`;
+		throw new Error(msg);
+	}
+	return json as T;
+}
+
+export function addRepo(slug: string, path?: string): Promise<{ status: string; slug: string; path: string; message: string }> {
+	return apiPost('/repos', path ? { slug, path } : { slug });
+}
+
+export interface AuthStatus {
+	github: boolean;
+	anthropic: 'oauth' | 'api_key' | null;
+}
+
+export function fetchAuthStatus(): Promise<AuthStatus> {
+	return apiGet<AuthStatus>('/auth/status');
+}
+
+export function setGithubToken(token: string): Promise<{ status: string; message: string }> {
+	return apiPost('/auth/github', { token });
+}
+
+export function setAnthropicToken(token: string, kind: 'oauth' | 'api_key'): Promise<{ status: string; message: string }> {
+	return apiPost('/auth/anthropic', { token, kind });
+}

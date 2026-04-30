@@ -257,13 +257,16 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
                 return crate::daemon::systemd::uninstall();
             }
 
-            // Multi-repo mode: load global config if provided or if present at default path
+            // Multi-repo mode if --config is explicit OR if the default global
+            // config exists. With explicit --config the file may not exist yet —
+            // GlobalConfig::load returns an empty config so the user can populate
+            // it through the web UI's POST /api/v1/repos endpoint.
             let global_path = args
                 .config
                 .clone()
                 .unwrap_or_else(crate::config::GlobalConfig::default_path);
 
-            if global_path.exists() {
+            if args.config.is_some() || global_path.exists() {
                 let global = crate::config::GlobalConfig::load(&global_path)?;
                 crate::daemon::run_multi(global, args.clone()).await?;
             } else {

@@ -23,6 +23,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Build Web UI
+        run: cd web && bun install --frozen-lockfile && bun run build
       - name: Build
         run: cargo build --release --bin wshm --target x86_64-unknown-linux-gnu
       - name: Package tar.gz
@@ -62,6 +66,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Build Web UI
+        run: cd web && bun install --frozen-lockfile && bun run build
       - name: Build
         run: cargo build --release --bin wshm --target aarch64-unknown-linux-gnu
       - name: Package tar.gz
@@ -101,6 +109,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Build Web UI
+        run: cd web && bun install --frozen-lockfile && bun run build
       - name: Build
         run: cargo build --release --bin wshm --target x86_64-pc-windows-msvc
       - name: Package

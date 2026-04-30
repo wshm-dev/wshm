@@ -3,8 +3,22 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-:root {
+/* =============================================================
+   Theme: dark (default) + light. Light mode is opt-in via the
+   .light class on <html> (set by lib/stores.ts theme writable).
+   We do NOT invert Tailwind tokens (that breaks flowbite-svelte
+   components which assume gray-50 = very light). Instead we patch
+   the most common dark utility classes used by custom pages with
+   light values when html.light is set.
+   ============================================================= */
+
+:root,
+:root.dark {
 	color-scheme: dark;
+}
+
+:root.light {
+	color-scheme: light;
 }
 
 body {
@@ -12,15 +26,64 @@ body {
 	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
 }
 
-a {
-	@apply text-blue-400 no-underline;
+:root.light body {
+	background-color: #ffffff;
+	color: #111827;
 }
 
-a:hover {
+/* Default link style only inside <main> so the sidebar nav can keep
+   its own gray text styling. */
+main a {
+	@apply text-blue-400 no-underline;
+}
+:root.light main a {
+	color: #1d4ed8;
+}
+main a:hover {
 	@apply underline;
 }
 
 .mono {
 	font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
 	font-variant-numeric: tabular-nums;
+}
+
+/* =====================================================================
+   Light-mode overrides for the dark utility classes used by custom UI.
+   !important wins against Tailwind's same-specificity utility rules.
+   ===================================================================== */
+
+:root.light .bg-gray-900 { background-color: #ffffff !important; }
+:root.light .bg-gray-800 { background-color: #f9fafb !important; }
+:root.light .bg-gray-700 { background-color: #f3f4f6 !important; }
+:root.light .bg-gray-600 { background-color: #e5e7eb !important; }
+
+:root.light .text-gray-100 { color: #111827 !important; }
+:root.light .text-gray-200 { color: #1f2937 !important; }
+:root.light .text-gray-300 { color: #374151 !important; }
+:root.light .text-gray-400 { color: #4b5563 !important; }
+:root.light .text-gray-500 { color: #6b7280 !important; }
+:root.light .text-gray-600 { color: #6b7280 !important; }
+
+:root.light .border-gray-700 { border-color: #e5e7eb !important; }
+:root.light .border-gray-600 { border-color: #d1d5db !important; }
+:root.light .border-gray-500 { border-color: #9ca3af !important; }
+
+:root.light .hover\:bg-gray-700:hover { background-color: #f3f4f6 !important; }
+:root.light .hover\:text-gray-100:hover { color: #111827 !important; }
+
+/* Form inputs explicitly need white backgrounds in light mode. */
+:root.light input[type='text'],
+:root.light input[type='password'],
+:root.light input[type='email'],
+:root.light input[type='number'],
+:root.light select,
+:root.light textarea {
+	background-color: #ffffff !important;
+	color: #111827 !important;
+	border-color: #d1d5db !important;
+}
+:root.light input::placeholder,
+:root.light textarea::placeholder {
+	color: #9ca3af !important;
 }

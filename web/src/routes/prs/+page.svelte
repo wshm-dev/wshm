@@ -97,7 +97,7 @@
 		<p class="text-red-400">{error}</p>
 	</div>
 {:else}
-	<div class="overflow-x-auto">
+	<div class="w-full overflow-x-auto">
 		<Table striped hoverable class="w-full">
 			<TableHead class="text-xs uppercase text-gray-400">
 				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[60px]" onclick={(e: MouseEvent) => handleSort('number', e)}>

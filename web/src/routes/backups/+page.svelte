@@ -100,7 +100,7 @@
 						<button
 							onclick={() => handleRestore(b.name)}
 							disabled={restoring === b.name}
-							class="text-xs border border-[#30363d] text-gray-300 hover:text-white hover:border-gray-500 px-3 py-1.5 rounded-lg transition"
+							class="text-xs border border-gray-700 text-gray-300 hover:text-white hover:border-gray-500 px-3 py-1.5 rounded-lg transition"
 						>
 							{restoring === b.name ? 'Restoring...' : 'Restore'}
 						</button>
@@ -110,7 +110,7 @@
 		</TableBody>
 	</Table>
 {:else if result}
-	<div class="rounded-lg border border-[#30363d] bg-[#161b22] p-10 text-center">
+	<div class="rounded-lg border border-gray-700 bg-gray-800 p-10 text-center">
 		<div class="text-2xl mb-2">&#128230;</div>
 		<p class="text-gray-400">No backups yet.</p>
 		<p class="text-xs text-gray-500 mt-2">Click "Create backup" to save your database, config, and credentials.</p>
@@ -119,8 +119,8 @@
 	<div class="text-center py-10 text-gray-500">Loading...</div>
 {/if}
 
-<div class="mt-6 rounded-lg border border-[#30363d] bg-[#161b22] p-5">
+<div class="mt-6 rounded-lg border border-gray-700 bg-gray-800 p-5">
 	<p class="text-sm text-gray-400 mb-2">CLI usage:</p>
-	<code class="block bg-[#0d1117] px-4 py-2 rounded text-xs text-gray-300 font-mono mb-1">wshm backup</code>
-	<code class="block bg-[#0d1117] px-4 py-2 rounded text-xs text-gray-300 font-mono">wshm restore .wshm/backup-2026-04-09.tar.gz --force</code>
+	<code class="block bg-gray-900 px-4 py-2 rounded text-xs text-gray-300 font-mono mb-1">wshm backup</code>
+	<code class="block bg-gray-900 px-4 py-2 rounded text-xs text-gray-300 font-mono">wshm restore .wshm/backup-2026-04-09.tar.gz --force</code>
 </div>

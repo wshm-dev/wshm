@@ -10,10 +10,11 @@ pub mod web;
 /// Maximum number of webhook events buffered in memory before backpressure.
 const WEBHOOK_CHANNEL_CAPACITY: usize = 256;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
 use crate::cli::DaemonArgs;
@@ -30,9 +31,116 @@ pub struct DaemonState {
     pub apply: bool,
 }
 
+/// Runtime context captured at daemon startup so dynamic add_repo can spawn
+/// scheduler/poller for newly added repos without restart. Set only in
+/// multi-repo mode (`run_multi`); None when the daemon is running mono-repo.
+#[derive(Clone)]
+pub struct DynamicRuntime {
+    pub event_tx: mpsc::Sender<(String, WebhookEvent)>,
+    pub poll: bool,
+    pub poll_interval: u64,
+    pub global_apply: bool,
+    pub global_config_path: PathBuf,
+}
+
 /// Multi-repo state: maps "owner/repo" slug to its DaemonState.
 pub struct MultiDaemonState {
-    pub repos: HashMap<String, Arc<DaemonState>>,
+    pub repos: RwLock<HashMap<String, Arc<DaemonState>>>,
+    pub runtime: Option<DynamicRuntime>,
+}
+
+impl MultiDaemonState {
+    pub fn new(repos: HashMap<String, Arc<DaemonState>>) -> Self {
+        Self {
+            repos: RwLock::new(repos),
+            runtime: None,
+        }
+    }
+
+    pub fn with_runtime(
+        repos: HashMap<String, Arc<DaemonState>>,
+        runtime: DynamicRuntime,
+    ) -> Self {
+        Self {
+            repos: RwLock::new(repos),
+            runtime: Some(runtime),
+        }
+    }
+
+    /// Add a repo at runtime: load config, build DaemonState, persist to
+    /// global config, and spawn scheduler + poller (if enabled). Idempotent
+    /// on the slug — returns error if it already exists.
+    pub async fn add_repo(&self, slug: &str, path: PathBuf) -> Result<Arc<DaemonState>> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .context("Dynamic add_repo not available (daemon not running in multi-repo mode)")?;
+
+        if !slug.contains('/') || slug.split('/').count() != 2 {
+            anyhow::bail!("invalid slug format, expected owner/repo");
+        }
+
+        {
+            let repos = self.repos.read().await;
+            if repos.contains_key(slug) {
+                anyhow::bail!("repo {slug} already registered");
+            }
+        }
+
+        let mut config = Config::load_for_repo(&path, slug)?;
+        std::fs::create_dir_all(&config.wshm_dir)?;
+        config.web.resolve_password(&config.wshm_dir);
+
+        let db = Arc::new(Database::open(&config)?);
+        let gh = Arc::new(GhClient::new(&config)?);
+        let state = Arc::new(DaemonState {
+            db,
+            gh,
+            config: Arc::new(config),
+            apply: runtime.global_apply,
+        });
+
+        // Persist before mutating runtime state so a crash can't lose the
+        // user's intent silently.
+        crate::config::append_repo_to_global(
+            &runtime.global_config_path,
+            slug,
+            &path,
+            None,
+        )
+        .with_context(|| format!("failed to persist {slug} to global config"))?;
+
+        {
+            let mut repos = self.repos.write().await;
+            repos.insert(slug.to_string(), Arc::clone(&state));
+        }
+
+        // Spawn scheduler for this repo
+        let sched_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            scheduler::run(sched_state).await;
+        });
+
+        // Spawn poller if polling mode is enabled
+        if runtime.poll {
+            let poll_state = Arc::clone(&state);
+            let tx = runtime.event_tx.clone();
+            let interval = Some(runtime.poll_interval);
+            let slug_owned = slug.to_string();
+            tokio::spawn(async move {
+                poller::run_multi(poll_state, tx, interval, slug_owned).await;
+            });
+        }
+
+        info!(
+            "Repo added at runtime: {} (path={}, apply={})",
+            slug,
+            path.display(),
+            runtime.global_apply
+        );
+
+        Ok(state)
+    }
 }
 
 pub async fn run(mut config: Config, args: DaemonArgs) -> Result<()> {
@@ -227,14 +335,28 @@ pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
         repos.insert(entry.slug.clone(), state);
     }
 
-    let multi = Arc::new(MultiDaemonState { repos });
-
     let (tx, rx) = mpsc::channel::<(String, WebhookEvent)>(WEBHOOK_CHANNEL_CAPACITY);
 
+    let global_config_path = args
+        .config
+        .clone()
+        .unwrap_or_else(GlobalConfig::default_path);
+
+    let runtime = DynamicRuntime {
+        event_tx: tx.clone(),
+        poll,
+        poll_interval,
+        global_apply,
+        global_config_path,
+    };
+
+    let multi = Arc::new(MultiDaemonState::with_runtime(repos, runtime));
+
+    let repo_count = multi.repos.read().await.len();
     info!(
         "Starting multi-repo daemon on {} ({} repos, apply={}, mode={})",
         bind,
-        multi.repos.len(),
+        repo_count,
         global_apply,
         if poll { "polling" } else { "webhook" }
     );
@@ -247,17 +369,21 @@ pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
 
     // Spawn a scheduler per repo
     let mut scheduler_handles = Vec::new();
-    for state in multi.repos.values() {
-        let s = Arc::clone(state);
-        scheduler_handles.push(tokio::spawn(async move {
-            scheduler::run(s).await;
-        }));
+    {
+        let repos = multi.repos.read().await;
+        for state in repos.values() {
+            let s = Arc::clone(state);
+            scheduler_handles.push(tokio::spawn(async move {
+                scheduler::run(s).await;
+            }));
+        }
     }
 
     // Spawn a poller per repo (if --poll)
     let mut poller_handles = Vec::new();
     if poll {
-        for (slug, state) in &multi.repos {
+        let repos = multi.repos.read().await;
+        for (slug, state) in repos.iter() {
             let s = Arc::clone(state);
             let t = tx.clone();
             let slug = slug.clone();
@@ -312,9 +438,10 @@ pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
         None
     };
 
+    let repo_count = multi.repos.read().await.len();
     info!(
         "Multi-repo daemon running ({} repos). Press Ctrl+C to stop.",
-        multi.repos.len()
+        repo_count
     );
 
     // Wait for SIGINT (Ctrl+C) or SIGTERM (systemd/docker)

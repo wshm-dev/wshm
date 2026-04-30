@@ -54,11 +54,14 @@ pub async fn run_multi(
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_TASKS));
 
     while let Some((slug, event)) = rx.recv().await {
-        let state = match multi.repos.get(&slug) {
-            Some(s) => Arc::clone(s),
-            None => {
-                error!("No state for repo '{slug}', dropping event id={}", event.id);
-                continue;
+        let state = {
+            let repos = multi.repos.read().await;
+            match repos.get(&slug) {
+                Some(s) => Arc::clone(s),
+                None => {
+                    error!("No state for repo '{slug}', dropping event id={}", event.id);
+                    continue;
+                }
             }
         };
         let in_flight = Arc::clone(&in_flight);

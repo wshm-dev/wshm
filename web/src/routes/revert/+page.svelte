@@ -55,7 +55,7 @@
 	</div>
 
 	{#if totalActions === 0}
-		<div class="rounded-lg border border-green-800 bg-[#161b22] p-10 text-center">
+		<div class="rounded-lg border border-green-800 bg-gray-800 p-10 text-center">
 			<div class="text-2xl mb-2">&#9989;</div>
 			<p class="text-green-400 font-semibold">Nothing to revert</p>
 			<p class="text-xs text-gray-500 mt-1">No wshm actions found in the database</p>
@@ -63,21 +63,21 @@
 	{:else}
 		<div class="space-y-4">
 			{#each preview.repos as repo}
-				<div class="rounded-lg border border-[#30363d] bg-[#161b22] p-6">
+				<div class="rounded-lg border border-gray-700 bg-gray-800 p-6">
 					<h3 class="text-sm font-semibold text-gray-100 mb-4">{repo.repo}</h3>
 
 					<div class="grid grid-cols-3 gap-4">
-						<div class="rounded-lg bg-[#0d1117] p-4 text-center">
+						<div class="rounded-lg bg-gray-900 p-4 text-center">
 							<div class="text-2xl font-bold text-orange-400">{repo.triage_results}</div>
 							<div class="text-xs text-gray-500 mt-1">Triage Results</div>
 							<div class="text-[0.625rem] text-gray-600">Comments + classifications</div>
 						</div>
-						<div class="rounded-lg bg-[#0d1117] p-4 text-center">
+						<div class="rounded-lg bg-gray-900 p-4 text-center">
 							<div class="text-2xl font-bold text-orange-400">{repo.pr_analyses}</div>
 							<div class="text-xs text-gray-500 mt-1">PR Analyses</div>
 							<div class="text-[0.625rem] text-gray-600">Risk + type + summary</div>
 						</div>
-						<div class="rounded-lg bg-[#0d1117] p-4 text-center">
+						<div class="rounded-lg bg-gray-900 p-4 text-center">
 							<div class="text-2xl font-bold text-orange-400">{repo.labels_to_remove}</div>
 							<div class="text-xs text-gray-500 mt-1">Labels</div>
 							<div class="text-[0.625rem] text-gray-600">wshm-applied labels</div>
@@ -87,15 +87,15 @@
 			{/each}
 		</div>
 
-		<div class="mt-6 rounded-lg border border-[#30363d] bg-[#161b22] p-5">
+		<div class="mt-6 rounded-lg border border-gray-700 bg-gray-800 p-5">
 			<p class="text-sm text-gray-400 mb-2">
 				To revert all actions, run from the CLI:
 			</p>
-			<code class="block bg-[#0d1117] px-4 py-3 rounded text-xs text-gray-300 font-mono">
+			<code class="block bg-gray-900 px-4 py-3 rounded text-xs text-gray-300 font-mono">
 				wshm revert --apply
 			</code>
 			<p class="text-xs text-gray-500 mt-3">
-				Dry-run first with <code class="bg-[#0d1117] px-1.5 py-0.5 rounded">wshm revert</code> (no --apply) to see what would happen.
+				Dry-run first with <code class="bg-gray-900 px-1.5 py-0.5 rounded">wshm revert</code> (no --apply) to see what would happen.
 			</p>
 		</div>
 	{/if}

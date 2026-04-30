@@ -1,6 +1,9 @@
 /target
 Cargo.lock
 
+# Local Claude Code state
+.claude/
+
 # Svelte/Vite build
 web/node_modules/
 web/.svelte-kit/

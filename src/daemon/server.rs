@@ -47,10 +47,11 @@ pub async fn run(
         .route("/health", get(handle_health))
         .with_state(state);
 
-    // Build a single-repo MultiDaemonState for the web UI
+    // Build a single-repo MultiDaemonState for the web UI (no dynamic
+    // runtime — add_repo unavailable in mono-repo mode).
     let mut repos = std::collections::HashMap::new();
     repos.insert(slug, daemon);
-    let multi = Arc::new(super::MultiDaemonState { repos });
+    let multi = Arc::new(super::MultiDaemonState::new(repos));
     // OSS: no Pro extensions
     let web = super::web::web_routes_with_extensions(multi, None, None);
 
@@ -222,9 +223,8 @@ pub async fn run_multi(
 }
 
 async fn handle_health_multi(State(state): State<Arc<MultiServerState>>) -> impl IntoResponse {
-    let repos: Vec<Value> = state
-        .multi
-        .repos
+    let repos_guard = state.multi.repos.read().await;
+    let repos: Vec<Value> = repos_guard
         .iter()
         .map(|(slug, ds)| {
             let pending = ds.db.pending_event_count().unwrap_or_else(|e| {
@@ -273,8 +273,9 @@ async fn handle_webhook_multi(
         }
     };
 
-    let daemon = match state.multi.repos.get(&repo_slug) {
-        Some(d) => d,
+    let repos_guard = state.multi.repos.read().await;
+    let daemon = match repos_guard.get(&repo_slug) {
+        Some(d) => Arc::clone(d),
         None => {
             info!("Ignoring webhook for unconfigured repo: {repo_slug}");
             return (
@@ -284,6 +285,7 @@ async fn handle_webhook_multi(
                 .into_response();
         }
     };
+    drop(repos_guard);
 
     // Filter relevant events
     if !should_process_event(&event_type, &action) {

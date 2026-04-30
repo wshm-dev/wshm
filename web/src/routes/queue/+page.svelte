@@ -83,7 +83,7 @@
 		<p class="text-red-400">{error}</p>
 	</div>
 {:else}
-	<div class="overflow-x-auto">
+	<div class="w-full overflow-x-auto">
 		<Table striped hoverable class="w-full">
 			<TableHead class="text-xs uppercase text-gray-400">
 				<TableHeadCell class="px-2 py-1.5 w-[50px]">Rank</TableHeadCell>

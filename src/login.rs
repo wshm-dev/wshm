@@ -63,7 +63,7 @@ fn disable_echo() {}
 fn enable_echo() {}
 
 /// Load existing credentials from .wshm/credentials
-fn load_credentials() -> std::collections::HashMap<String, String> {
+pub fn load_credentials() -> std::collections::HashMap<String, String> {
     let path = credentials_path();
     if !path.exists() {
         return std::collections::HashMap::new();
@@ -92,7 +92,7 @@ fn load_credentials() -> std::collections::HashMap<String, String> {
 }
 
 /// Save credentials to .wshm/credentials
-fn save_credentials(creds: &std::collections::HashMap<String, String>) -> Result<()> {
+pub fn save_credentials(creds: &std::collections::HashMap<String, String>) -> Result<()> {
     let path = credentials_path();
     let parent = path
         .parent()
@@ -435,10 +435,14 @@ pub fn resolve_anthropic_auth() -> Option<(String, bool)> {
         }
     }
 
-    // Priority 2: OAuth token from env
-    if let Ok(token) = std::env::var("ANTHROPIC_OAUTH_TOKEN") {
-        if !token.is_empty() {
-            return Some((token, true));
+    // Priority 2: OAuth token from env. Both names accepted —
+    // CLAUDE_CODE_OAUTH_TOKEN matches what `claude /token` prints,
+    // ANTHROPIC_OAUTH_TOKEN is the historical name.
+    for var in ["ANTHROPIC_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] {
+        if let Ok(token) = std::env::var(var) {
+            if !token.is_empty() {
+                return Some((token, true));
+            }
         }
     }
 

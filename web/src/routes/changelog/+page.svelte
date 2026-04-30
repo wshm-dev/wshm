@@ -90,11 +90,11 @@
 		{/each}
 	</div>
 {:else if result}
-	<div class="rounded-lg border border-[#30363d] bg-[#161b22] p-10 text-center">
+	<div class="rounded-lg border border-gray-700 bg-gray-800 p-10 text-center">
 		<div class="text-2xl mb-2">&#128220;</div>
 		<p class="text-gray-400">No merged PRs found in the database.</p>
 		<p class="text-xs text-gray-500 mt-2">
-			Run <code class="bg-[#0d1117] px-2 py-1 rounded text-xs">wshm changelog --days 30</code> to generate a changelog from CLI, or sync your repos to populate the database.
+			Run <code class="bg-gray-900 px-2 py-1 rounded text-xs">wshm changelog --days 30</code> to generate a changelog from CLI, or sync your repos to populate the database.
 		</p>
 	</div>
 {:else}

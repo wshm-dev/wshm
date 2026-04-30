@@ -75,18 +75,23 @@ async fn auth_middleware(
 
     // Grab web config from the first available repo (all repos share the
     // same daemon process, so one set of web credentials is sufficient).
-    let web_cfg = match state.multi.repos.values().next() {
-        Some(ds) => &ds.config.web,
-        None => return next.run(req).await,
+    let repos = state.multi.repos.read().await;
+    let web_cfg = match repos.values().next() {
+        Some(ds) => ds.config.web.clone(),
+        None => {
+            drop(repos);
+            return next.run(req).await;
+        }
     };
+    drop(repos);
 
     // If no password is set, auth is disabled.
     let required_password = match &web_cfg.password {
-        Some(p) => p,
+        Some(p) => p.clone(),
         None => return next.run(req).await,
     };
 
-    let expected_username = &web_cfg.username;
+    let expected_username = web_cfg.username.clone();
 
     let authorized = req
         .headers()
@@ -174,7 +179,8 @@ async fn api_status(
         repos: Vec::new(),
     };
 
-    for (slug, ds) in &state.multi.repos {
+    let __repos_guard = state.multi.repos.read().await;
+    for (slug, ds) in __repos_guard.iter() {
         if let Some(ref f) = filter.repo {
             if f != slug {
                 continue;
@@ -235,7 +241,8 @@ async fn api_issues(
 ) -> impl IntoResponse {
     let mut all_issues = Vec::new();
 
-    for (slug, ds) in &state.multi.repos {
+    let __repos_guard = state.multi.repos.read().await;
+    for (slug, ds) in __repos_guard.iter() {
         if let Some(ref f) = filter.repo {
             if f != slug {
                 continue;
@@ -314,7 +321,8 @@ async fn api_pulls(
 ) -> impl IntoResponse {
     let mut all_prs = Vec::new();
 
-    for (slug, ds) in &state.multi.repos {
+    let __repos_guard = state.multi.repos.read().await;
+    for (slug, ds) in __repos_guard.iter() {
         if let Some(ref f) = filter.repo {
             if f != slug {
                 continue;
@@ -355,7 +363,8 @@ async fn api_triage(
 ) -> impl IntoResponse {
     let mut all_results = Vec::new();
 
-    for (slug, ds) in &state.multi.repos {
+    let __repos_guard = state.multi.repos.read().await;
+    for (slug, ds) in __repos_guard.iter() {
         if let Some(ref f) = filter.repo {
             if f != slug {
                 continue;
@@ -387,7 +396,8 @@ async fn api_queue(
 ) -> impl IntoResponse {
     let mut queue = Vec::new();
 
-    for (slug, ds) in &state.multi.repos {
+    let __repos_guard = state.multi.repos.read().await;
+    for (slug, ds) in __repos_guard.iter() {
         if let Some(ref f) = filter.repo {
             if f != slug {
                 continue;
@@ -459,7 +469,8 @@ async fn api_activity(
 ) -> impl IntoResponse {
     let mut entries: Vec<ActivityEntry> = Vec::new();
 
-    for (slug, ds) in &state.multi.repos {
+    let __repos_guard = state.multi.repos.read().await;
+    for (slug, ds) in __repos_guard.iter() {
         if let Some(ref f) = filter.repo {
             if f != slug {
                 continue;
@@ -563,7 +574,8 @@ async fn api_changelog(
     let mut sections: std::collections::HashMap<String, Vec<serde_json::Value>> =
         std::collections::HashMap::new();
 
-    for (slug, ds) in &state.multi.repos {
+    let __repos_guard = state.multi.repos.read().await;
+    for (slug, ds) in __repos_guard.iter() {
         if let Some(ref f) = filter.repo {
             if f != slug {
                 continue;
@@ -669,7 +681,8 @@ async fn api_revert_preview(
 ) -> impl IntoResponse {
     let mut preview = Vec::new();
 
-    for (slug, ds) in &state.multi.repos {
+    let __repos_guard = state.multi.repos.read().await;
+    for (slug, ds) in __repos_guard.iter() {
         if let Some(ref f) = filter.repo {
             if f != slug {
                 continue;
@@ -946,6 +959,318 @@ fn activate_license(key: &str) -> Result<String, String> {
     }
 }
 
+/// GET /api/v1/repos -- list configured repos.
+async fn api_list_repos(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let repos = state.multi.repos.read().await;
+    let list: Vec<serde_json::Value> = repos
+        .iter()
+        .map(|(slug, ds)| {
+            json!({
+                "slug": slug,
+                "apply": ds.apply,
+                "wshm_dir": ds.config.wshm_dir.display().to_string(),
+            })
+        })
+        .collect();
+    let dynamic = state.multi.runtime.is_some();
+    Json(json!({ "repos": list, "dynamic_add_supported": dynamic }))
+}
+
+/// POST /api/v1/repos -- add a repo at runtime (multi-repo mode only).
+/// Body: {"slug": "owner/repo", "path": "/optional/abs/path"}
+async fn api_add_repo(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let slug = match body.get("slug").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "slug is required (format: owner/repo)"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Path: explicit, else default to ./<repo_name> relative to current dir.
+    let path = match body.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.trim().is_empty() => std::path::PathBuf::from(p.trim()),
+        _ => {
+            let name = slug.split('/').next_back().unwrap_or(&slug);
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(name)
+        }
+    };
+
+    match state.multi.add_repo(&slug, path.clone()).await {
+        Ok(_) => (
+            StatusCode::CREATED,
+            Json(json!({
+                "status": "ok",
+                "slug": slug,
+                "path": path.display().to_string(),
+                "message": "Repo added — scheduler/poller spawned",
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            let msg = format!("{e}");
+            let code = if msg.contains("already") {
+                StatusCode::CONFLICT
+            } else if msg.contains("not available") {
+                StatusCode::METHOD_NOT_ALLOWED
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (code, Json(json!({"status": "error", "message": msg}))).into_response()
+        }
+    }
+}
+
+/// GET /api/v1/summary -- compact dashboard summary for the Summary page.
+async fn api_summary(
+    State(state): State<Arc<WebState>>,
+    Query(filter): Query<RepoFilter>,
+) -> impl IntoResponse {
+    let repos_guard = state.multi.repos.read().await;
+    let target = match filter.repo {
+        Some(ref s) => repos_guard.get(s).cloned(),
+        None => repos_guard.values().next().cloned(),
+    };
+    drop(repos_guard);
+    let ds = match target {
+        Some(d) => d,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "no repo configured"})),
+            )
+                .into_response();
+        }
+    };
+
+    let slug = format!("{}/{}", ds.config.repo_owner, ds.config.repo_name);
+    let issues = ds.db.get_open_issues().unwrap_or_default();
+    let untriaged = ds.db.get_untriaged_issues().unwrap_or_default();
+    let prs = ds.db.get_open_pulls().unwrap_or_default();
+    let conflicts = prs.iter().filter(|p| p.mergeable == Some(false)).count();
+
+    // unanalyzed_prs: count PRs without an analysis row.
+    let unanalyzed_count = prs
+        .iter()
+        .filter(|p| ds.db.get_pr_analysis(p.number).ok().flatten().is_none())
+        .count();
+
+    let now = chrono::Utc::now();
+    let age_days = |s: &str| -> u32 {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|d| (now - d.with_timezone(&chrono::Utc)).num_days().max(0) as u32)
+            .unwrap_or(0)
+    };
+
+    let to_issue_brief = |i: &crate::db::issues::Issue| {
+        json!({
+            "number": i.number,
+            "title": i.title,
+            "labels": i.labels,
+            "age_days": age_days(&i.created_at),
+        })
+    };
+
+    let to_pr_brief = |p: &crate::db::pulls::PullRequest, risk: Option<String>| {
+        json!({
+            "number": p.number,
+            "title": p.title,
+            "risk_level": risk,
+            "ci_status": p.ci_status,
+            "has_conflicts": p.mergeable == Some(false),
+            "age_days": age_days(&p.created_at),
+        })
+    };
+
+    // High-priority issues: any label starting with "priority:high" or "priority:critical".
+    let high_priority_issues: Vec<_> = issues
+        .iter()
+        .filter(|i| {
+            i.labels
+                .iter()
+                .any(|l| l.starts_with("priority:high") || l.starts_with("priority:critical"))
+        })
+        .take(5)
+        .map(to_issue_brief)
+        .collect();
+
+    // Top issues: by reactions+1, then by recency.
+    let mut sorted_issues = issues.clone();
+    sorted_issues.sort_by(|a, b| {
+        b.reactions_plus1
+            .cmp(&a.reactions_plus1)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+    let top_issues: Vec<_> = sorted_issues.iter().take(5).map(to_issue_brief).collect();
+
+    // High-risk PRs: where analysis.risk_level is high or critical.
+    let high_risk_prs: Vec<_> = prs
+        .iter()
+        .filter_map(|p| {
+            ds.db.get_pr_analysis(p.number).ok().flatten().and_then(|a| {
+                if a.risk_level == "high" || a.risk_level == "critical" {
+                    Some(to_pr_brief(p, Some(a.risk_level)))
+                } else {
+                    None
+                }
+            })
+        })
+        .take(5)
+        .collect();
+
+    // Top PRs: oldest open first (these are the ones at risk of being forgotten).
+    let mut sorted_prs = prs.clone();
+    sorted_prs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    let top_prs: Vec<_> = sorted_prs
+        .iter()
+        .take(5)
+        .map(|p| {
+            let risk = ds
+                .db
+                .get_pr_analysis(p.number)
+                .ok()
+                .flatten()
+                .map(|a| a.risk_level);
+            to_pr_brief(p, risk)
+        })
+        .collect();
+
+    Json(json!({
+        "repo": slug,
+        "timestamp": now.to_rfc3339(),
+        "open_issues": issues.len(),
+        "untriaged_issues": untriaged.len(),
+        "high_priority_issues": high_priority_issues,
+        "top_issues": top_issues,
+        "open_prs": prs.len(),
+        "unanalyzed_prs": unanalyzed_count,
+        "high_risk_prs": high_risk_prs,
+        "top_prs": top_prs,
+        "conflicts": conflicts,
+    }))
+    .into_response()
+}
+
+/// GET /api/v1/auth/status -- which credentials are detected.
+async fn api_auth_status() -> impl IntoResponse {
+    let creds = crate::login::load_credentials();
+
+    let github = creds.contains_key("GITHUB_TOKEN")
+        || std::env::var("GITHUB_TOKEN").is_ok()
+        || std::env::var("WSHM_TOKEN").is_ok();
+
+    let anthropic_kind = if creds.contains_key("ANTHROPIC_OAUTH_TOKEN")
+        || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
+        || std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok()
+    {
+        Some("oauth")
+    } else if creds.contains_key("ANTHROPIC_API_KEY") || std::env::var("ANTHROPIC_API_KEY").is_ok()
+    {
+        Some("api_key")
+    } else {
+        None
+    };
+
+    Json(json!({
+        "github": github,
+        "anthropic": anthropic_kind,
+    }))
+}
+
+/// POST /api/v1/auth/github -- store GITHUB_TOKEN in .wshm/credentials.
+async fn api_auth_github(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let token = match body.get("token").and_then(|v| v.as_str()) {
+        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "token is required"})),
+            )
+                .into_response();
+        }
+    };
+
+    let mut creds = crate::login::load_credentials();
+    creds.insert("GITHUB_TOKEN".to_string(), token);
+    match crate::login::save_credentials(&creds) {
+        Ok(()) => Json(json!({
+            "status": "ok",
+            "message": "GitHub token saved to .wshm/credentials",
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"status": "error", "message": format!("{e}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/v1/auth/anthropic -- store Anthropic OAuth token or API key.
+/// Body: {"token": "...", "kind": "oauth"|"api_key"}
+async fn api_auth_anthropic(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let token = match body.get("token").and_then(|v| v.as_str()) {
+        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "token is required"})),
+            )
+                .into_response();
+        }
+    };
+    let kind = body
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("oauth");
+
+    let key = match kind {
+        "oauth" => "ANTHROPIC_OAUTH_TOKEN",
+        "api_key" => "ANTHROPIC_API_KEY",
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "kind must be 'oauth' or 'api_key'"})),
+            )
+                .into_response();
+        }
+    };
+
+    let mut creds = crate::login::load_credentials();
+    // Mutually exclusive: writing one removes the other so we don't
+    // confuse resolve_anthropic_auth's priority.
+    let other = if kind == "oauth" {
+        "ANTHROPIC_API_KEY"
+    } else {
+        "ANTHROPIC_OAUTH_TOKEN"
+    };
+    creds.remove(other);
+    creds.insert(key.to_string(), token);
+
+    match crate::login::save_credentials(&creds) {
+        Ok(()) => Json(json!({
+            "status": "ok",
+            "kind": kind,
+            "message": format!("{key} saved to .wshm/credentials"),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"status": "error", "message": format!("{e}")})),
+        )
+            .into_response(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Router builder
 // ---------------------------------------------------------------------------
@@ -970,6 +1295,11 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         .route("/api/v1/restore", post(api_restore_backup))
         .route("/api/v1/license", get(api_license))
         .route("/api/v1/license/activate", post(api_license_activate))
+        .route("/api/v1/repos", get(api_list_repos).post(api_add_repo))
+        .route("/api/v1/auth/status", get(api_auth_status))
+        .route("/api/v1/auth/github", post(api_auth_github))
+        .route("/api/v1/auth/anthropic", post(api_auth_anthropic))
+        .route("/api/v1/summary", get(api_summary))
 }
 
 /// Default SPA sub-router serving the embedded wshm-core web-dist.

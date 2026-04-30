@@ -92,28 +92,28 @@
 </div>
 
 {#if error}
-	<Card class="border-red-500 bg-gray-800">
+	<Card class="border-red-500 bg-gray-800 max-w-none">
 		<p class="text-red-400">{error}</p>
 	</Card>
 {:else}
 	<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
-		<Card class="bg-gray-800 border-gray-700 text-center !p-4">
+		<Card class="bg-gray-800 border-gray-700 text-center !p-4 max-w-none">
 			<div class="text-[0.6875rem] uppercase tracking-wider text-gray-500 mb-1">Open Issues</div>
 			<div class="text-2xl font-bold text-gray-100 mono">{status?.open_issues ?? '--'}</div>
 		</Card>
-		<Card class="bg-gray-800 border-gray-700 text-center !p-4">
+		<Card class="bg-gray-800 border-gray-700 text-center !p-4 max-w-none">
 			<div class="text-[0.6875rem] uppercase tracking-wider text-gray-500 mb-1">Untriaged</div>
 			<div class="text-2xl font-bold text-gray-100 mono">{status?.untriaged ?? '--'}</div>
 		</Card>
-		<Card class="bg-gray-800 border-gray-700 text-center !p-4">
+		<Card class="bg-gray-800 border-gray-700 text-center !p-4 max-w-none">
 			<div class="text-[0.6875rem] uppercase tracking-wider text-gray-500 mb-1">Open PRs</div>
 			<div class="text-2xl font-bold text-gray-100 mono">{status?.open_prs ?? '--'}</div>
 		</Card>
-		<Card class="bg-gray-800 border-gray-700 text-center !p-4">
+		<Card class="bg-gray-800 border-gray-700 text-center !p-4 max-w-none">
 			<div class="text-[0.6875rem] uppercase tracking-wider text-gray-500 mb-1">Unanalyzed</div>
 			<div class="text-2xl font-bold text-gray-100 mono">{status?.unanalyzed ?? '--'}</div>
 		</Card>
-		<Card class="bg-gray-800 border-gray-700 text-center !p-4">
+		<Card class="bg-gray-800 border-gray-700 text-center !p-4 max-w-none">
 			<div class="text-[0.6875rem] uppercase tracking-wider text-gray-500 mb-1">Conflicts</div>
 			<div class="text-2xl font-bold text-gray-100 mono">{status?.conflicts ?? '--'}</div>
 		</Card>
@@ -123,11 +123,11 @@
 		<h2 class="text-xl font-semibold text-gray-100 mb-1">Action Required</h2>
 		<p class="text-sm text-gray-500 mb-3">High/critical priority issues, oldest first</p>
 		{#if actionRequired.length === 0}
-			<Card class="bg-gray-800 border-gray-700">
+			<Card class="bg-gray-800 border-gray-700 max-w-none">
 				<p class="text-gray-600 text-center py-4">No high-priority issues requiring action.</p>
 			</Card>
 		{:else}
-			<div class="overflow-x-auto">
+			<div class="w-full overflow-x-auto">
 				<Table striped hoverable class="w-full">
 					<TableHead class="text-xs uppercase text-gray-400">
 						<TableHeadCell class="px-2 py-1.5 w-[60px]">#</TableHeadCell>
@@ -156,11 +156,11 @@
 		<h2 class="text-xl font-semibold text-gray-100 mb-1">Issues TODO</h2>
 		<p class="text-sm text-gray-500 mb-3">Top 10 issues by priority then age</p>
 		{#if issuesTodo.length === 0}
-			<Card class="bg-gray-800 border-gray-700">
+			<Card class="bg-gray-800 border-gray-700 max-w-none">
 				<p class="text-gray-600 text-center py-4">No open issues.</p>
 			</Card>
 		{:else}
-			<div class="overflow-x-auto">
+			<div class="w-full overflow-x-auto">
 				<Table striped hoverable class="w-full">
 					<TableHead class="text-xs uppercase text-gray-400">
 						<TableHeadCell class="px-2 py-1.5 w-[60px]">#</TableHeadCell>
@@ -187,11 +187,11 @@
 		<h2 class="text-xl font-semibold text-gray-100 mb-1">PRs TODO</h2>
 		<p class="text-sm text-gray-500 mb-3">Top 10 PRs by conflicts then age</p>
 		{#if prsTodo.length === 0}
-			<Card class="bg-gray-800 border-gray-700">
+			<Card class="bg-gray-800 border-gray-700 max-w-none">
 				<p class="text-gray-600 text-center py-4">No open pull requests.</p>
 			</Card>
 		{:else}
-			<div class="overflow-x-auto">
+			<div class="w-full overflow-x-auto">
 				<Table striped hoverable class="w-full">
 					<TableHead class="text-xs uppercase text-gray-400">
 						<TableHeadCell class="px-2 py-1.5 w-[60px]">#</TableHeadCell>

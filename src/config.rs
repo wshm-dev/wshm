@@ -554,7 +554,7 @@ impl Default for DaemonConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WebConfig {
     #[serde(default = "default_web_enabled")]
     pub enabled: bool,
@@ -610,11 +610,19 @@ impl WebConfig {
         }
     }
 
-    /// Resolve the effective password: config.toml > .wshm/credentials > auto-generate.
+    /// Resolve the effective password: config.toml > $WSHM_WEB_PASSWORD > .wshm/credentials > auto-generate.
     /// If auto-generated, writes to .wshm/credentials and prints to stdout.
     pub fn resolve_password(&mut self, wshm_dir: &std::path::Path) {
         if self.password.is_some() {
             return;
+        }
+
+        if let Ok(env_pass) = std::env::var("WSHM_WEB_PASSWORD") {
+            let env_pass = env_pass.trim();
+            if !env_pass.is_empty() {
+                self.password = Some(env_pass.to_string());
+                return;
+            }
         }
 
         let creds_path = wshm_dir.join("credentials");
@@ -1027,7 +1035,7 @@ fn default_icm_prefix() -> String {
 
 // ── Global multi-repo config ──────────────────────────────────
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct GlobalConfig {
     #[serde(default)]
     pub daemon: GlobalDaemonConfig,
@@ -1090,13 +1098,17 @@ fn default_enabled() -> bool {
 
 impl GlobalConfig {
     pub fn load(path: &Path) -> Result<Self> {
+        // If the file doesn't exist yet, start with an empty multi-repo config.
+        // This enables a "first-run" UX where the user adds repos through the
+        // web UI's POST /api/v1/repos endpoint.
+        if !path.exists() {
+            return Ok(Self::default());
+        }
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read global config: {}", path.display()))?;
         let config: Self = toml::from_str(&content)
             .with_context(|| format!("Failed to parse global config: {}", path.display()))?;
-        if config.repos.is_empty() {
-            anyhow::bail!("Global config has no [[repos]] entries");
-        }
+        // Empty `repos` is allowed — the user can add them at runtime.
         Ok(config)
     }
 
@@ -1113,6 +1125,29 @@ impl GlobalConfig {
             .join(".wshm")
             .join("global.toml")
     }
+}
+
+/// Append a new repo entry to the global config TOML and save back.
+/// Used by the dynamic add_repo flow so a runtime addition survives restart.
+pub fn append_repo_to_global(
+    path: &Path,
+    slug: &str,
+    repo_path: &Path,
+    apply: Option<bool>,
+) -> Result<()> {
+    let mut global = GlobalConfig::load(path)
+        .with_context(|| format!("Failed to load global config at {}", path.display()))?;
+    if global.repos.iter().any(|r| r.slug == slug) {
+        anyhow::bail!("repo {slug} already present in global config");
+    }
+    global.repos.push(RepoEntry {
+        slug: slug.to_string(),
+        path: repo_path.to_path_buf(),
+        apply,
+        enabled: true,
+        secret: None,
+    });
+    global.save(path)
 }
 
 impl Config {
