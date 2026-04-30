@@ -46,7 +46,6 @@
 	}
 
 	function handleLogout() {
-		if (!window.confirm('Sign out?')) return;
 		// HTTP Basic Auth has no real "logout" — the browser caches creds for
 		// the origin until restart. Trick: send a sync XHR with deliberately
 		// invalid credentials so the browser updates its cache (= forgets the

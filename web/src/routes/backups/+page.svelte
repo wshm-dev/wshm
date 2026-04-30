@@ -8,6 +8,8 @@
 	let creating = $state(false);
 	let restoring = $state<string | null>(null);
 	let message = $state<string | null>(null);
+	let confirmingRestore = $state<string | null>(null);
+	let confirmTimer: ReturnType<typeof setTimeout> | null = null;
 
 	async function load() {
 		try {
@@ -32,7 +34,16 @@
 	}
 
 	async function handleRestore(name: string) {
-		if (!confirm(`Restore from ${name}? This will overwrite the current database.`)) return;
+		// Two-step confirmation: first click arms the button (red "Confirm
+		// restore"), second click within 5s actually runs. Auto-disarms.
+		if (confirmingRestore !== name) {
+			confirmingRestore = name;
+			if (confirmTimer) clearTimeout(confirmTimer);
+			confirmTimer = setTimeout(() => (confirmingRestore = null), 5000);
+			return;
+		}
+		if (confirmTimer) clearTimeout(confirmTimer);
+		confirmingRestore = null;
 		restoring = name;
 		message = null;
 		try {
@@ -100,9 +111,15 @@
 						<button
 							onclick={() => handleRestore(b.name)}
 							disabled={restoring === b.name}
-							class="text-xs border border-gray-700 text-gray-300 hover:text-white hover:border-gray-500 px-3 py-1.5 rounded-lg transition"
+							class="text-xs px-3 py-1.5 rounded-lg transition border {confirmingRestore === b.name ? 'border-red-500 bg-red-900/30 text-red-300 hover:bg-red-900/50' : 'border-gray-700 text-gray-300 hover:text-white hover:border-gray-500'}"
 						>
-							{restoring === b.name ? 'Restoring...' : 'Restore'}
+							{#if restoring === b.name}
+								Restoring...
+							{:else if confirmingRestore === b.name}
+								Confirm restore
+							{:else}
+								Restore
+							{/if}
 						</button>
 					</TableBodyCell>
 				</TableBodyRow>
