@@ -1,11 +1,13 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import { onMount } from 'svelte';
+	import { page } from '$app/stores';
 	import { selectedRepo, theme, type Theme } from '$lib/stores';
 	import { fetchStatus, type RepoInfo } from '$lib/api';
 	import '../app.css';
 
 	let { children }: { children: Snippet } = $props();
+	let isLoginRoute = $derived($page.url.pathname === '/login');
 
 	let repos: RepoInfo[] = $state([]);
 	let collapsed: boolean = $state(false);
@@ -45,20 +47,23 @@
 		try { localStorage.setItem('wshm-sidebar-collapsed', String(collapsed)); } catch { /* ignore */ }
 	}
 
-	function handleLogout() {
-		// HTTP Basic Auth has no real "logout" — the browser caches creds for
-		// the origin until restart. Trick: send a sync XHR with deliberately
-		// invalid credentials so the browser updates its cache (= forgets the
-		// good ones). Then reload — the daemon answers 401 and the browser
-		// re-prompts.
+	async function handleLogout() {
+		// Clear the signed `wshm_session` cookie set by /api/v1/auth/login.
+		// For Basic-Auth users, also poison the cached creds so the browser
+		// stops auto-sending them.
+		try {
+			await fetch('/api/v1/auth/logout', { method: 'POST' });
+		} catch {
+			// ignore — middleware will still redirect if cookie is invalid
+		}
 		try {
 			const xhr = new XMLHttpRequest();
 			xhr.open('GET', '/api/v1/status', false, 'logout', 'logout');
 			xhr.send();
 		} catch {
-			// expected — browser may throw if blocked
+			// expected when Basic Auth isn't in use
 		}
-		window.location.replace('/');
+		window.location.replace('/login');
 	}
 
 	onMount(async () => {
@@ -74,6 +79,9 @@
 	});
 </script>
 
+{#if isLoginRoute}
+	{@render children()}
+{:else}
 <div class="bg-gray-900 text-gray-200 min-h-screen">
 	<nav
 		class="fixed top-0 left-0 bottom-0 z-40 flex flex-col border-r border-gray-700 bg-gray-800 overflow-y-auto transition-[width] duration-150"
@@ -212,3 +220,4 @@
 		{@render children()}
 	</main>
 </div>
+{/if}

@@ -11,16 +11,18 @@
 use axum::{
     body::Body,
     extract::{Query, State},
-    http::{header, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use base64::Engine;
+use hmac::{Hmac, Mac};
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::Sha256;
 use std::sync::Arc;
 
 use super::MultiDaemonState;
@@ -59,22 +61,93 @@ struct RepoFilter {
 // Auth middleware
 // ---------------------------------------------------------------------------
 
-/// Basic-auth middleware layer.  Allows `/health` without credentials.
-/// Checks the `Authorization: Basic <base64(user:pass)>` header against
-/// the values in the first repo's `[web]` config (username / password).
-/// If no password is configured, auth is disabled (all requests pass).
+/// Returns true if the request path can be served without auth (login page,
+/// health probe, login API, static SPA assets).  Keeps the unauthenticated
+/// browsing surface tight: anything else requires a valid session.
+fn is_public_path(path: &str) -> bool {
+    if path == "/health" || path == "/login" || path == "/api/v1/auth/login" {
+        return true;
+    }
+    if path.starts_with("/_app/") {
+        return true;
+    }
+    matches!(
+        path,
+        "/favicon.png" | "/favicon.ico" | "/wizard-icon.png" | "/robots.txt"
+    )
+}
+
+/// Reads a cookie value by name out of the `Cookie:` header, if present.
+fn read_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    let prefix = format!("{name}=");
+    raw.split(';')
+        .map(|c| c.trim())
+        .find_map(|c| c.strip_prefix(prefix.as_str()))
+}
+
+/// Mints a signed session cookie value: `<expires_unix>.<base64url_hmac>`.
+/// The HMAC key is derived from the configured web password, so rotating the
+/// password automatically invalidates every outstanding session.
+fn mint_session_cookie(password: &str, ttl_secs: i64) -> (String, i64) {
+    let expires_at = chrono::Utc::now().timestamp() + ttl_secs;
+    let payload = expires_at.to_string();
+    let mut mac = Hmac::<Sha256>::new_from_slice(password.as_bytes())
+        .expect("HMAC accepts any key size");
+    mac.update(payload.as_bytes());
+    let sig = mac.finalize().into_bytes();
+    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
+    (format!("{payload}.{sig_b64}"), expires_at)
+}
+
+/// Verifies a session cookie value previously minted by `mint_session_cookie`.
+/// Constant-time signature comparison; rejects expired tokens.
+fn verify_session_cookie(password: &str, value: &str) -> bool {
+    let (expires_str, sig_b64) = match value.split_once('.') {
+        Some(p) => p,
+        None => return false,
+    };
+    let expires_at: i64 = match expires_str.parse() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    if expires_at <= chrono::Utc::now().timestamp() {
+        return false;
+    }
+    let mut mac = Hmac::<Sha256>::new_from_slice(password.as_bytes())
+        .expect("HMAC accepts any key size");
+    mac.update(expires_str.as_bytes());
+    let expected_sig = mac.finalize().into_bytes();
+    let expected_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(expected_sig);
+    if expected_b64.len() != sig_b64.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in expected_b64.bytes().zip(sig_b64.bytes()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+/// Auth middleware that accepts, in order:
+/// - public paths (`/health`, `/login`, `/api/v1/auth/login`, static assets);
+/// - a valid `wshm_session` cookie (set by POST /api/v1/auth/login);
+/// - oauth2-proxy forwarded headers when `WSHM_TRUST_PROXY_AUTH=1`;
+/// - HTTP Basic Auth (kept for CLI/curl callers).
+///
+/// Browser HTML requests get a 302 redirect to `/login`; everything else
+/// (API/JSON) gets a 401 with a JSON error body. Apps in the SPA detect the
+/// 302 and render the login form.
 async fn auth_middleware(
     State(state): State<Arc<WebState>>,
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    // /health is always public
-    if req.uri().path() == "/health" {
+    let path = req.uri().path().to_string();
+    if is_public_path(&path) {
         return next.run(req).await;
     }
 
-    // Grab web config from the first available repo (all repos share the
-    // same daemon process, so one set of web credentials is sufficient).
     let repos = state.multi.repos.read().await;
     let web_cfg = match repos.values().next() {
         Some(ds) => ds.config.web.clone(),
@@ -85,15 +158,39 @@ async fn auth_middleware(
     };
     drop(repos);
 
-    // If no password is set, auth is disabled.
+    // No password configured → auth disabled (single-user dev mode).
     let required_password = match &web_cfg.password {
         Some(p) => p.clone(),
         None => return next.run(req).await,
     };
-
     let expected_username = web_cfg.username.clone();
 
-    let authorized = req
+    // 1) Trust oauth2-proxy headers when explicitly enabled. Looking for
+    //    X-Forwarded-User / X-Forwarded-Email / X-Auth-Request-Email which
+    //    oauth2-proxy sets after a successful SSO.
+    if std::env::var("WSHM_TRUST_PROXY_AUTH")
+        .ok()
+        .filter(|v| v == "1" || v == "true")
+        .is_some()
+    {
+        let has_proxy_header = req.headers().keys().any(|k| {
+            let n = k.as_str().to_ascii_lowercase();
+            n == "x-forwarded-user" || n == "x-forwarded-email" || n == "x-auth-request-email"
+        });
+        if has_proxy_header {
+            return next.run(req).await;
+        }
+    }
+
+    // 2) Signed session cookie set by /api/v1/auth/login.
+    if let Some(cookie_val) = read_cookie(req.headers(), "wshm_session") {
+        if verify_session_cookie(&required_password, cookie_val) {
+            return next.run(req).await;
+        }
+    }
+
+    // 3) Basic Auth fallback (CLI / curl).
+    let basic_ok = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -108,17 +205,114 @@ async fn auth_middleware(
             }
         })
         .unwrap_or(false);
+    if basic_ok {
+        return next.run(req).await;
+    }
 
-    if authorized {
-        next.run(req).await
-    } else {
+    // Decide between 302 (browser → /login) and 401 (API/curl).
+    // Heuristic: API paths and Accept: application/json get JSON; everything
+    // else gets a redirect so the SPA can render the login page.
+    let accept = req
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let wants_json = path.starts_with("/api/") || accept.contains("application/json");
+
+    if wants_json {
         (
             StatusCode::UNAUTHORIZED,
             [(header::WWW_AUTHENTICATE, "Basic realm=\"wshm\"")],
             Json(json!({"error": "unauthorized"})),
         )
             .into_response()
+    } else {
+        (
+            StatusCode::FOUND,
+            [(header::LOCATION, HeaderValue::from_static("/login"))],
+        )
+            .into_response()
     }
+}
+
+/// POST /api/v1/auth/login -- validate `username` + `password` against the
+/// configured `[web]` credentials and set a signed `wshm_session` cookie on
+/// success. The cookie is HttpOnly + Secure + SameSite=Lax + Path=/ with a
+/// 7-day TTL.
+async fn api_auth_login(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let username = body
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let password = body
+        .get("password")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let repos = state.multi.repos.read().await;
+    let web_cfg = match repos.values().next() {
+        Some(ds) => ds.config.web.clone(),
+        None => {
+            drop(repos);
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "no repo configured"})),
+            )
+                .into_response();
+        }
+    };
+    drop(repos);
+
+    let required_password = match web_cfg.password.as_ref() {
+        Some(p) => p.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "web auth disabled (no password configured)"})),
+            )
+                .into_response();
+        }
+    };
+
+    if username != web_cfg.username || password != required_password {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "invalid credentials"})),
+        )
+            .into_response();
+    }
+
+    let (cookie_val, _expires_at) = mint_session_cookie(&required_password, 7 * 24 * 3600);
+    let cookie_header = format!(
+        "wshm_session={}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={}",
+        cookie_val,
+        7 * 24 * 3600
+    );
+
+    (
+        StatusCode::OK,
+        [(header::SET_COOKIE, cookie_header)],
+        Json(json!({"status": "ok"})),
+    )
+        .into_response()
+}
+
+/// POST /api/v1/auth/logout -- clear the `wshm_session` cookie.
+async fn api_auth_logout() -> Response {
+    let cookie_header =
+        "wshm_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0".to_string();
+    (
+        StatusCode::OK,
+        [(header::SET_COOKIE, cookie_header)],
+        Json(json!({"status": "ok"})),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1299,6 +1493,8 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         .route("/api/v1/auth/status", get(api_auth_status))
         .route("/api/v1/auth/github", post(api_auth_github))
         .route("/api/v1/auth/anthropic", post(api_auth_anthropic))
+        .route("/api/v1/auth/login", post(api_auth_login))
+        .route("/api/v1/auth/logout", post(api_auth_logout))
         .route("/api/v1/summary", get(api_summary))
 }
 
