@@ -1230,13 +1230,17 @@ async fn api_add_repo(
         }
     };
 
-    // Path: explicit, else default to ./<repo_name> relative to current dir.
+    // Path: explicit, else default to <wshm_home>/repos/<name>. Using the wshm
+    // home root (parent of global.toml) keeps per-repo state on the same
+    // persistent volume as the global config in containerized deployments.
     let path = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.trim().is_empty() => std::path::PathBuf::from(p.trim()),
         _ => {
             let name = slug.split('/').next_back().unwrap_or(&slug);
-            std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            crate::config::GlobalConfig::default_path()
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("repos")
                 .join(name)
         }
     };
