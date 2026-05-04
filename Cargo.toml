@@ -76,6 +76,9 @@ is-terminal = "0.4"
 zeroize = "1"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
+# Local accounts: password hashing + secure random generation.
+argon2 = "0.5"
+rand = "0.8"
 
 # Optional: Export - Cloud Storage
 aws-sdk-s3 = { version = "1", optional = true }

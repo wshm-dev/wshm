@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod daemon;
@@ -22,3 +23,7 @@ pub use config::Config;
 pub use db::Database;
 pub use github::Client;
 pub use run::{init_core, init_full, run_oss, triage_format};
+
+// Re-export the daemon extension type so external bins (e.g. wshm-pro) can
+// build it without going through the long module path.
+pub use daemon::DaemonExtensions;

@@ -46,6 +46,10 @@ struct WebAssets;
 /// [`web_routes_with_extensions`].
 pub struct WebState {
     pub multi: Arc<MultiDaemonState>,
+    /// Optional RBAC store. `Some` enables multi-user accounts with roles
+    /// (admin/member/viewer); `None` keeps the legacy single-credential
+    /// `[web].username/password` Basic Auth flow.
+    pub users: Option<Arc<crate::auth::UserStore>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +69,11 @@ struct RepoFilter {
 /// health probe, login API, static SPA assets).  Keeps the unauthenticated
 /// browsing surface tight: anything else requires a valid session.
 fn is_public_path(path: &str) -> bool {
-    if path == "/health" || path == "/login" || path == "/api/v1/auth/login" {
+    if path == "/health"
+        || path == "/login"
+        || path == "/api/v1/auth/login"
+        || path == "/api/v1/auth/logout"
+    {
         return true;
     }
     if path.starts_with("/_app/") {
@@ -129,8 +137,99 @@ fn verify_session_cookie(password: &str, value: &str) -> bool {
     diff == 0
 }
 
+/// HMAC signing key for the user-id session cookie. Deployments using the
+/// RBAC mode are expected to set `WSHM_JWT_SECRET`; the fallback only exists
+/// so the daemon boots in dev — sessions then become trivially forgeable,
+/// which is fine because `[web].password` is the real ACL in that mode.
+fn user_cookie_secret() -> String {
+    std::env::var("WSHM_JWT_SECRET").unwrap_or_else(|_| "wshm-cookie-fallback".to_string())
+}
+
+/// Mints a session cookie carrying a user id: `<user_id>.<expires>.<sig>`.
+pub fn mint_user_cookie(user_id: i64, ttl_secs: i64) -> String {
+    let expires_at = chrono::Utc::now().timestamp() + ttl_secs;
+    let payload = format!("{user_id}.{expires_at}");
+    let mut mac = Hmac::<Sha256>::new_from_slice(user_cookie_secret().as_bytes())
+        .expect("HMAC accepts any key size");
+    mac.update(payload.as_bytes());
+    let sig = mac.finalize().into_bytes();
+    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
+    format!("{payload}.{sig_b64}")
+}
+
+/// Verifies a user-id cookie minted by [`mint_user_cookie`]. Returns the
+/// user id if signature + expiry are valid.
+pub fn verify_user_cookie(value: &str) -> Option<i64> {
+    let parts: Vec<&str> = value.splitn(3, '.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let user_id: i64 = parts[0].parse().ok()?;
+    let expires_at: i64 = parts[1].parse().ok()?;
+    if expires_at <= chrono::Utc::now().timestamp() {
+        return None;
+    }
+    let payload = format!("{}.{}", parts[0], parts[1]);
+    let mut mac = Hmac::<Sha256>::new_from_slice(user_cookie_secret().as_bytes())
+        .expect("HMAC accepts any key size");
+    mac.update(payload.as_bytes());
+    let expected_sig = mac.finalize().into_bytes();
+    let expected_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(expected_sig);
+    if expected_b64.len() != parts[2].len() {
+        return None;
+    }
+    let mut diff = 0u8;
+    for (a, b) in expected_b64.bytes().zip(parts[2].bytes()) {
+        diff |= a ^ b;
+    }
+    (diff == 0).then_some(user_id)
+}
+
+/// Identify the requesting user when RBAC is enabled. Tries the user-id
+/// cookie first, falls back to `X-Auth-Request-Email` / `X-Forwarded-Email`
+/// (oauth2-proxy SSO), upserting the SSO row on first sight. Returns `None`
+/// when no users store is configured or the request has no usable identity.
+async fn current_user(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+) -> Option<crate::auth::User> {
+    let store = state.users.as_ref()?;
+
+    if let Some(cookie_val) = read_cookie(headers, "wshm_session") {
+        if let Some(uid) = verify_user_cookie(cookie_val) {
+            if let Ok(Some(u)) = store.find_by_id(uid).await {
+                return Some(u);
+            }
+        }
+    }
+
+    let trusts_proxy = std::env::var("WSHM_TRUST_PROXY_AUTH")
+        .ok()
+        .filter(|v| v == "1" || v == "true")
+        .is_some();
+    if trusts_proxy {
+        let email = headers
+            .get("x-auth-request-email")
+            .or_else(|| headers.get("x-forwarded-email"))
+            .and_then(|v| v.to_str().ok());
+        if let Some(email) = email {
+            let username = headers
+                .get("x-forwarded-user")
+                .or_else(|| headers.get("x-forwarded-preferred-username"))
+                .and_then(|v| v.to_str().ok());
+            if let Ok(u) = store.upsert_sso(email, username, "google").await {
+                return Some(u);
+            }
+        }
+    }
+
+    None
+}
+
 /// Auth middleware that accepts, in order:
 /// - public paths (`/health`, `/login`, `/api/v1/auth/login`, static assets);
+/// - in RBAC mode (state.users is Some): a user-id cookie or oauth2-proxy
+///   headers resolved via [`current_user`];
 /// - a valid `wshm_session` cookie (set by POST /api/v1/auth/login);
 /// - oauth2-proxy forwarded headers when `WSHM_TRUST_PROXY_AUTH=1`;
 /// - HTTP Basic Auth (kept for CLI/curl callers).
@@ -140,13 +239,28 @@ fn verify_session_cookie(password: &str, value: &str) -> bool {
 /// 302 and render the login form.
 async fn auth_middleware(
     State(state): State<Arc<WebState>>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Response {
     let path = req.uri().path().to_string();
     if is_public_path(&path) {
         return next.run(req).await;
     }
+
+    // RBAC mode: a UserStore is configured. Resolve identity through the
+    // user-id cookie or oauth2-proxy headers, attach the User to request
+    // extensions so handlers can read it.
+    if state.users.is_some() {
+        if let Some(user) = current_user(&state, req.headers()).await {
+            req.extensions_mut()
+                .insert(Some(user) as Option<crate::auth::User>);
+            return next.run(req).await;
+        }
+        // Fall through to the legacy paths below: a CLI client may still be
+        // hitting the API with Basic Auth even though local accounts exist.
+    }
+    req.extensions_mut()
+        .insert(None as Option<crate::auth::User>);
 
     let repos = state.multi.repos.read().await;
     let web_cfg = match repos.values().next() {
@@ -182,10 +296,14 @@ async fn auth_middleware(
         }
     }
 
-    // 2) Signed session cookie set by /api/v1/auth/login.
-    if let Some(cookie_val) = read_cookie(req.headers(), "wshm_session") {
-        if verify_session_cookie(&required_password, cookie_val) {
-            return next.run(req).await;
+    // 2) Signed session cookie set by /api/v1/auth/login. Skipped in RBAC
+    //    mode — there the user-id cookie is the canonical session and was
+    //    already tried above via current_user().
+    if state.users.is_none() {
+        if let Some(cookie_val) = read_cookie(req.headers(), "wshm_session") {
+            if verify_session_cookie(&required_password, cookie_val) {
+                return next.run(req).await;
+            }
         }
     }
 
@@ -235,10 +353,17 @@ async fn auth_middleware(
     }
 }
 
-/// POST /api/v1/auth/login -- validate `username` + `password` against the
-/// configured `[web]` credentials and set a signed `wshm_session` cookie on
-/// success. The cookie is HttpOnly + Secure + SameSite=Lax + Path=/ with a
-/// 7-day TTL.
+/// POST /api/v1/auth/login -- validate credentials and set a session cookie.
+///
+/// In RBAC mode (state.users is Some) the credentials are looked up in the
+/// UserStore (email or username) and verified with argon2; the cookie
+/// encodes the user id and is signed with `WSHM_JWT_SECRET`.
+///
+/// In legacy mode the credentials are checked against the configured
+/// `[web].username/password` and the cookie is HMAC-keyed with the password.
+///
+/// In both modes the cookie is HttpOnly + Secure + SameSite=Lax + Path=/
+/// with a 7-day TTL.
 async fn api_auth_login(
     State(state): State<Arc<WebState>>,
     Json(body): Json<serde_json::Value>,
@@ -255,6 +380,53 @@ async fn api_auth_login(
         .unwrap_or("")
         .to_string();
 
+    if let Some(store) = state.users.as_ref() {
+        let lookup = match store.find_by_login(&username).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("user lookup failed: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "internal error"})),
+                )
+                    .into_response();
+            }
+        };
+        let (user, hash) = match lookup {
+            Some((u, Some(h))) => (u, h),
+            _ => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "invalid credentials"})),
+                )
+                    .into_response();
+            }
+        };
+        if !crate::auth::verify_password(&password, &hash) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "invalid credentials"})),
+            )
+                .into_response();
+        }
+        if let Err(e) = store.touch_login(user.id).await {
+            tracing::warn!("touch_login: {e}");
+        }
+        let cookie_val = mint_user_cookie(user.id, 7 * 24 * 3600);
+        let cookie_header = format!(
+            "wshm_session={}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={}",
+            cookie_val,
+            7 * 24 * 3600
+        );
+        return (
+            StatusCode::OK,
+            [(header::SET_COOKIE, cookie_header)],
+            Json(json!({"status": "ok", "role": user.role.as_str()})),
+        )
+            .into_response();
+    }
+
+    // Legacy single-credential path.
     let repos = state.multi.repos.read().await;
     let web_cfg = match repos.values().next() {
         Some(ds) => ds.config.web.clone(),
@@ -304,12 +476,33 @@ async fn api_auth_login(
 }
 
 /// GET /api/v1/auth/me -- return the identity of the current user.
-/// Reads oauth2-proxy forwarded headers when present (SSO), otherwise falls
-/// back to the configured `[web].username` (cookie / Basic Auth).
+///
+/// In RBAC mode resolves the User attached by [`auth_middleware`] (cookie or
+/// SSO header) and returns id + role. Otherwise reads oauth2-proxy headers
+/// for SSO identity, or falls back to the `[web].username`.
 async fn api_auth_me(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
+    user: axum::Extension<Option<crate::auth::User>>,
 ) -> Response {
+    if state.users.is_some() {
+        if let Some(u) = user.0 {
+            return Json(json!({
+                "id": u.id,
+                "email": u.email,
+                "username": u.username,
+                "role": u.role.as_str(),
+                "auth_method": if u.sso_provider.is_some() { "sso" } else { "local" },
+            }))
+            .into_response();
+        }
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    }
+
     let email = headers
         .get("x-auth-request-email")
         .or_else(|| headers.get("x-forwarded-email"))
@@ -344,6 +537,199 @@ async fn api_auth_me(
         "auth_method": "local",
     }))
     .into_response()
+}
+
+/// Helper for admin-gated handlers. Returns Err response when the request is
+/// not authenticated or the user is not an admin.
+fn require_admin(
+    user: &axum::Extension<Option<crate::auth::User>>,
+) -> Result<crate::auth::User, Response> {
+    match &user.0 {
+        Some(u) if u.role == crate::auth::Role::Admin => Ok(u.clone()),
+        Some(_) => Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "admin role required"})),
+        )
+            .into_response()),
+        None => Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        )
+            .into_response()),
+    }
+}
+
+/// GET /api/v1/users -- list all users (admin only).
+async fn api_users_list(
+    State(state): State<Arc<WebState>>,
+    user: axum::Extension<Option<crate::auth::User>>,
+) -> Response {
+    if let Err(e) = require_admin(&user) {
+        return e;
+    }
+    let store = match state.users.as_ref() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "RBAC not configured"})),
+            )
+                .into_response();
+        }
+    };
+    match store.list().await {
+        Ok(users) => Json(json!({ "users": users })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/v1/users -- create a new local-credential user (admin only).
+/// Body: `{email, username?, password, role}`.
+async fn api_users_create(
+    State(state): State<Arc<WebState>>,
+    user: axum::Extension<Option<crate::auth::User>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Err(e) = require_admin(&user) {
+        return e;
+    }
+    let store = match state.users.as_ref() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "RBAC not configured"})),
+            )
+                .into_response();
+        }
+    };
+    let email = body.get("email").and_then(|v| v.as_str()).unwrap_or("");
+    let username = body.get("username").and_then(|v| v.as_str());
+    let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
+    let role_str = body
+        .get("role")
+        .and_then(|v| v.as_str())
+        .unwrap_or("member");
+    if email.trim().is_empty() || password.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "email and password are required"})),
+        )
+            .into_response();
+    }
+    let role = match crate::auth::Role::from_str(role_str) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("{e}")})),
+            )
+                .into_response();
+        }
+    };
+    match store.create_local(email, username, password, role).await {
+        Ok(id) => (StatusCode::CREATED, Json(json!({ "id": id }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("{e}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// PATCH /api/v1/users/{id} -- update user role and/or password (admin only).
+/// Body: `{role?, password?}`.
+async fn api_users_update(
+    State(state): State<Arc<WebState>>,
+    user: axum::Extension<Option<crate::auth::User>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Err(e) = require_admin(&user) {
+        return e;
+    }
+    let store = match state.users.as_ref() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "RBAC not configured"})),
+            )
+                .into_response();
+        }
+    };
+    if let Some(role_str) = body.get("role").and_then(|v| v.as_str()) {
+        let role = match crate::auth::Role::from_str(role_str) {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("{e}")})),
+                )
+                    .into_response();
+            }
+        };
+        if let Err(e) = store.update_role(id, role).await {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("{e}")})),
+            )
+                .into_response();
+        }
+    }
+    if let Some(pw) = body.get("password").and_then(|v| v.as_str()) {
+        if !pw.is_empty() {
+            if let Err(e) = store.update_password(id, pw).await {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("{e}")})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    Json(json!({"status": "ok"})).into_response()
+}
+
+/// DELETE /api/v1/users/{id} -- remove a user (admin only).
+async fn api_users_delete(
+    State(state): State<Arc<WebState>>,
+    user: axum::Extension<Option<crate::auth::User>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Response {
+    let admin = match require_admin(&user) {
+        Ok(u) => u,
+        Err(e) => return e,
+    };
+    if admin.id == id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "cannot delete yourself"})),
+        )
+            .into_response();
+    }
+    let store = match state.users.as_ref() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "RBAC not configured"})),
+            )
+                .into_response();
+        }
+    };
+    match store.delete(id).await {
+        Ok(_) => Json(json!({"status": "ok"})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("{e}")})),
+        )
+            .into_response(),
+    }
 }
 
 /// POST /api/v1/auth/logout -- clear the `wshm_session` cookie.
@@ -1541,6 +1927,11 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         .route("/api/v1/auth/login", post(api_auth_login))
         .route("/api/v1/auth/logout", post(api_auth_logout))
         .route("/api/v1/auth/me", get(api_auth_me))
+        .route("/api/v1/users", get(api_users_list).post(api_users_create))
+        .route(
+            "/api/v1/users/{id}",
+            axum::routing::patch(api_users_update).delete(api_users_delete),
+        )
         .route("/api/v1/summary", get(api_summary))
 }
 
@@ -1566,11 +1957,13 @@ pub async fn auth_layer(state: State<Arc<WebState>>, req: Request<Body>, next: N
 /// The `/health` endpoint is always public.
 /// All other routes serve the embedded Svelte SPA.
 pub fn web_routes(multi: Arc<MultiDaemonState>) -> Router {
-    web_routes_with_extensions(multi, None, None)
+    web_routes_with_extensions(multi, None, None, None)
 }
 
 /// Build the web UI router with optional extensions.
 ///
+/// - `users`: enable RBAC mode by passing a populated UserStore. `None`
+///   keeps the legacy single-credential `[web].username/password` flow.
 /// - `extra_api`: additional `Router<Arc<WebState>>` whose routes get merged
 ///   into the main router under the same auth layer. Use this to register
 ///   Pro API endpoints from extension crates.
@@ -1578,13 +1971,14 @@ pub fn web_routes(multi: Arc<MultiDaemonState>) -> Router {
 ///   this to serve a different web-dist bundle (e.g. wshm-pro's full
 ///   OSS+Pro build).
 ///
-/// The `WebState` is built from `multi` and shared with every sub-router.
+/// The `WebState` is built from these inputs and shared with every sub-router.
 pub fn web_routes_with_extensions(
     multi: Arc<MultiDaemonState>,
+    users: Option<Arc<crate::auth::UserStore>>,
     extra_api: Option<Router<Arc<WebState>>>,
     spa_override: Option<Router<Arc<WebState>>>,
 ) -> Router {
-    let state = Arc::new(WebState { multi });
+    let state = Arc::new(WebState { multi, users });
 
     let mut api_routes = oss_api_routes();
     if let Some(extra) = extra_api {

@@ -290,8 +290,32 @@ pub async fn run(mut config: Config, args: DaemonArgs) -> Result<()> {
     Ok(())
 }
 
+/// Pluggable extensions an external binary can pass into the multi-repo
+/// daemon at startup. All fields default to `None`, in which case the daemon
+/// behaves like the OSS build: no RBAC, no extra API routes, default SPA.
+#[derive(Default)]
+pub struct DaemonExtensions {
+    /// Enable RBAC mode by passing a populated `UserStore`.
+    pub users: Option<Arc<crate::auth::UserStore>>,
+    /// Extra API routes merged under the same auth layer as OSS routes.
+    pub extra_api: Option<axum::Router<Arc<crate::daemon::web::WebState>>>,
+    /// Replacement SPA router (e.g. a Pro web-dist with extra routes).
+    pub spa_override: Option<axum::Router<Arc<crate::daemon::web::WebState>>>,
+}
+
 /// Run daemon in multi-repo mode from a global config file.
 pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
+    run_multi_with_extensions(global, args, DaemonExtensions::default()).await
+}
+
+/// Run daemon in multi-repo mode with extension hooks for an external binary
+/// to plug in RBAC, extra API routes, or a replacement SPA bundle. The OSS
+/// binary calls [`run_multi`] which delegates here with empty extensions.
+pub async fn run_multi_with_extensions(
+    global: GlobalConfig,
+    args: DaemonArgs,
+    extensions: DaemonExtensions,
+) -> Result<()> {
     // Install rustls crypto provider early (needed even before TLS handshake)
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -426,8 +450,15 @@ pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
                     _ => None,
                 }
             };
-            if let Err(e) =
-                server::run_multi(server_multi, server_tx, &bind, secret.as_deref(), tls).await
+            if let Err(e) = server::run_multi(
+                server_multi,
+                server_tx,
+                &bind,
+                secret.as_deref(),
+                tls,
+                extensions,
+            )
+            .await
             {
                 tracing::error!("Server error: {e}");
             }

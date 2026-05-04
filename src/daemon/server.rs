@@ -53,7 +53,7 @@ pub async fn run(
     repos.insert(slug, daemon);
     let multi = Arc::new(super::MultiDaemonState::new(repos));
     // OSS: no Pro extensions
-    let web = super::web::web_routes_with_extensions(multi, None, None);
+    let web = super::web::web_routes_with_extensions(multi, None, None, None);
 
     let app = webhook_routes.merge(web);
 
@@ -185,6 +185,7 @@ pub async fn run_multi(
     bind: &str,
     secret: Option<&str>,
     tls: Option<(String, String)>,
+    extensions: super::DaemonExtensions,
 ) -> Result<()> {
     let state = Arc::new(MultiServerState {
         multi: Arc::clone(&multi),
@@ -198,9 +199,20 @@ pub async fn run_multi(
         .route("/health", get(handle_health_multi))
         .with_state(state);
 
-    // Web UI + API routes (Svelte SPA + /api/v1/*)
-    // OSS: no Pro extensions
-    let web = super::web::web_routes_with_extensions(multi, None, None);
+    // Seed admin user if a UserStore is provided and the table is empty.
+    if let Some(store) = extensions.users.as_ref() {
+        if let Err(e) = crate::auth::seed_admin_if_empty(store).await {
+            warn!("Failed to seed admin user: {e}");
+        }
+    }
+
+    // Web UI + API routes (Svelte SPA + /api/v1/*).
+    let web = super::web::web_routes_with_extensions(
+        multi,
+        extensions.users,
+        extensions.extra_api,
+        extensions.spa_override,
+    );
 
     let app = webhook_routes.merge(web);
 
