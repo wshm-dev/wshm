@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod log_buffer;
 pub mod memory;
 pub mod poller;
 pub mod processor;
@@ -297,6 +298,10 @@ pub async fn run(mut config: Config, args: DaemonArgs) -> Result<()> {
 pub struct DaemonExtensions {
     /// Enable RBAC mode by passing a populated `UserStore`.
     pub users: Option<Arc<crate::auth::UserStore>>,
+    /// In-memory log buffer fed by the tracing layer; exposed via
+    /// `GET /api/v1/logs`. Pass the same instance that's wired into the
+    /// `tracing_subscriber` registry.
+    pub logs: Option<Arc<log_buffer::LogBuffer>>,
     /// Extra API routes merged under the same auth layer as OSS routes.
     pub extra_api: Option<axum::Router<Arc<crate::daemon::web::WebState>>>,
     /// Replacement SPA router (e.g. a Pro web-dist with extra routes).
@@ -314,8 +319,14 @@ pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
 pub async fn run_multi_with_extensions(
     global: GlobalConfig,
     args: DaemonArgs,
-    extensions: DaemonExtensions,
+    mut extensions: DaemonExtensions,
 ) -> Result<()> {
+    // Fall back to the process-wide log buffer (set by `log_buffer::
+    // install_global` in main.rs) so `/api/v1/logs` works even when the
+    // caller didn't explicitly thread one through extensions.
+    if extensions.logs.is_none() {
+        extensions.logs = log_buffer::global();
+    }
     // Install rustls crypto provider early (needed even before TLS handshake)
     rustls::crypto::ring::default_provider()
         .install_default()

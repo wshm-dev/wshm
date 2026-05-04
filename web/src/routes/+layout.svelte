@@ -29,7 +29,7 @@
 
 	type IconName =
 		| 'dashboard' | 'summary' | 'issues' | 'prs' | 'triage' | 'queue'
-		| 'changelog' | 'revert' | 'backups' | 'activity' | 'actions' | 'settings';
+		| 'changelog' | 'revert' | 'backups' | 'activity' | 'actions' | 'logs' | 'settings';
 
 	const navItems: { href: string; label: string; icon: IconName }[] = [
 		{ href: '/', label: 'Dashboard', icon: 'dashboard' },
@@ -43,6 +43,7 @@
 		{ href: '/backups', label: 'Backups', icon: 'backups' },
 		{ href: '/activity', label: 'Activity', icon: 'activity' },
 		{ href: '/actions', label: 'Actions', icon: 'actions' },
+		{ href: '/logs', label: 'Logs', icon: 'logs' },
 		{ href: '/settings', label: 'Settings', icon: 'settings' }
 	];
 
@@ -169,6 +170,10 @@
 							<polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
 						{:else if item.icon === 'actions'}
 							<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+						{:else if item.icon === 'logs'}
+							<path d="M4 4h16v4H4z" />
+							<path d="M4 12h16v4H4z" />
+							<path d="M4 20h10" />
 						{:else if item.icon === 'settings'}
 							<circle cx="12" cy="12" r="3" />
 							<path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 0 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 0 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 0 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 0 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />

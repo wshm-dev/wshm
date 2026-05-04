@@ -50,6 +50,9 @@ pub struct WebState {
     /// (admin/member/viewer); `None` keeps the legacy single-credential
     /// `[web].username/password` Basic Auth flow.
     pub users: Option<Arc<crate::auth::UserStore>>,
+    /// Optional in-memory log buffer fed by the tracing layer. When `Some`,
+    /// `GET /api/v1/logs` returns the daemon's recent log lines.
+    pub logs: Option<Arc<crate::daemon::log_buffer::LogBuffer>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1900,6 +1903,48 @@ async fn api_auth_anthropic(Json(body): Json<serde_json::Value>) -> impl IntoRes
 // Router builder
 // ---------------------------------------------------------------------------
 
+/// GET /api/v1/logs -- tail of the daemon's in-memory log buffer.
+///
+/// Query: `tail` (default 200, max 5000), `level` (ERROR/WARN/INFO/DEBUG/TRACE),
+/// `since` (numeric id — return only entries newer than this id).
+async fn api_logs(
+    State(state): State<Arc<WebState>>,
+    Query(params): Query<LogsQuery>,
+) -> impl IntoResponse {
+    let logs = match state.logs.as_ref() {
+        Some(b) => b,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "log buffer not configured"})),
+            )
+                .into_response();
+        }
+    };
+    let tail = params
+        .tail
+        .map(|n| n.min(crate::daemon::log_buffer::MAX_ENTRIES))
+        .or(Some(200));
+    let level = params
+        .level
+        .as_deref()
+        .and_then(crate::daemon::log_buffer::parse_level);
+    let entries = logs.snapshot(tail, params.since, level).await;
+    let last_id = entries.last().map(|e| e.id).or(params.since);
+    Json(json!({
+        "entries": entries,
+        "last_id": last_id,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    tail: Option<usize>,
+    level: Option<String>,
+    since: Option<u64>,
+}
+
 /// OSS API routes sub-router (state-dependent).
 ///
 /// Returns a `Router<Arc<WebState>>` containing only the OSS `/api/v1/*`
@@ -1932,6 +1977,7 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
             "/api/v1/users/{id}",
             axum::routing::patch(api_users_update).delete(api_users_delete),
         )
+        .route("/api/v1/logs", get(api_logs))
         .route("/api/v1/summary", get(api_summary))
 }
 
@@ -1957,7 +2003,7 @@ pub async fn auth_layer(state: State<Arc<WebState>>, req: Request<Body>, next: N
 /// The `/health` endpoint is always public.
 /// All other routes serve the embedded Svelte SPA.
 pub fn web_routes(multi: Arc<MultiDaemonState>) -> Router {
-    web_routes_with_extensions(multi, None, None, None)
+    web_routes_with_extensions(multi, None, None, None, None)
 }
 
 /// Build the web UI router with optional extensions.
@@ -1975,10 +2021,11 @@ pub fn web_routes(multi: Arc<MultiDaemonState>) -> Router {
 pub fn web_routes_with_extensions(
     multi: Arc<MultiDaemonState>,
     users: Option<Arc<crate::auth::UserStore>>,
+    logs: Option<Arc<crate::daemon::log_buffer::LogBuffer>>,
     extra_api: Option<Router<Arc<WebState>>>,
     spa_override: Option<Router<Arc<WebState>>>,
 ) -> Router {
-    let state = Arc::new(WebState { multi, users });
+    let state = Arc::new(WebState { multi, users, logs });
 
     let mut api_routes = oss_api_routes();
     if let Some(extra) = extra_api {

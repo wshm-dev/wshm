@@ -365,3 +365,25 @@ export interface Me {
 export function fetchMe(): Promise<Me> {
 	return apiGet<Me>('/auth/me');
 }
+
+export interface LogEntry {
+	id: number;
+	at: string;
+	level: 'ERROR' | 'WARN' | 'INFO' | 'DEBUG' | 'TRACE';
+	target: string;
+	message: string;
+}
+
+export interface LogsResponse {
+	entries: LogEntry[];
+	last_id: number | null;
+}
+
+export function fetchLogs(opts: { tail?: number; level?: string; since?: number } = {}): Promise<LogsResponse> {
+	const params = new URLSearchParams();
+	if (opts.tail !== undefined) params.set('tail', String(opts.tail));
+	if (opts.level) params.set('level', opts.level);
+	if (opts.since !== undefined) params.set('since', String(opts.since));
+	const qs = params.toString();
+	return apiGet<LogsResponse>(`/logs${qs ? `?${qs}` : ''}`);
+}
