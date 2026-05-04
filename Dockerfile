@@ -1,15 +1,11 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1
 
 # ────────────────────────────────────────────────────────────────
 # Stage 1 — builder
 # ────────────────────────────────────────────────────────────────
-FROM rust:1-bookworm AS builder
+FROM rust:1-trixie AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      pkg-config cmake ca-certificates curl unzip \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN curl -fsSL https://bun.sh/install | bash && ln -s /root/.bun/bin/bun /usr/local/bin/bun
+COPY --from=oven/bun:1-debian --chmod=a=rX /usr/local/bin/bun /usr/local/bin/
 
 WORKDIR /build
 COPY . .
@@ -19,7 +15,7 @@ RUN cargo build --release --bin wshm && strip target/release/wshm
 # ────────────────────────────────────────────────────────────────
 # Stage 2 — runtime
 # ────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git \
