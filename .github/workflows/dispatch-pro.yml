@@ -1,0 +1,40 @@
+name: Dispatch to wshm-pro
+
+# Notifies wshm-pro that wshm-core (this repo) has new commits, so its Docker
+# image can be rebuilt against fresh OSS code without a manual Pro release.
+#
+# Pro consumes wshm-core via `path = "../wshm"` and copies it at Docker build
+# time (`COPY wshm /build/wshm`). Without this dispatch, Pro's `:latest` image
+# stays pinned to the OSS commit that existed at the last Pro release.
+#
+# Required secret (org or repo level):
+#   WSHM_PRO_DISPATCH_TOKEN — PAT with `repo` scope on `wshm-dev/wshm-pro`.
+#   You can reuse `HOMEBREW_TAP_TOKEN` if it already has that scope.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: Notify wshm-pro of OSS update
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send repository_dispatch event
+        env:
+          GH_TOKEN: ${{ secrets.WSHM_PRO_DISPATCH_TOKEN || secrets.HOMEBREW_TAP_TOKEN }}
+          OSS_SHA: ${{ github.sha }}
+          OSS_REF: ${{ github.ref_name }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::Neither WSHM_PRO_DISPATCH_TOKEN nor HOMEBREW_TAP_TOKEN is set; skipping dispatch"
+            exit 0
+          fi
+          gh api repos/wshm-dev/wshm-pro/dispatches \
+            -f event_type=oss-update \
+            -f "client_payload[oss_sha]=$OSS_SHA" \
+            -f "client_payload[oss_ref]=$OSS_REF"
