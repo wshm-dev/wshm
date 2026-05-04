@@ -70,7 +70,13 @@ impl MultiDaemonState {
     /// Add a repo at runtime: load config, build DaemonState, persist to
     /// global config, and spawn scheduler + poller (if enabled). Idempotent
     /// on the slug — returns error if it already exists.
-    pub async fn add_repo(&self, slug: &str, path: PathBuf) -> Result<Arc<DaemonState>> {
+    /// When `path` is None, defaults to `<global_config_parent>/repos/<name>`
+    /// so dynamic adds land on the same volume as the daemon's config.
+    pub async fn add_repo(
+        &self,
+        slug: &str,
+        path: Option<PathBuf>,
+    ) -> Result<Arc<DaemonState>> {
         let runtime = self
             .runtime
             .as_ref()
@@ -79,6 +85,16 @@ impl MultiDaemonState {
         if !slug.contains('/') || slug.split('/').count() != 2 {
             anyhow::bail!("invalid slug format, expected owner/repo");
         }
+
+        let path = path.unwrap_or_else(|| {
+            let name = slug.split('/').next_back().unwrap_or(slug);
+            runtime
+                .global_config_path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("repos")
+                .join(name)
+        });
 
         {
             let repos = self.repos.read().await;

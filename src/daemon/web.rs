@@ -1230,28 +1230,26 @@ async fn api_add_repo(
         }
     };
 
-    // Path: explicit, else default to <wshm_home>/repos/<name>. Using the wshm
-    // home root (parent of global.toml) keeps per-repo state on the same
-    // persistent volume as the global config in containerized deployments.
-    let path = match body.get("path").and_then(|v| v.as_str()) {
-        Some(p) if !p.trim().is_empty() => std::path::PathBuf::from(p.trim()),
-        _ => {
-            let name = slug.split('/').next_back().unwrap_or(&slug);
-            crate::config::GlobalConfig::default_path()
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join("repos")
-                .join(name)
-        }
-    };
+    // Path: explicit if provided, else add_repo derives it from the runtime
+    // config dir so per-repo state lives on the same volume as global.toml.
+    let path = body
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
 
-    match state.multi.add_repo(&slug, path.clone()).await {
-        Ok(_) => (
+    match state.multi.add_repo(&slug, path).await {
+        Ok(state) => (
             StatusCode::CREATED,
             Json(json!({
                 "status": "ok",
                 "slug": slug,
-                "path": path.display().to_string(),
+                "path": state.config.wshm_dir
+                    .parent()
+                    .unwrap_or(&state.config.wshm_dir)
+                    .display()
+                    .to_string(),
                 "message": "Repo added — scheduler/poller spawned",
             })),
         )
