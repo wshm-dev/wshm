@@ -195,7 +195,12 @@ pub async fn run_with_filters(
         {
             Ok(classification) => {
                 if !json {
-                    print_classification(issue, &classification, args.apply);
+                    print_classification(
+                        issue,
+                        &classification,
+                        args.apply,
+                        config.triage.suggested_actions,
+                    );
                 }
                 // After a successful applied triage, strip the force-relabel
                 // markers so the next batch doesn't re-trigger on this issue
@@ -344,6 +349,7 @@ async fn triage_issue(
                 is_duplicate_of: None,
                 is_simple_fix: existing.is_simple_fix,
                 relevant_files: Vec::new(),
+                suggested_actions: existing.suggested_actions,
             });
         }
     }
@@ -372,11 +378,12 @@ async fn triage_issue(
         ));
     }
 
+    let default_system_prompt = issue_classify::system_prompt(config.triage.suggested_actions);
     let system_prompt = config
         .triage
         .system_prompt
         .as_deref()
-        .unwrap_or(issue_classify::SYSTEM);
+        .unwrap_or(&default_system_prompt);
 
     let classification: IssueClassification = ai.complete(system_prompt, &user_prompt).await?;
 
@@ -634,11 +641,28 @@ fn format_triage_comment(c: &IssueClassification, config: &Config) -> String {
         comment.push_str(&format!("\n{relevant_files}\n"));
     }
 
+    if config.triage.suggested_actions && !c.suggested_actions.is_empty() {
+        let actions: Vec<String> = c
+            .suggested_actions
+            .iter()
+            .map(|a| format!("1. {}", crate::pipelines::truncate(a, 120)))
+            .collect();
+        comment.push_str(&format!(
+            "\n### Suggested Actions\n\n{}\n",
+            actions.join("\n")
+        ));
+    }
+
     comment.push_str(&format!("\n{footer}"));
     comment
 }
 
-fn print_classification(issue: &Issue, c: &IssueClassification, applied: bool) {
+fn print_classification(
+    issue: &Issue,
+    c: &IssueClassification,
+    applied: bool,
+    show_suggested_actions: bool,
+) {
     let status = if applied {
         "\x1b[32mAPPLIED\x1b[0m"
     } else {
@@ -681,4 +705,10 @@ fn print_classification(issue: &Issue, c: &IssueClassification, applied: bool) {
         c.confidence * 100.0,
         c.priority.as_deref().unwrap_or("unset"),
     );
+
+    if show_suggested_actions && !c.suggested_actions.is_empty() {
+        for action in &c.suggested_actions {
+            println!("         → {}", crate::pipelines::truncate(action, 120));
+        }
+    }
 }

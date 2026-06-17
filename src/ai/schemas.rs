@@ -31,6 +31,8 @@ pub struct IssueClassification {
     pub is_simple_fix: bool,
     #[serde(default, deserialize_with = "null_as_default")]
     pub relevant_files: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub suggested_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

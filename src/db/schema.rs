@@ -132,6 +132,16 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE pr_analyses ADD COLUMN content_hash TEXT;")?;
     }
 
+    // Migration: add suggested_actions to triage_results
+    let has_suggested_actions: bool = conn
+        .prepare("SELECT suggested_actions FROM triage_results LIMIT 0")
+        .is_ok();
+    if !has_suggested_actions {
+        conn.execute_batch(
+            "ALTER TABLE triage_results ADD COLUMN suggested_actions TEXT NOT NULL DEFAULT '[]';",
+        )?;
+    }
+
     // One-shot migration: recompute every existing triage_results.content_hash
     // with the new label-free formula. Without this, an upgrading pod would
     // see hash mismatches on every previously-triaged issue and burn AI
