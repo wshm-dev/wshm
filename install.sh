@@ -13,9 +13,9 @@
 # Supported platforms (matches the GitHub release pipeline):
 #   - Linux x86_64  (x86_64-unknown-linux-gnu)
 #   - Linux aarch64 (aarch64-unknown-linux-gnu)
+#   - macOS arm64   (aarch64-apple-darwin)
+#   - macOS x86_64  (x86_64-apple-darwin)
 #   - Windows x86_64 via Git Bash / MSYS / Cygwin (x86_64-pc-windows-msvc)
-# macOS is not currently published as a binary release — see
-# https://github.com/wshm-dev/wshm/issues/22 for tracking.
 
 set -eu
 
@@ -77,8 +77,8 @@ detect_os() {
     case "$(uname -s)" in
         Linux*)  OS="linux";   TARGET_SUFFIX="unknown-linux-gnu";;
         MINGW*|MSYS*|CYGWIN*) OS="windows"; TARGET_SUFFIX="pc-windows-msvc";;
-        Darwin*) error "macOS is not published as a binary release yet. Track https://github.com/wshm-dev/wshm/issues/22 for updates.";;
-        *)       error "Unsupported OS: $(uname -s). wshm supports Linux and Windows binary releases.";;
+        Darwin*) OS="macos";   TARGET_SUFFIX="apple-darwin";;
+        *)       error "Unsupported OS: $(uname -s). wshm supports Linux, macOS, and Windows binary releases.";;
     esac
 }
 

@@ -106,6 +106,36 @@ jobs:
             wshm-aarch64-unknown-linux-gnu.tar.gz
             wshm_*_arm64.deb
 
+  build-macos:
+    name: Build macOS (arm64 + x86_64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Build Web UI
+        run: cd web && bun install --frozen-lockfile && bun run build
+      # Apple's toolchain cross-compiles x86_64 from the arm64 runner, so one
+      # (free) runner covers both architectures — Intel runners are paid/EOL.
+      - name: Build (aarch64)
+        run: cargo build --locked --release --bin wshm --target aarch64-apple-darwin
+      - name: Build (x86_64)
+        run: cargo build --locked --release --bin wshm --target x86_64-apple-darwin
+      - name: Package tar.gz
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            tar -C target/$t/release -czf wshm-$t.tar.gz wshm
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wshm-apple-darwin
+          retention-days: 7
+          path: wshm-*-apple-darwin.tar.gz
+
   build-windows:
     name: Build Windows x86_64
     runs-on: windows-latest
@@ -136,6 +166,7 @@ jobs:
     needs:
       - build-linux-x86
       - build-linux-arm
+      - build-macos
       - build-windows
     runs-on: ubuntu-latest
     steps:
@@ -167,6 +198,8 @@ jobs:
           VERSION="${TAG#v}"
           SHA_X86=$(sha256sum wshm-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')
           SHA_ARM=$(sha256sum wshm-aarch64-unknown-linux-gnu.tar.gz | awk '{print $1}')
+          SHA_MAC_ARM=$(sha256sum wshm-aarch64-apple-darwin.tar.gz | awk '{print $1}')
+          SHA_MAC_X86=$(sha256sum wshm-x86_64-apple-darwin.tar.gz | awk '{print $1}')
 
           cat > wshm.rb << 'FORMULA'
           class Wshm < Formula
@@ -174,6 +207,17 @@ jobs:
             homepage "https://wshm.dev"
             version "VERSION_PLACEHOLDER"
             license "SSPL-1.0"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/wshm-dev/wshm/releases/download/TAG_PLACEHOLDER/wshm-aarch64-apple-darwin.tar.gz"
+                sha256 "SHA_MAC_ARM_PLACEHOLDER"
+              end
+              on_intel do
+                url "https://github.com/wshm-dev/wshm/releases/download/TAG_PLACEHOLDER/wshm-x86_64-apple-darwin.tar.gz"
+                sha256 "SHA_MAC_X86_PLACEHOLDER"
+              end
+            end
 
             on_linux do
               on_intel do
@@ -197,6 +241,8 @@ jobs:
           FORMULA
           sed -i "s/VERSION_PLACEHOLDER/$VERSION/g" wshm.rb
           sed -i "s/TAG_PLACEHOLDER/$TAG/g" wshm.rb
+          sed -i "s/SHA_MAC_ARM_PLACEHOLDER/$SHA_MAC_ARM/g" wshm.rb
+          sed -i "s/SHA_MAC_X86_PLACEHOLDER/$SHA_MAC_X86/g" wshm.rb
           sed -i "s/SHA_X86_PLACEHOLDER/$SHA_X86/g" wshm.rb
           sed -i "s/SHA_ARM_PLACEHOLDER/$SHA_ARM/g" wshm.rb
           sed -i 's/^          //' wshm.rb
