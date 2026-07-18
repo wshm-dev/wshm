@@ -8,9 +8,6 @@ pub mod hashicorp;
 #[cfg(feature = "vault-aws")]
 pub mod aws;
 
-#[cfg(feature = "vault-azure")]
-pub mod azure;
-
 #[cfg(feature = "vault-gcp")]
 pub mod gcp;
 
@@ -27,8 +24,8 @@ pub trait VaultResolver: Send + Sync {
 /// Build a VaultResolver from config. Returns None if vault is not configured,
 /// feature not enabled, or Pro license missing.
 ///
-/// Vault integration (HashiCorp, AWS Secrets Manager, Azure Key Vault, GCP
-/// Secret Manager) is a wshm Pro feature. Without a license, vault() placeholders
+/// Vault integration (HashiCorp, AWS Secrets Manager, GCP Secret Manager)
+/// is a wshm Pro feature. Without a license, vault() placeholders
 /// in config files are left unresolved and an error is logged.
 pub fn build_resolver(
     config: &crate::config::VaultConfig,
@@ -48,9 +45,6 @@ pub fn build_resolver(
 
         #[cfg(feature = "vault-aws")]
         "aws" => Ok(Some(Box::new(aws::AwsSecretsManager::new()?))),
-
-        #[cfg(feature = "vault-azure")]
-        "azure" => Ok(Some(Box::new(azure::AzureKeyVault::new(config)?))),
 
         #[cfg(feature = "vault-gcp")]
         "gcp" => Ok(Some(Box::new(gcp::GcpSecretManager::new()?))),

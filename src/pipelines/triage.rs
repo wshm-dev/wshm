@@ -7,8 +7,8 @@ use crate::ai::prompts::issue_classify;
 use crate::ai::schemas::IssueClassification;
 use crate::cli::TriageArgs;
 use crate::config::Config;
+use crate::db::backend::DatabaseBackend;
 use crate::db::issues::Issue;
-use crate::db::Database;
 use crate::export::{EventKind, ExportEvent, ExportManager};
 use crate::github::Client as GhClient;
 use crate::pro_hooks;
@@ -31,11 +31,28 @@ pub enum OutputFormat {
 
 pub async fn run(
     config: &Config,
-    db: &Database,
+    db: &dyn DatabaseBackend,
     gh: &GhClient,
     args: &TriageArgs,
     format: OutputFormat,
     exporter: Option<&ExportManager>,
+) -> Result<()> {
+    run_with_filters(config, db, gh, args, format, exporter, None).await
+}
+
+/// Same as [`run`], but applies per-action filters (skip authors / skip
+/// labels / age) to each issue before spending AI credits. The scheduled
+/// batch passes `Some(&features.filters)` so it honors the same gates the
+/// webhook path already enforces; manual/CLI callers pass `None`.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_filters(
+    config: &Config,
+    db: &dyn DatabaseBackend,
+    gh: &GhClient,
+    args: &TriageArgs,
+    format: OutputFormat,
+    exporter: Option<&ExportManager>,
+    filters: Option<&crate::config::RepoFilters>,
 ) -> Result<()> {
     let json = format == OutputFormat::Json;
     let model = config.model_for("triage");
@@ -80,9 +97,33 @@ pub async fn run(
         }
         issues
     } else {
-        // Get issues needing triage (never triaged OR content changed)
-        // Process in batches of 20 to avoid overwhelming the LLM API
-        db.get_issues_needing_triage(20)?
+        // Safety net: before counting "needs triage", reconstruct stub
+        // rows for any open issue that already carries wshm-managed
+        // labels on the forge but has no local triage_results row. Stops
+        // a wiped state.db / fresh install / storage migration from
+        // re-burning LLM credits on issues that are visibly already triaged.
+        let prefixes = managed_label_prefixes_from(filters);
+        if !prefixes.is_empty() {
+            let grace = managed_label_grace_hours_from(filters);
+            match db.seed_triage_stubs_from_labels(&prefixes, grace) {
+                Ok(0) => {}
+                Ok(n) => info!(
+                    "Seeded {n} triage stub(s) from existing forge labels (skipping LLM for already-triaged issues)"
+                ),
+                Err(e) => tracing::warn!(
+                    "Failed to seed triage stubs from labels: {e}; continuing without safety net"
+                ),
+            }
+        }
+
+        // Get issues needing triage (never triaged OR content changed OR
+        // carrying a force-relabel marker OR zero-label + stale).
+        // Process in batches of 20 to avoid overwhelming the LLM API.
+        db.get_issues_needing_triage(
+            20,
+            &relabel_labels_from(filters),
+            no_labels_min_age_from(filters),
+        )?
     };
 
     if issues.is_empty() {
@@ -113,6 +154,31 @@ pub async fn run(
             continue;
         }
 
+        // Apply per-action filters before consuming AI credits, so the
+        // scheduled batch honors the same gates as the webhook path (e.g. a
+        // `triage_skip_labels` marker means "never (re-)triage this issue").
+        if let Some(f) = filters {
+            if f.is_author_skipped(issue.author.as_deref()) {
+                info!(
+                    "Skipping issue #{} (author '{}' in skip_authors)",
+                    issue.number,
+                    issue.author.as_deref().unwrap_or("?")
+                );
+                continue;
+            }
+            if !f.issue_labels_pass_triage(&issue.labels) {
+                info!("Skipping issue #{} (labels filter)", issue.number);
+                continue;
+            }
+            if !f.issue_age_ok(&issue.created_at) {
+                info!(
+                    "Skipping issue #{} (older than {} days)",
+                    issue.number, f.triage_max_age_days
+                );
+                continue;
+            }
+        }
+
         info!("Triaging issue #{}: {}", issue.number, issue.title);
         match triage_issue(
             config,
@@ -131,6 +197,41 @@ pub async fn run(
                 if !json {
                     print_classification(issue, &classification, args.apply);
                 }
+                // After a successful applied triage, strip the force-relabel
+                // markers so the next batch doesn't re-trigger on this issue
+                // forever.
+                if args.apply {
+                    let relabel = relabel_labels_from(filters);
+                    if !relabel.is_empty() {
+                        let to_strip: Vec<String> = issue
+                            .labels
+                            .iter()
+                            .filter(|l| relabel.iter().any(|r| r.eq_ignore_ascii_case(l)))
+                            .cloned()
+                            .collect();
+                        for label in &to_strip {
+                            if let Err(e) = gh.remove_label(issue.number, label).await {
+                                tracing::warn!(
+                                    "Failed to remove relabel marker '{label}' from #{}: {e}",
+                                    issue.number
+                                );
+                            } else {
+                                info!(
+                                    "Removed relabel marker '{label}' from issue #{}",
+                                    issue.number
+                                );
+                            }
+                        }
+                        if !to_strip.is_empty() {
+                            if let Err(e) = db.merge_issue_labels(issue.number, &[], &to_strip) {
+                                tracing::warn!(
+                                    "Failed to update local labels for #{} after relabel cleanup: {e}",
+                                    issue.number
+                                );
+                            }
+                        }
+                    }
+                }
                 results.push(TriageOutput {
                     issue_number: issue.number,
                     title: issue.title.clone(),
@@ -140,6 +241,16 @@ pub async fn run(
             }
             Err(e) => {
                 tracing::error!("Failed to triage issue #{}: {e:#}", issue.number);
+                // The AI provider is rate limited — every remaining issue in
+                // this batch will fail identically, so stop instead of burning
+                // a failed request per issue every cycle.
+                if crate::pipelines::is_usage_limit_error(&e) {
+                    tracing::warn!(
+                        "Aborting triage batch — AI usage limit reached ({} issues left)",
+                        issues.len() - results.len()
+                    );
+                    break;
+                }
             }
         }
     }
@@ -174,11 +285,35 @@ pub async fn run(
     Ok(())
 }
 
+fn relabel_labels_from(filters: Option<&crate::config::RepoFilters>) -> Vec<String> {
+    filters
+        .map(|f| f.triage_relabel_labels.clone())
+        .unwrap_or_default()
+}
+
+fn no_labels_min_age_from(filters: Option<&crate::config::RepoFilters>) -> u32 {
+    filters
+        .map(|f| f.triage_no_labels_min_age_hours)
+        .unwrap_or(0)
+}
+
+fn managed_label_prefixes_from(filters: Option<&crate::config::RepoFilters>) -> Vec<String> {
+    filters
+        .map(|f| f.triage_managed_label_prefixes.clone())
+        .unwrap_or_default()
+}
+
+fn managed_label_grace_hours_from(filters: Option<&crate::config::RepoFilters>) -> u32 {
+    filters
+        .map(|f| f.triage_managed_label_grace_hours)
+        .unwrap_or(0)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn triage_issue(
     config: &Config,
     ai: &AiBackend,
-    db: &Database,
+    db: &dyn DatabaseBackend,
     gh: &GhClient,
     issue: &Issue,
     existing_issues: &[Issue],
@@ -187,8 +322,7 @@ async fn triage_issue(
     exporter: Option<&ExportManager>,
 ) -> Result<IssueClassification> {
     // Content hash cache: skip LLM call if content hasn't changed since last triage
-    let content_hash =
-        crate::db::schema::compute_issue_hash(&issue.title, issue.body.as_deref(), &issue.labels);
+    let content_hash = crate::db::schema::compute_issue_hash(&issue.title, issue.body.as_deref());
 
     if let Ok(Some(existing)) = db.get_triage_result(issue.number) {
         if existing.content_hash.as_deref() == Some(content_hash.as_str()) {
@@ -196,13 +330,17 @@ async fn triage_issue(
                 "Skipping LLM for issue #{} — content unchanged (hash match)",
                 issue.number
             );
-            // Reconstruct IssueClassification from cached row
+            // Reconstruct IssueClassification from the cached row. The labels
+            // wshm applied are persisted as suggested_labels, so restore them
+            // for faithful --json/--csv output (we still won't re-apply on a
+            // cache hit — they are already on the issue).
+            let suggested_labels = db.get_wshm_applied_labels(issue.number).unwrap_or_default();
             return Ok(IssueClassification {
                 category: existing.category,
                 confidence: existing.confidence,
                 priority: existing.priority,
                 summary: existing.summary.unwrap_or_default(),
-                suggested_labels: Vec::new(), // not stored in row, but we won't re-apply
+                suggested_labels,
                 is_duplicate_of: None,
                 is_simple_fix: existing.is_simple_fix,
                 relevant_files: Vec::new(),
@@ -241,6 +379,12 @@ async fn triage_issue(
         .unwrap_or(issue_classify::SYSTEM);
 
     let classification: IssueClassification = ai.complete(system_prompt, &user_prompt).await?;
+
+    // Account for the LLM call so the Pro usage dashboard reflects
+    // real spend (vs cache-hit triages above that never reach here).
+    // Errors here are advisory — never fail the pipeline because
+    // accounting failed.
+    let _ = db.record_llm_invocation("triage", None);
 
     // Only persist triage result and ICM context when applying
     if apply {

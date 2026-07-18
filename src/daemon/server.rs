@@ -31,7 +31,7 @@ pub async fn run(
     tls: Option<(String, String)>,
 ) -> Result<()> {
     if secret.is_none() {
-        warn!("No webhook secret configured — webhook endpoint is unauthenticated! Set WSHM_WEBHOOK_SECRET or [daemon].webhook_secret");
+        warn!("No webhook secret configured — /webhook will reject deliveries with 503. Set WSHM_WEBHOOK_SECRET or [daemon].webhook_secret (or WSHM_ALLOW_UNSIGNED_WEBHOOKS=1 to opt in to an unauthenticated endpoint).");
     }
 
     let slug = daemon.config.repo_slug();
@@ -45,6 +45,11 @@ pub async fn run(
     let webhook_routes = Router::new()
         .route("/webhook", post(handle_webhook))
         .route("/health", get(handle_health))
+        // Raise the body limit from axum's implicit 2MB default to the
+        // 25MB GitHub maximum so legitimate large deliveries reach the
+        // explicit size check in validate_webhook instead of being
+        // silently rejected with a 413.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_WEBHOOK_SIZE))
         .with_state(state);
 
     // Build a single-repo MultiDaemonState for the web UI (no dynamic
@@ -57,20 +62,20 @@ pub async fn run(
     // daemon also has a working RBAC + login flow out of the box. Same logic
     // as run_multi_with_extensions; kept here too because daemon::run takes
     // a different code path.
-    let users = match crate::auth::UserStore::open(
+    let users: Option<Arc<dyn crate::auth::UserStoreBackend>> = match crate::auth::UserStore::open(
         &dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(".wshm")
             .join("users.db"),
     ) {
-        Ok(store) => Some(Arc::new(store)),
+        Ok(store) => Some(Arc::new(store) as Arc<dyn crate::auth::UserStoreBackend>),
         Err(e) => {
             warn!("Failed to open users db: {e} — login disabled");
             None
         }
     };
     if let Some(store) = users.as_ref() {
-        if let Err(e) = crate::auth::seed_admin_if_empty(store).await {
+        if let Err(e) = crate::auth::seed_admin_if_empty(store.as_ref()).await {
             warn!("Failed to seed admin user: {e}");
         }
     }
@@ -123,6 +128,39 @@ async fn handle_webhook(
             Ok(v) => v,
             Err(resp) => return resp,
         };
+
+    // Replay protection: dedupe on the forge delivery UUID within REPLAY_TTL.
+    // GitHub sends it in x-github-delivery; Gitea/Forgejo (used by wshm-pro)
+    // send it in x-gitea-delivery / x-forgejo-delivery. Consult all three so
+    // dedup is not silently bypassed on a non-GitHub forge. Without this, a
+    // captured signed payload verifies forever and can be replayed to
+    // re-trigger issue/PR processing (auto-fix runs, comment posting, LLM spend).
+    let delivery_id = headers
+        .get("x-github-delivery")
+        .or_else(|| headers.get("x-gitea-delivery"))
+        .or_else(|| headers.get("x-forgejo-delivery"))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // When a webhook secret is configured the HMAC already proved authenticity,
+    // so a delivery with no id is almost certainly a forged/malformed replay:
+    // reject it rather than letting it bypass dedup. Without a secret we keep
+    // the lenient behaviour for older senders that omit the header.
+    if delivery_id.is_empty() && state.secret.is_some() {
+        warn!("Rejecting webhook with no delivery id while a secret is configured");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "missing delivery id"})),
+        )
+            .into_response();
+    }
+    if check_replay(delivery_id).is_err() {
+        info!("Duplicate webhook delivery ignored: {delivery_id}");
+        return (
+            StatusCode::OK,
+            Json(json!({"status": "duplicate", "delivery_id": delivery_id})),
+        )
+            .into_response();
+    }
 
     // Filter: only process relevant events
     if !should_process_event(&event_type, &action) {
@@ -219,11 +257,14 @@ pub async fn run_multi(
     let webhook_routes = Router::new()
         .route("/webhook", post(handle_webhook_multi))
         .route("/health", get(handle_health_multi))
+        // See run(): raise the body limit to the 25MB GitHub maximum so the
+        // explicit size check in validate_webhook is the enforced bound.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_WEBHOOK_SIZE))
         .with_state(state);
 
     // Seed admin user if a UserStore is provided and the table is empty.
     if let Some(store) = extensions.users.as_ref() {
-        if let Err(e) = crate::auth::seed_admin_if_empty(store).await {
+        if let Err(e) = crate::auth::seed_admin_if_empty(store.as_ref()).await {
             warn!("Failed to seed admin user: {e}");
         }
     }
@@ -259,8 +300,18 @@ pub async fn run_multi(
 }
 
 async fn handle_health_multi(State(state): State<Arc<MultiServerState>>) -> impl IntoResponse {
-    let repos_guard = state.multi.repos.read().await;
-    let repos: Vec<Value> = repos_guard
+    // Snapshot the repo map (cloning the Arc<DaemonState> handles) and drop the
+    // read guard BEFORE running the per-repo blocking DB queries. Holding the
+    // guard across a slow/contended pending_event_count() would block
+    // repos.write() (dynamic repo add/remove, config reload) for the whole scan.
+    let snapshot: Vec<(String, Arc<DaemonState>)> = {
+        let repos_guard = state.multi.repos.read().await;
+        repos_guard
+            .iter()
+            .map(|(slug, ds)| (slug.clone(), Arc::clone(ds)))
+            .collect()
+    };
+    let repos: Vec<Value> = snapshot
         .iter()
         .map(|(slug, ds)| {
             let pending = ds.db.pending_event_count().unwrap_or_else(|e| {
@@ -281,8 +332,9 @@ async fn handle_health_multi(State(state): State<Arc<MultiServerState>>) -> impl
     }))
 }
 
-/// In-memory replay cache for inbound webhooks. Keyed on the GitHub
-/// `x-github-delivery` UUID; values are the timestamp the delivery was
+/// In-memory replay cache for inbound webhooks. Keyed on the forge delivery
+/// UUID (`x-github-delivery` / `x-gitea-delivery` / `x-forgejo-delivery`);
+/// values are the timestamp the delivery was
 /// first seen. Entries older than `REPLAY_TTL` are pruned lazily and the
 /// map is capped at `REPLAY_MAX` to bound memory.
 ///
@@ -297,16 +349,20 @@ const REPLAY_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 *
 const REPLAY_MAX: usize = 10_000;
 
 /// Returns Ok(()) when the delivery is fresh, Err(()) when it's a
-/// duplicate. Empty / missing delivery_id is always allowed (older
-/// senders may not provide it; the HMAC still gates auth).
+/// duplicate. An empty delivery_id is treated as fresh here (the caller
+/// already rejects empty ids when a secret is configured; older
+/// secret-less senders may legitimately omit the header).
 fn check_replay(delivery_id: &str) -> Result<(), ()> {
     if delivery_id.is_empty() {
         return Ok(());
     }
-    let cache = REPLAY_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let Ok(mut map) = cache.lock() else {
-        return Ok(()); // poisoned mutex — fail open
-    };
+    let cache =
+        REPLAY_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    // Recover from a poisoned guard rather than failing open: a panic in a
+    // prior holder must not permanently disable replay dedup. The cache is a
+    // plain map of delivery-id -> timestamp, so a partially-updated map is
+    // still safe to keep using.
+    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
     let now = std::time::Instant::now();
     if let Some(seen_at) = map.get(delivery_id) {
         if now.duration_since(*seen_at) < REPLAY_TTL {
@@ -339,11 +395,28 @@ async fn handle_webhook_multi(
             Err(resp) => return resp,
         };
 
-    // Replay protection: dedupe on x-github-delivery within REPLAY_TTL.
+    // Replay protection: dedupe on the forge delivery UUID within REPLAY_TTL.
+    // GitHub sends it in x-github-delivery; Gitea/Forgejo (used by wshm-pro)
+    // send it in x-gitea-delivery / x-forgejo-delivery. Consult all three so
+    // dedup is not silently bypassed on a non-GitHub forge.
     let delivery_id = headers
         .get("x-github-delivery")
+        .or_else(|| headers.get("x-gitea-delivery"))
+        .or_else(|| headers.get("x-forgejo-delivery"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    // When a webhook secret is configured the HMAC already proved authenticity,
+    // so a delivery with no id is almost certainly a forged/malformed replay:
+    // reject it rather than letting it bypass dedup. Without a secret we keep
+    // the lenient behaviour for older senders that omit the header.
+    if delivery_id.is_empty() && state.secret.is_some() {
+        warn!("Rejecting webhook with no delivery id while a secret is configured");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "missing delivery id"})),
+        )
+            .into_response();
+    }
     if check_replay(delivery_id).is_err() {
         info!("Duplicate webhook delivery ignored: {delivery_id}");
         return (
@@ -467,19 +540,44 @@ fn validate_webhook(
             .into_response());
     }
 
-    // Validate HMAC signature if secret is configured
-    if let Some(secret) = secret {
-        let sig_header = headers
-            .get("x-hub-signature-256")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if !verify_signature(secret, body, sig_header) {
-            warn!("Invalid webhook signature");
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "invalid signature"})),
-            )
-                .into_response());
+    // Validate HMAC signature. Without a configured secret the endpoint
+    // cannot authenticate the sender, so we refuse to process the delivery
+    // rather than silently accepting forged issues/PRs/comments into the
+    // pipeline. Operators who genuinely want an unauthenticated endpoint
+    // must opt in explicitly with WSHM_ALLOW_UNSIGNED_WEBHOOKS=1.
+    match secret {
+        Some(secret) => {
+            let sig_header = headers
+                .get("x-hub-signature-256")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if !verify_signature(secret, body, sig_header) {
+                warn!("Invalid webhook signature");
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "invalid signature"})),
+                )
+                    .into_response());
+            }
+        }
+        None => {
+            let allow_unsigned = std::env::var("WSHM_ALLOW_UNSIGNED_WEBHOOKS")
+                .ok()
+                .filter(|v| v == "1" || v == "true")
+                .is_some();
+            if !allow_unsigned {
+                warn!(
+                    "Rejecting webhook: no secret configured. Set WSHM_WEBHOOK_SECRET / \
+                     [daemon].webhook_secret, or WSHM_ALLOW_UNSIGNED_WEBHOOKS=1 to opt in \
+                     to an unauthenticated endpoint."
+                );
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error": "webhook secret not configured"})),
+                )
+                    .into_response());
+            }
+            warn!("Processing UNSIGNED webhook (WSHM_ALLOW_UNSIGNED_WEBHOOKS opt-in active)");
         }
     }
 

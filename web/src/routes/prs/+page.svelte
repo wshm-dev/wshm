@@ -22,6 +22,9 @@
 
 	let pulls: PullRequest[] = $state([]);
 	let error: string | null = $state(null);
+	// True until the first fetch settles - stops the empty-state text from
+	// flashing "No results" while the list is still loading.
+	let loading = $state(true);
 	let sortColumns: SortColumn[] = $state([{ key: 'risk_level', asc: true }, { key: 'age', asc: false }]);
 	let filters: Record<string, string> = $state({
 		number: '', title: '', state: '', base_ref: '', risk: '', ci_status: '', conflicts: '', age: ''
@@ -46,7 +49,7 @@
 	let enriched = $derived(pulls.map(p => ({
 		...p,
 		age: ageDays(p.created_at),
-		conflicts: p.mergeable === false ? 'yes' : 'no'
+		conflicts: p.mergeable === false ? 'yes' : (p.mergeable === true ? 'no' : 'unknown')
 	})));
 
 	let filtered = $derived(applyFilters(enriched, {
@@ -84,6 +87,8 @@
 		} catch (e) {
 			if (myToken !== loadToken) return;
 			error = e instanceof Error ? e.message : 'Failed to load pull requests';
+		} finally {
+			if (myToken === loadToken) loading = false;
 		}
 	}
 
@@ -198,17 +203,22 @@
 							{/if}
 						</TableBodyCell>
 						<TableBodyCell class="px-2 py-1.5">
+							<!-- Only the actionable state gets color: a red badge for real
+							     conflicts. "no" is the normal case (plain text) and unknown
+							     mergeability is "-" instead of a misleading green "no". -->
 							{#if pr.mergeable === false}
 								<Badge color="red">yes</Badge>
+							{:else if pr.mergeable === true}
+								<span class="text-gray-500 text-xs">no</span>
 							{:else}
-								<Badge color="green">no</Badge>
+								<span class="text-gray-500">-</span>
 							{/if}
 						</TableBodyCell>
 						<TableBodyCell class="px-2 py-1.5 text-gray-500 mono">{timeAgo(pr.created_at)}</TableBodyCell>
 					</TableBodyRow>
 				{:else}
 					<TableBodyRow>
-						<TableBodyCell colspan={7} class="text-center text-gray-600 py-8">No pull requests found</TableBodyCell>
+						<TableBodyCell colspan={7} class="text-center text-gray-600 py-8">{loading ? 'Loading…' : 'No pull requests found'}</TableBodyCell>
 					</TableBodyRow>
 				{/each}
 			</TableBody>

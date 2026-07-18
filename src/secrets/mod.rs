@@ -80,6 +80,7 @@ impl Scope {
             Scope::Repo => "repo",
         }
     }
+    #[allow(clippy::should_implement_trait)] // returns anyhow::Result, not std FromStr's Err shape
     pub fn from_str(s: &str) -> Result<Self> {
         match s {
             "global" => Ok(Scope::Global),

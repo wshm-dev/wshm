@@ -95,6 +95,10 @@ export interface PullRequest {
 	mergeable: boolean | null;
 	created_at: string;
 	updated_at: string;
+	/** GitHub review decision: "approved" | "changes_requested" | "review_required" | null. */
+	review_decision?: string | null;
+	/** When the current review decision was first observed (RFC3339). */
+	review_decision_at?: string | null;
 }
 
 export interface TriageResult {
@@ -109,13 +113,14 @@ export interface TriageResult {
 
 export interface QueueEntry {
 	repo: string;
-	pr_number: number;
+	number: number;
 	title: string;
 	score: number;
-	ci_passing: boolean;
-	approvals: number;
-	has_conflicts: boolean;
-	risk: string | null;
+	ci_status: string | null;
+	mergeable: boolean | null;
+	risk_level: string | null;
+	pr_type: string | null;
+	created_at: string;
 }
 
 export interface ActivityEntry {
@@ -484,6 +489,11 @@ export interface RepoFeatures {
 	auto_pr: boolean;
 	auto_merge: boolean;
 	filters: RepoFilters;
+	/// Master apply-mode toggle. `true` posts to GitHub; `false` is
+	/// DRY-RUN (compute results visible in the dashboard, no writes).
+	/// Lives on `RepoEntry`, surfaced through the same endpoint for
+	/// UI symmetry. Server may include or omit it depending on version.
+	apply?: boolean;
 }
 
 export async function fetchRepoFeatures(slug: string): Promise<RepoFeatures> {
@@ -495,6 +505,35 @@ export async function updateRepoFeatures(
 	patch: Partial<RepoFeatures>
 ): Promise<RepoFeatures> {
 	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/features`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json', ...CSRF_HEADERS },
+		body: JSON.stringify(patch)
+	});
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.error ?? `HTTP ${res.status}`);
+	}
+	return res.json();
+}
+
+/// HTTP retry policy, shared by every outbound call (poller, git
+/// providers, AI, self-update). Editable from Settings -> Reliability;
+/// changes apply live without a daemon restart.
+export interface RetrySettings {
+	enabled: boolean;
+	max_attempts: number;
+	initial_backoff_ms: number;
+	max_backoff_ms: number;
+}
+
+export function fetchRetrySettings(): Promise<RetrySettings> {
+	return apiGet<RetrySettings>('/config/retry');
+}
+
+export async function updateRetrySettings(
+	patch: Partial<RetrySettings>
+): Promise<RetrySettings> {
+	const res = await fetch('/api/v1/config/retry', {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json', ...CSRF_HEADERS },
 		body: JSON.stringify(patch)

@@ -20,8 +20,10 @@
   "type": "module",
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
+    "dompurify": "^3.4.11",
     "flowbite": "^4.0.1",
     "flowbite-svelte": "^1.33.0",
+    "marked": "^18.0.5",
     "tailwindcss": "^4.2.2"
   }
 }

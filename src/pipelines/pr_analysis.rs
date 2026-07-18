@@ -7,8 +7,8 @@ use crate::ai::prompts::pr_analyze;
 use crate::ai::schemas::PrAnalysis;
 use crate::cli::PrArgs;
 use crate::config::Config;
-use crate::db::pulls::PullRequest;
-use crate::db::Database;
+use crate::db::backend::DatabaseBackend;
+use crate::db::pulls::{PrAnalysisRow, PullRequest};
 use crate::export::{EventKind, ExportEvent, ExportManager};
 use crate::github::Client as GhClient;
 
@@ -22,7 +22,7 @@ struct PrAnalysisOutput {
 
 pub async fn run(
     config: &Config,
-    db: &Database,
+    db: &dyn DatabaseBackend,
     gh: &GhClient,
     args: &PrArgs,
     json: bool,
@@ -44,7 +44,7 @@ pub async fn run(
             }
         }
     } else {
-        db.get_unanalyzed_pulls()?
+        db.get_pulls_needing_analysis()?
     };
 
     if pulls.is_empty() {
@@ -79,6 +79,16 @@ pub async fn run(
             }
             Err(e) => {
                 tracing::error!("Failed to analyze PR #{}: {e:#}", pr.number);
+                // The AI provider is rate limited — every remaining PR in this
+                // batch will fail identically, so stop instead of burning a
+                // failed request per PR every cycle.
+                if crate::pipelines::is_usage_limit_error(&e) {
+                    tracing::warn!(
+                        "Aborting PR analysis batch — AI usage limit reached ({} PRs left)",
+                        pulls.len() - results.len()
+                    );
+                    break;
+                }
             }
         }
     }
@@ -93,12 +103,48 @@ pub async fn run(
 async fn analyze_pr(
     config: &Config,
     ai: &AiBackend,
-    db: &Database,
+    db: &dyn DatabaseBackend,
     gh: &GhClient,
     pr: &PullRequest,
     apply: bool,
     exporter: Option<&ExportManager>,
 ) -> Result<PrAnalysis> {
+    // Content hash cache: skip LLM call if content hasn't changed since last
+    // analysis. The hash covers title + body + head_sha + labels, so a new
+    // push (head_sha change) or an edit re-triggers analysis, but a no-op
+    // event (e.g. assignee change) reuses the cached result.
+    let content_hash = crate::db::schema::compute_pr_hash(
+        &pr.title,
+        pr.body.as_deref(),
+        pr.head_sha.as_deref(),
+        &pr.labels,
+    );
+
+    if let Ok(Some(existing)) = db.get_pr_analysis(pr.number) {
+        if existing.content_hash.as_deref() == Some(content_hash.as_str()) {
+            tracing::info!(
+                "Skipping LLM for PR #{} — content unchanged (hash match)",
+                pr.number
+            );
+            // Reconstruct PrAnalysis from the cached row. suggested_labels and
+            // linked_issues were applied at first analysis and are not stored,
+            // so they stay empty (we won't re-apply on a cache hit).
+            let review_checklist = existing
+                .review_notes
+                .as_deref()
+                .and_then(|n| serde_json::from_str(n).ok())
+                .unwrap_or_default();
+            return Ok(PrAnalysis {
+                summary: existing.summary,
+                risk_level: existing.risk_level,
+                pr_type: existing.pr_type,
+                linked_issues: Vec::new(),
+                review_checklist,
+                suggested_labels: Vec::new(),
+            });
+        }
+    }
+
     // Try to fetch diff (best-effort)
     let diff = match gh.fetch_pr_diff(pr.number).await {
         Ok(d) => Some(d),
@@ -136,28 +182,19 @@ async fn analyze_pr(
 
     let analysis: PrAnalysis = ai.complete(system_prompt, &user_prompt).await?;
 
+    // Account for the LLM call — advisory, never fail the pipeline.
+    let _ = db.record_llm_invocation("pr_analysis", None);
+
     // Store in DB
     let now = chrono::Utc::now().to_rfc3339();
-    db.with_conn(|conn| {
-        conn.execute(
-            "INSERT INTO pr_analyses (pr_number, summary, risk_level, pr_type, review_notes, analyzed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(pr_number) DO UPDATE SET
-                summary = excluded.summary,
-                risk_level = excluded.risk_level,
-                pr_type = excluded.pr_type,
-                review_notes = excluded.review_notes,
-                analyzed_at = excluded.analyzed_at",
-            rusqlite::params![
-                pr.number,
-                analysis.summary,
-                analysis.risk_level,
-                analysis.pr_type,
-                serde_json::to_string(&analysis.review_checklist)?,
-                now,
-            ],
-        )?;
-        Ok(())
+    db.upsert_pr_analysis(&PrAnalysisRow {
+        pr_number: pr.number,
+        summary: analysis.summary.clone(),
+        risk_level: analysis.risk_level.clone(),
+        pr_type: analysis.pr_type.clone(),
+        review_notes: Some(serde_json::to_string(&analysis.review_checklist)?),
+        analyzed_at: now,
+        content_hash: Some(content_hash),
     })?;
 
     // ICM: store PR analysis for future context

@@ -1437,12 +1437,11 @@ fn draw_triage(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(11),
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(Block::default().borders(Borders::ALL).title(format!(
-            " Triage Results ({} total) ",
-            app.triage_all.len()
-        )));
+    let table = Table::new(rows, widths).header(header).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Triage Results ({} total) ", app.triage_all.len())),
+    );
     f.render_widget(table, area);
 }
 
@@ -1536,13 +1535,12 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
     let lines: Vec<Line> = app.process_logs[start..end]
         .iter()
         .map(|e| {
-            let time = e
-                .at
-                .split('T')
-                .nth(1)
-                .and_then(|s| s.split('.').next())
-                .unwrap_or(&e.at)
-                .to_string();
+            let time =
+                e.at.split('T')
+                    .nth(1)
+                    .and_then(|s| s.split('.').next())
+                    .unwrap_or(&e.at)
+                    .to_string();
             Line::from(vec![
                 Span::styled(time, Style::default().fg(Color::DarkGray)),
                 Span::raw(" "),

@@ -54,77 +54,92 @@ impl GiteaProvider {
 
     async fn get(&self, path: &str) -> Result<serde_json::Value> {
         let url = self.api_url(path);
-        let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", format!("token {}", self.token))
-            .send()
-            .await
-            .with_context(|| format!("Gitea GET {path}"))?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!(
-                "Gitea API error ({status}): {}",
-                &text[..text.len().min(200)]
-            );
-        }
-        Ok(serde_json::from_str(&text)?)
+        crate::retry::with_retry("Gitea GET", || async {
+            let resp = self
+                .http
+                .get(&url)
+                .header("Authorization", format!("token {}", self.token))
+                .send()
+                .await
+                .with_context(|| format!("Gitea GET {path}"))?;
+            let status = resp.status();
+            let text = resp.text().await?;
+            if !status.is_success() {
+                anyhow::bail!(
+                    "Gitea API error ({status}): {}",
+                    &text[..text.len().min(200)]
+                );
+            }
+            Ok(serde_json::from_str(&text)?)
+        })
+        .await
     }
 
     async fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
         let url = self.api_url(path);
-        let resp = self
-            .http
-            .post(&url)
-            .header("Authorization", format!("token {}", self.token))
-            .json(body)
-            .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!(
-                "Gitea API error ({status}): {}",
-                &text[..text.len().min(200)]
-            );
-        }
-        Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+        // Connect-only retry: POST creates non-idempotent resources (issue
+        // comments, reviews). A response-body EOF after the server already
+        // created the comment must NOT be retried, or it is duplicated.
+        crate::retry::with_retry_connect_only("Gitea POST", || async {
+            let resp = self
+                .http
+                .post(&url)
+                .header("Authorization", format!("token {}", self.token))
+                .json(body)
+                .send()
+                .await?;
+            let status = resp.status();
+            let text = resp.text().await?;
+            if !status.is_success() {
+                anyhow::bail!(
+                    "Gitea API error ({status}): {}",
+                    &text[..text.len().min(200)]
+                );
+            }
+            Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+        })
+        .await
     }
 
     async fn patch(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
         let url = self.api_url(path);
-        let resp = self
-            .http
-            .patch(&url)
-            .header("Authorization", format!("token {}", self.token))
-            .json(body)
-            .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!(
-                "Gitea API error ({status}): {}",
-                &text[..text.len().min(200)]
-            );
-        }
-        Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+        crate::retry::with_retry("Gitea PATCH", || async {
+            let resp = self
+                .http
+                .patch(&url)
+                .header("Authorization", format!("token {}", self.token))
+                .json(body)
+                .send()
+                .await?;
+            let status = resp.status();
+            let text = resp.text().await?;
+            if !status.is_success() {
+                anyhow::bail!(
+                    "Gitea API error ({status}): {}",
+                    &text[..text.len().min(200)]
+                );
+            }
+            Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+        })
+        .await
     }
 
     async fn delete_req(&self, path: &str) -> Result<()> {
         let url = self.api_url(path);
-        let resp = self
-            .http
-            .delete(&url)
-            .header("Authorization", format!("token {}", self.token))
-            .send()
-            .await?;
-        if !resp.status().is_success() && resp.status().as_u16() != 404 {
-            let text = resp.text().await?;
-            anyhow::bail!("Gitea DELETE error: {}", &text[..text.len().min(200)]);
-        }
-        Ok(())
+        crate::retry::with_retry("Gitea DELETE", || async {
+            let resp = self
+                .http
+                .delete(&url)
+                .header("Authorization", format!("token {}", self.token))
+                .send()
+                .await?;
+            if !resp.status().is_success() && resp.status().as_u16() != 404 {
+                let text = resp.text().await?;
+                anyhow::bail!("Gitea DELETE error: {}", &text[..text.len().min(200)]);
+            }
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -287,6 +302,9 @@ impl GitProvider for GiteaProvider {
                 ci_status: None,
                 created_at: pr["created_at"].as_str().unwrap_or("").to_string(),
                 updated_at: pr["updated_at"].as_str().unwrap_or("").to_string(),
+                // Populated by the dedicated review-decision sync pass, not here.
+                review_decision: None,
+                review_decision_at: None,
             })
             .collect())
     }

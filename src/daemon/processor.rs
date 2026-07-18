@@ -196,9 +196,19 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
             info!("Skipping blacklisted issue #{n}");
             return Ok(());
         }
-        if let Ok(true) = state.db.is_triaged(n) {
-            info!("Issue #{n} already triaged, skipping");
-            return Ok(());
+        match state.db.is_triaged(n) {
+            Ok(true) => {
+                info!("Issue #{n} already triaged, skipping");
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(e) => {
+                // A transient DB/IO error must NOT fall through to a
+                // re-triage: that would burn AI credits on every error.
+                // Treat an unknown triage state as already-triaged (skip).
+                warn!("is_triaged check failed for #{n}, skipping to avoid re-triage: {e:#}");
+                return Ok(());
+            }
         }
     }
 
@@ -211,7 +221,32 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
         return Ok(());
     }
     // Force sync issues (bypass throttle — we know there's a new event)
-    gh_sync::sync_issues_now(&state.gh(), &state.db).await?;
+    gh_sync::sync_issues_now(&state.gh(), state.db.as_ref()).await?;
+
+    // The list endpoint lags issue creation by a few seconds (replicated
+    // index), so a sync right after `issues.opened` can miss the brand-new
+    // issue, which then surfaces as "Issue #N not found in cache" at triage.
+    // Fetch it directly from the canonical single-issue endpoint to guarantee
+    // it is cached before we triage.
+    if let Some(n) = number {
+        if matches!(state.db.get_issue(n), Ok(None)) {
+            match state.gh().fetch_issue(n).await {
+                Ok(Some(issue)) => {
+                    if let Err(e) = state.db.upsert_issue(&issue) {
+                        warn!("Failed to cache issue #{n} after direct fetch: {e}");
+                    }
+                }
+                Ok(None) => {
+                    info!(
+                        "[{}] issue #{n} not returned by GitHub (deleted, transferred, or a PR) — skipping",
+                        state.config.repo_slug()
+                    );
+                    return Ok(());
+                }
+                Err(e) => warn!("Direct fetch of issue #{n} failed: {e:#}"),
+            }
+        }
+    }
 
     if !features.triage_issues {
         info!(
@@ -251,17 +286,17 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
     }
 
     // Run triage pipeline. `apply` controls whether wshm posts a triage
-    // comment on GitHub; we keep the legacy semantic (state.apply) here
+    // comment on GitHub; we keep the legacy semantic (state.apply()) here
     // because triage_issues already gated the AI run itself.
     let args = TriageArgs {
         issue: number,
-        apply: state.apply,
+        apply: state.apply(),
         retriage: false,
     };
 
     pipelines::triage::run(
         &state.config,
-        &state.db,
+        state.db.as_ref(),
         &state.gh(),
         &args,
         pipelines::triage::OutputFormat::Text,
@@ -329,7 +364,31 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
         return Ok(());
     }
     // Force sync pulls (bypass throttle — we know there's a new event)
-    gh_sync::sync_pulls_now(&state.gh(), &state.db).await?;
+    gh_sync::sync_pulls_now(&state.gh(), state.db.as_ref()).await?;
+
+    // The list endpoint lags PR creation by a few seconds (replicated index),
+    // so a sync right after `pull_request.opened` can miss the brand-new PR,
+    // which then surfaces as "PR #N not found in cache" at analysis. Fetch it
+    // directly from the canonical single-PR endpoint to guarantee it is cached.
+    if let Some(n) = number {
+        if matches!(state.db.get_pull(n), Ok(None)) {
+            match state.gh().fetch_pull(n).await {
+                Ok(Some(pr)) => {
+                    if let Err(e) = state.db.upsert_pull(&pr) {
+                        warn!("Failed to cache PR #{n} after direct fetch: {e}");
+                    }
+                }
+                Ok(None) => {
+                    info!(
+                        "[{}] PR #{n} not returned by GitHub (deleted or transferred) — skipping",
+                        state.config.repo_slug()
+                    );
+                    return Ok(());
+                }
+                Err(e) => warn!("Direct fetch of PR #{n} failed: {e:#}"),
+            }
+        }
+    }
 
     if !features.analyze_prs {
         info!(
@@ -367,10 +426,18 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
     // Run PR analysis pipeline
     let args = PrArgs {
         pr: number,
-        apply: state.apply,
+        apply: state.apply(),
     };
 
-    pipelines::pr_analysis::run(&state.config, &state.db, &state.gh(), &args, false, None).await?;
+    pipelines::pr_analysis::run(
+        &state.config,
+        state.db.as_ref(),
+        &state.gh(),
+        &args,
+        false,
+        None,
+    )
+    .await?;
 
     // Store in ICM if enabled
     if state.config.daemon.icm_enabled {
@@ -445,15 +512,15 @@ async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Re
         number,
         is_pr,
         &state.config,
-        &state.db,
+        state.db.as_ref(),
         &state.gh(),
-        state.apply,
+        state.apply(),
         Some(triggered_by),
     )
     .await?;
 
     // Post response as a comment
-    if state.apply {
+    if state.apply() {
         state.gh().comment_issue(number, &response).await?;
         info!("Posted slash command response on #{number}");
     } else {

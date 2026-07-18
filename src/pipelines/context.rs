@@ -6,15 +6,15 @@
 
 use anyhow::Result;
 
-use crate::db::Database;
+use crate::db::backend::DatabaseBackend;
 
-pub fn run(db: &Database, slug: &str) -> Result<()> {
+pub fn run(db: &dyn DatabaseBackend, slug: &str) -> Result<()> {
     let output = build_context(db, slug)?;
     println!("{output}");
     Ok(())
 }
 
-pub fn build_context(db: &Database, slug: &str) -> Result<String> {
+pub fn build_context(db: &dyn DatabaseBackend, slug: &str) -> Result<String> {
     let mut out = String::with_capacity(8192);
 
     out.push_str(&format!("# {slug} — Repository Context\n\n"));
@@ -27,6 +27,10 @@ pub fn build_context(db: &Database, slug: &str) -> Result<String> {
     let open_issues = db.get_open_issues()?;
     let open_pulls = db.get_open_pulls()?;
     let untriaged = db.get_untriaged_issues()?;
+
+    // Batch-load triage results and PR analyses once to avoid N+1 queries.
+    let triage_map = db.get_all_triage_results().unwrap_or_default();
+    let analyses_map = db.get_all_pr_analyses().unwrap_or_default();
 
     out.push_str("## Overview\n\n");
     out.push_str(&format!(
@@ -61,7 +65,7 @@ pub fn build_context(db: &Database, slug: &str) -> Result<String> {
             ));
 
             // Add triage info if available
-            if let Ok(Some(triage)) = db.get_triage_result(issue.number) {
+            if let Some(triage) = triage_map.get(&issue.number) {
                 out.push_str(&format!(
                     "**Triage:** {} | priority: {} | confidence: {:.0}%\n",
                     triage.category,
@@ -112,7 +116,7 @@ pub fn build_context(db: &Database, slug: &str) -> Result<String> {
             ));
 
             // Add analysis if available
-            if let Ok(Some(analysis)) = db.get_pr_analysis(pr.number) {
+            if let Some(analysis) = analyses_map.get(&pr.number) {
                 out.push_str(&format!(
                     "**Analysis:** {} | risk: {} | type: {}\n",
                     analysis.summary, analysis.risk_level, analysis.pr_type
@@ -164,12 +168,7 @@ pub fn build_context(db: &Database, slug: &str) -> Result<String> {
     // ── Recent triage decisions ──
     let triaged_issues: Vec<_> = open_issues
         .iter()
-        .filter_map(|i| {
-            db.get_triage_result(i.number)
-                .ok()
-                .flatten()
-                .map(|t| (i.number, &i.title, t))
-        })
+        .filter_map(|i| triage_map.get(&i.number).map(|t| (i.number, &i.title, t)))
         .collect();
 
     if !triaged_issues.is_empty() {

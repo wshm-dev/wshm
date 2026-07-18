@@ -50,76 +50,91 @@ impl GitLabProvider {
 
     async fn get(&self, path: &str) -> Result<serde_json::Value> {
         let url = self.api_url(path);
-        let resp = self
-            .http
-            .get(&url)
-            .header("PRIVATE-TOKEN", &self.token)
-            .send()
-            .await
-            .with_context(|| format!("GitLab API GET {path}"))?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!(
-                "GitLab API error ({status}): {}",
-                &text[..text.len().min(200)]
-            );
-        }
-        Ok(serde_json::from_str(&text)?)
+        crate::retry::with_retry("GitLab GET", || async {
+            let resp = self
+                .http
+                .get(&url)
+                .header("PRIVATE-TOKEN", &self.token)
+                .send()
+                .await
+                .with_context(|| format!("GitLab API GET {path}"))?;
+            let status = resp.status();
+            let text = resp.text().await?;
+            if !status.is_success() {
+                anyhow::bail!(
+                    "GitLab API error ({status}): {}",
+                    &text[..text.len().min(200)]
+                );
+            }
+            Ok(serde_json::from_str(&text)?)
+        })
+        .await
     }
 
     async fn post(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
         let url = self.api_url(path);
-        let resp = self
-            .http
-            .post(&url)
-            .header("PRIVATE-TOKEN", &self.token)
-            .json(body)
-            .send()
-            .await
-            .with_context(|| format!("GitLab API POST {path}"))?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!(
-                "GitLab API error ({status}): {}",
-                &text[..text.len().min(200)]
-            );
-        }
-        Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+        // Connect-only retry: POST creates non-idempotent resources (notes,
+        // discussions). A response-body EOF after the server already created
+        // the note must NOT be retried, or the comment/review is duplicated.
+        crate::retry::with_retry_connect_only("GitLab POST", || async {
+            let resp = self
+                .http
+                .post(&url)
+                .header("PRIVATE-TOKEN", &self.token)
+                .json(body)
+                .send()
+                .await
+                .with_context(|| format!("GitLab API POST {path}"))?;
+            let status = resp.status();
+            let text = resp.text().await?;
+            if !status.is_success() {
+                anyhow::bail!(
+                    "GitLab API error ({status}): {}",
+                    &text[..text.len().min(200)]
+                );
+            }
+            Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+        })
+        .await
     }
 
     async fn put(&self, path: &str, body: &serde_json::Value) -> Result<()> {
         let url = self.api_url(path);
-        let resp = self
-            .http
-            .put(&url)
-            .header("PRIVATE-TOKEN", &self.token)
-            .json(body)
-            .send()
-            .await
-            .with_context(|| format!("GitLab API PUT {path}"))?;
-        if !resp.status().is_success() {
-            let text = resp.text().await?;
-            anyhow::bail!("GitLab API error: {}", &text[..text.len().min(200)]);
-        }
-        Ok(())
+        crate::retry::with_retry("GitLab PUT", || async {
+            let resp = self
+                .http
+                .put(&url)
+                .header("PRIVATE-TOKEN", &self.token)
+                .json(body)
+                .send()
+                .await
+                .with_context(|| format!("GitLab API PUT {path}"))?;
+            if !resp.status().is_success() {
+                let text = resp.text().await?;
+                anyhow::bail!("GitLab API error: {}", &text[..text.len().min(200)]);
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
         let url = self.api_url(path);
-        let resp = self
-            .http
-            .delete(&url)
-            .header("PRIVATE-TOKEN", &self.token)
-            .send()
-            .await?;
-        let status = resp.status();
-        if !status.is_success() && status.as_u16() != 404 {
-            let text = resp.text().await?;
-            anyhow::bail!("GitLab API DELETE error: {}", &text[..text.len().min(200)]);
-        }
-        Ok(())
+        crate::retry::with_retry("GitLab DELETE", || async {
+            let resp = self
+                .http
+                .delete(&url)
+                .header("PRIVATE-TOKEN", &self.token)
+                .send()
+                .await?;
+            let status = resp.status();
+            if !status.is_success() && status.as_u16() != 404 {
+                let text = resp.text().await?;
+                anyhow::bail!("GitLab API DELETE error: {}", &text[..text.len().min(200)]);
+            }
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -302,6 +317,9 @@ impl GitProvider for GitLabProvider {
                 ci_status: mr["head_pipeline"]["status"].as_str().map(String::from),
                 created_at: mr["created_at"].as_str().unwrap_or("").to_string(),
                 updated_at: mr["updated_at"].as_str().unwrap_or("").to_string(),
+                // Populated by the dedicated review-decision sync pass, not here.
+                review_decision: None,
+                review_decision_at: None,
             })
             .collect())
     }

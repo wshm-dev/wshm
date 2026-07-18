@@ -11,9 +11,9 @@ use ratatui::prelude::*;
 use std::io;
 
 use crate::config::Config;
-use crate::db::Database;
+use crate::db::backend::DatabaseBackend;
 
-pub async fn run(config: &Config, db: &Database) -> Result<()> {
+pub async fn run(config: &Config, db: &dyn DatabaseBackend) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -44,7 +44,7 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut app::App,
     config: &Config,
-    db: &Database,
+    db: &dyn DatabaseBackend,
     last_log_refresh: &mut std::time::Instant,
 ) -> Result<()> {
     loop {

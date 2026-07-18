@@ -48,8 +48,40 @@ pub fn extract_linked_issues_with_type(body: &str) -> Vec<(String, u64)> {
         })
         .collect()
 }
+/// Whether an AI backend error is a usage/rate limit (vs. a per-item failure).
+///
+/// When the AI provider is rate limited, every remaining item in a batch will
+/// fail the same way, so callers use this to abort the batch early instead of
+/// burning one failed request per item. Matches the distinct marker emitted by
+/// the claude CLI backend (see `ai::client`).
+pub fn is_usage_limit_error(e: &anyhow::Error) -> bool {
+    let msg = format!("{e:#}").to_ascii_lowercase();
+    msg.contains("usage limit") || msg.contains("rate limit")
+}
+
 pub mod merge_queue;
 pub mod pr_analysis;
 pub mod pr_health;
 pub mod status;
 pub mod triage;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_usage_limit_error_detects_limit() {
+        let e = anyhow::anyhow!("claude CLI usage limit reached: You've hit your limit");
+        assert!(is_usage_limit_error(&e));
+        let e = anyhow::anyhow!("HTTP 429: rate limit exceeded");
+        assert!(is_usage_limit_error(&e));
+    }
+
+    #[test]
+    fn test_is_usage_limit_error_ignores_other_failures() {
+        let e = anyhow::anyhow!("claude CLI failed (exit 1): no output");
+        assert!(!is_usage_limit_error(&e));
+        let e = anyhow::anyhow!("Failed to parse AI response as JSON");
+        assert!(!is_usage_limit_error(&e));
+    }
+}

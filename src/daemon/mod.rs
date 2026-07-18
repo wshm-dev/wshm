@@ -20,20 +20,27 @@ use tracing::{info, warn};
 
 use crate::cli::DaemonArgs;
 use crate::config::{Config, GlobalConfig};
+use crate::db::backend::DatabaseBackend;
 use crate::db::Database;
 use crate::github::Client as GhClient;
 
 use self::processor::WebhookEvent;
 
 pub struct DaemonState {
-    pub db: Arc<Database>,
+    pub db: Arc<dyn DatabaseBackend>,
     /// Hot-reloadable GitHub client. The inner Arc is swapped under a
     /// RwLock when a `github_token` secret is added or removed via the
     /// web UI, so the new token is picked up without a daemon restart.
     /// Call sites get a snapshot via [`DaemonState::gh()`].
     gh: std::sync::RwLock<Arc<GhClient>>,
     pub config: Arc<Config>,
-    pub apply: bool,
+    /// Master apply mode for this repo: `true` = post comments / labels /
+    /// PRs to GitHub, `false` = compute results visible in the dashboard
+    /// only (DRY-RUN). Mutated at runtime via the Settings → Repos modal
+    /// (PATCH /api/v1/repos/{slug}/features `{"apply": true|false}`); use
+    /// the [`DaemonState::apply`] getter — pipelines must read the live
+    /// value, not capture a startup snapshot.
+    apply: std::sync::atomic::AtomicBool,
     /// Per-repo feature toggles. Snapshot via [`DaemonState::features`].
     /// Pipelines must check the relevant flag before performing mutating
     /// actions (triage, analyze, auto-fix, merge).
@@ -42,7 +49,7 @@ pub struct DaemonState {
 
 impl DaemonState {
     pub fn new(
-        db: Arc<Database>,
+        db: Arc<dyn DatabaseBackend>,
         gh: Arc<GhClient>,
         config: Arc<Config>,
         apply: bool,
@@ -55,7 +62,7 @@ impl DaemonState {
     }
 
     pub fn with_features(
-        db: Arc<Database>,
+        db: Arc<dyn DatabaseBackend>,
         gh: Arc<GhClient>,
         config: Arc<Config>,
         apply: bool,
@@ -65,9 +72,21 @@ impl DaemonState {
             db,
             gh: std::sync::RwLock::new(gh),
             config,
-            apply,
+            apply: std::sync::atomic::AtomicBool::new(apply),
             features: std::sync::RwLock::new(features),
         }
+    }
+
+    /// Live apply-mode flag. `true` → mutating actions hit GitHub;
+    /// `false` → DRY-RUN (compute + log only).
+    pub fn apply(&self) -> bool {
+        self.apply.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Toggle apply mode at runtime. Persistence to global.toml is the
+    /// caller's responsibility (see api_repo_features_patch).
+    pub fn set_apply(&self, v: bool) {
+        self.apply.store(v, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Snapshot of the current GitHub client. The returned Arc is
@@ -88,8 +107,16 @@ impl DaemonState {
         info!(
             "[{}] GitHub client reloaded ({} → {})",
             self.config.repo_slug(),
-            if was_authenticated { "authenticated" } else { "anonymous" },
-            if now_authenticated { "authenticated" } else { "anonymous" }
+            if was_authenticated {
+                "authenticated"
+            } else {
+                "anonymous"
+            },
+            if now_authenticated {
+                "authenticated"
+            } else {
+                "anonymous"
+            }
         );
         Ok(())
     }
@@ -105,10 +132,7 @@ impl DaemonState {
     /// Replace the in-memory feature flags. The API handler is responsible
     /// for also persisting them to global.toml so they survive restart.
     pub fn set_features(&self, new: crate::config::RepoFeatures) {
-        *self
-            .features
-            .write()
-            .expect("features RwLock poisoned") = new;
+        *self.features.write().expect("features RwLock poisoned") = new;
     }
 }
 
@@ -138,10 +162,7 @@ impl MultiDaemonState {
         }
     }
 
-    pub fn with_runtime(
-        repos: HashMap<String, Arc<DaemonState>>,
-        runtime: DynamicRuntime,
-    ) -> Self {
+    pub fn with_runtime(repos: HashMap<String, Arc<DaemonState>>, runtime: DynamicRuntime) -> Self {
         Self {
             repos: RwLock::new(repos),
             runtime: Some(runtime),
@@ -153,29 +174,45 @@ impl MultiDaemonState {
     /// on the slug — returns error if it already exists.
     /// When `path` is None, defaults to `<global_config_parent>/repos/<name>`
     /// so dynamic adds land on the same volume as the daemon's config.
-    pub async fn add_repo(
-        &self,
-        slug: &str,
-        path: Option<PathBuf>,
-    ) -> Result<Arc<DaemonState>> {
+    pub async fn add_repo(&self, slug: &str, path: Option<PathBuf>) -> Result<Arc<DaemonState>> {
         let runtime = self
             .runtime
             .as_ref()
             .context("Dynamic add_repo not available (daemon not running in multi-repo mode)")?;
 
-        if !slug.contains('/') || slug.split('/').count() != 2 {
+        // Validate the slug: exactly two non-empty owner/repo segments, and
+        // no segment may be a path-traversal token (`.` / `..`) or contain a
+        // separator, so a value like "owner/.." can never become a directory
+        // component of ".." when we derive the on-disk path from it.
+        let segments: Vec<&str> = slug.split('/').collect();
+        if segments.len() != 2
+            || segments
+                .iter()
+                .any(|s| s.is_empty() || *s == "." || *s == ".." || s.contains('\\'))
+        {
             anyhow::bail!("invalid slug format, expected owner/repo");
         }
 
-        let path = path.unwrap_or_else(|| {
-            let name = slug.split('/').next_back().unwrap_or(slug);
-            runtime
-                .global_config_path
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join("repos")
-                .join(name)
-        });
+        let repos_base = runtime
+            .global_config_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("repos");
+        let path = match path {
+            // A caller-supplied path is anchored under the repos/ base and must
+            // not escape it (the web layer already rejects absolute paths and
+            // ".." segments; re-check defensively here).
+            Some(p) => {
+                if p.is_absolute() || p.components().any(|c| c.as_os_str() == "..") {
+                    anyhow::bail!("repo path must be relative and must not contain '..'");
+                }
+                repos_base.join(p)
+            }
+            None => {
+                let name = segments[1];
+                repos_base.join(name)
+            }
+        };
 
         {
             let repos = self.repos.read().await;
@@ -188,19 +225,19 @@ impl MultiDaemonState {
         std::fs::create_dir_all(&config.wshm_dir)?;
         config.web.resolve_password(&config.wshm_dir);
 
-        let db = Arc::new(Database::open(&config)?);
+        let db = Arc::new(Database::open(&config)?) as Arc<dyn DatabaseBackend>;
         let gh = Arc::new(GhClient::new(&config)?);
-        let state = Arc::new(DaemonState::new(db, gh, Arc::new(config), runtime.global_apply));
+        let state = Arc::new(DaemonState::new(
+            db,
+            gh,
+            Arc::new(config),
+            runtime.global_apply,
+        ));
 
         // Persist before mutating runtime state so a crash can't lose the
         // user's intent silently.
-        crate::config::append_repo_to_global(
-            &runtime.global_config_path,
-            slug,
-            &path,
-            None,
-        )
-        .with_context(|| format!("failed to persist {slug} to global config"))?;
+        crate::config::append_repo_to_global(&runtime.global_config_path, slug, &path, None)
+            .with_context(|| format!("failed to persist {slug} to global config"))?;
 
         {
             let mut repos = self.repos.write().await;
@@ -260,7 +297,7 @@ pub async fn run(mut config: Config, args: DaemonArgs) -> Result<()> {
             config.daemon.webhook_secret.clone()
         });
 
-    let db = Arc::new(Database::open(&config)?);
+    let db = Arc::new(Database::open(&config)?) as Arc<dyn DatabaseBackend>;
     let gh = Arc::new(GhClient::new(&config)?);
     let config = Arc::new(config);
 
@@ -372,7 +409,7 @@ pub async fn run(mut config: Config, args: DaemonArgs) -> Result<()> {
 #[derive(Default)]
 pub struct DaemonExtensions {
     /// Enable RBAC mode by passing a populated `UserStore`.
-    pub users: Option<Arc<crate::auth::UserStore>>,
+    pub users: Option<Arc<dyn crate::auth::UserStoreBackend>>,
     /// In-memory log buffer fed by the tracing layer; exposed via
     /// `GET /api/v1/logs`. Pass the same instance that's wired into the
     /// `tracing_subscriber` registry.
@@ -385,6 +422,20 @@ pub struct DaemonExtensions {
     pub extra_api: Option<axum::Router<Arc<crate::daemon::web::WebState>>>,
     /// Replacement SPA router (e.g. a Pro web-dist with extra routes).
     pub spa_override: Option<axum::Router<Arc<crate::daemon::web::WebState>>>,
+    /// Optional factory that produces the storage backend for one repo.
+    /// When `Some`, the multi-repo daemon calls this instead of opening a
+    /// per-repo SQLite `Database`. Pro uses it to share a single Postgres
+    /// pool across all repos while scoping each backend instance by repo
+    /// slug. When `None`, falls back to `Database::open(config)` (the
+    /// historical OSS-only behaviour).
+    #[allow(clippy::type_complexity)]
+    pub db_factory: Option<
+        Arc<
+            dyn Fn(&crate::Config) -> anyhow::Result<Arc<dyn crate::db::backend::DatabaseBackend>>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 /// Run daemon in multi-repo mode from a global config file.
@@ -406,6 +457,11 @@ pub async fn run_multi_with_extensions(
     if extensions.logs.is_none() {
         extensions.logs = log_buffer::global();
     }
+
+    // Install the retry policy process-wide so every outbound HTTP call
+    // (poller, git providers, AI, self-update) honors it. The Settings UI
+    // re-installs it on save, so this is just the boot-time default.
+    crate::retry::set_global(global.retry.clone());
 
     // Open a default UserStore on ~/.wshm/users.db when the caller didn't
     // provide one, so OSS gets a working RBAC + login flow out of the box.
@@ -458,6 +514,22 @@ pub async fn run_multi_with_extensions(
                  deploy/k8s/networkpolicy.yaml."
             );
         }
+        let has_token = std::env::var("WSHM_PROXY_AUTH_TOKEN")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let isolation_ack = std::env::var("WSHM_TRUST_PROXY_AUTH_NO_TOKEN")
+            .ok()
+            .filter(|v| v == "1" || v == "true")
+            .is_some();
+        if !has_token && !isolation_ack {
+            warn!(
+                "WSHM_TRUST_PROXY_AUTH=1 but WSHM_PROXY_AUTH_TOKEN is unset. \
+                 Forwarded-identity headers will be REJECTED (fail closed). \
+                 Set WSHM_PROXY_AUTH_TOKEN to a shared secret your proxy adds as \
+                 X-Wshm-Proxy-Token, or set WSHM_TRUST_PROXY_AUTH_NO_TOKEN=1 to \
+                 explicitly rely on network isolation alone."
+            );
+        }
     }
 
     let global_apply = args.apply || global.daemon.apply;
@@ -483,6 +555,40 @@ pub async fn run_multi_with_extensions(
     let mut repos = HashMap::new();
     let mut web_password_resolved = false;
     for entry in &global.repos {
+        // A local checkout is only needed by code-editing features
+        // (auto-fix PR generation). Triage and PR analysis run entirely
+        // off the GitHub API, so skip the boot clone unless auto-fix is
+        // enabled for this repo — it's slow, depends on a valid
+        // GITHUB_TOKEN, and its failure otherwise logs a misleading
+        // "daemon may degrade" for repos that never needed the checkout.
+        // Stateless deploys mount repos/ as an emptyDir, so when it IS
+        // needed the checkout may be missing on first boot; clone it here.
+        // Skipped when the entry path already contains a checkout.
+        if entry.features.auto_pr && !entry.path.join(".git").exists() {
+            if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+                let url = format!("https://github.com/{}.git", entry.slug);
+                if let Some(parent) = entry.path.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                match crate::github::git::clone_repo(&url, &entry.path, &token) {
+                    Ok(_) => info!("Cloned {} into {}", entry.slug, entry.path.display()),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to clone {} into {} ({e}); daemon may degrade for this repo",
+                            entry.slug,
+                            entry.path.display()
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "Repo {} not present at {} and GITHUB_TOKEN unset — skipping clone, daemon may degrade",
+                    entry.slug,
+                    entry.path.display()
+                );
+            }
+        }
+
         let mut config = Config::load_for_repo(&entry.path, &entry.slug)?;
 
         // Ensure .wshm dir exists
@@ -494,7 +600,10 @@ pub async fn run_multi_with_extensions(
             web_password_resolved = true;
         }
 
-        let db = Arc::new(Database::open(&config)?);
+        let db = match &extensions.db_factory {
+            Some(factory) => factory(&config)?,
+            None => Arc::new(Database::open(&config)?) as Arc<dyn DatabaseBackend>,
+        };
         let gh = Arc::new(GhClient::new(&config)?);
         let apply = entry.apply.unwrap_or(global_apply);
 

@@ -137,6 +137,14 @@ where
 {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let metadata = event.metadata();
+        // Never capture the secrets trace target into the in-memory buffer:
+        // /api/v1/logs serves this buffer to viewers, and the secrets trace
+        // logs secret key identifiers / scopes / user ids. Keeping it out of
+        // the buffer prevents that detail from being exposed via the logs API
+        // (and guards against future drift if a value ever gets added there).
+        if metadata.target() == "wshm_core::secrets_trace" {
+            return;
+        }
         let level = match *metadata.level() {
             Level::ERROR => "ERROR",
             Level::WARN => "WARN",

@@ -55,6 +55,8 @@ pub async fn run(state: Arc<DaemonState>) {
     let mut triage_failures: u32 = 0;
     let mut sync_alert_sent = false;
     let mut triage_alert_sent = false;
+    // Log the dry-run skip notice only once instead of every cycle.
+    let mut dry_run_triage_logged = false;
 
     info!(
         "Scheduler started (sync every {}m)",
@@ -85,7 +87,7 @@ pub async fn run(state: Arc<DaemonState>) {
             continue;
         }
         info!("Periodic sync triggered (incremental)");
-        match github::sync::incremental_sync_full(&state.gh(), &state.db).await {
+        match github::sync::incremental_sync_full(&state.gh(), state.db.as_ref()).await {
             Ok(_) => {
                 info!("Periodic sync complete");
 
@@ -112,20 +114,36 @@ pub async fn run(state: Arc<DaemonState>) {
         // Triage untriaged issues after sync. Both the legacy
         // [triage].enabled config flag AND the per-repo features.triage_issues
         // toggle must be true.
-        if state.config.triage.enabled && features.triage_issues {
+        //
+        // The scheduled batch only runs when applying: in dry-run nothing is
+        // persisted, so get_issues_needing_triage() returns the same issues
+        // every cycle — an infinite re-triage loop that burns AI quota for no
+        // visible effect. Webhook-driven triage still works in dry-run for
+        // one-off previews.
+        if state.config.triage.enabled && features.triage_issues && !state.apply() {
+            if !dry_run_triage_logged {
+                warn!(
+                    "Scheduled triage skipped in dry-run mode (apply=false): it would \
+                     re-triage the same issues every cycle and waste AI quota. Set \
+                     apply=true to enable applied triage."
+                );
+                dry_run_triage_logged = true;
+            }
+        } else if state.config.triage.enabled && features.triage_issues {
             let args = TriageArgs {
                 issue: None,
-                apply: state.apply,
+                apply: state.apply(),
                 retriage: false,
             };
 
-            match pipelines::triage::run(
+            match pipelines::triage::run_with_filters(
                 &state.config,
-                &state.db,
+                state.db.as_ref(),
                 &state.gh(),
                 &args,
                 pipelines::triage::OutputFormat::Text,
                 None,
+                Some(&features.filters),
             )
             .await
             {
@@ -153,9 +171,11 @@ pub async fn run(state: Arc<DaemonState>) {
         }
 
         // Periodic retriage: re-evaluate stale triage results. Same dual
-        // gate as the regular triage loop above.
+        // gate as the regular triage loop above, plus apply (retriage only
+        // makes sense once results are persisted, which requires apply).
         if state.config.triage.enabled
             && features.triage_issues
+            && state.apply()
             && retriage_interval_hours > 0
             && last_retriage.elapsed() >= retriage_interval
         {
@@ -164,17 +184,18 @@ pub async fn run(state: Arc<DaemonState>) {
 
             let args = TriageArgs {
                 issue: None,
-                apply: state.apply,
+                apply: state.apply(),
                 retriage: true,
             };
 
-            match pipelines::triage::run(
+            match pipelines::triage::run_with_filters(
                 &state.config,
-                &state.db,
+                state.db.as_ref(),
                 &state.gh(),
                 &args,
                 pipelines::triage::OutputFormat::Text,
                 None,
+                Some(&features.filters),
             )
             .await
             {

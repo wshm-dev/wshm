@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { Card, Badge } from 'flowbite-svelte';
 	import type { Issue } from '$lib/api';
+	import Markdown from './Markdown.svelte';
 
 	let { issue }: { issue: Issue } = $props();
 
@@ -75,6 +76,6 @@
 {#if issue.body}
 	<Card class="bg-gray-800 p-3 max-w-none">
 		<div class="text-[0.625rem] uppercase text-gray-500 mb-2">Body</div>
-		<pre class="text-sm text-gray-300 whitespace-pre-wrap break-words max-h-96 overflow-y-auto">{issue.body}</pre>
+		<Markdown source={issue.body} />
 	</Card>
 {/if}

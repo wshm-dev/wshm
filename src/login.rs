@@ -119,6 +119,13 @@ pub fn save_credentials(creds: &std::collections::HashMap<String, String>) -> Re
             .mode(0o600)
             .open(&path)?;
         f.write_all(content.as_bytes())?;
+        // The 0o600 mode above is honoured only when the file is newly
+        // created. If .wshm/credentials already existed with broader
+        // permissions (older version, copied-in file), the rewrite keeps the
+        // looser mode. Re-tighten it explicitly so the plaintext secret file
+        // is always owner-only readable/writable.
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     }
 
     #[cfg(not(unix))]

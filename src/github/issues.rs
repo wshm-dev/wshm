@@ -8,6 +8,41 @@ use crate::github::Client;
 /// The actual marker is derived from branding.name via `BrandingConfig::comment_marker()`.
 pub const WSHM_COMMENT_MARKER: &str = "<!-- wshm -->";
 
+/// Build an [`Issue`] from a GitHub API issue JSON object.
+///
+/// Returns `None` for pull requests, which the issues endpoint also serves
+/// (they carry a `pull_request` key).
+fn parse_issue(item: &serde_json::Value) -> Option<Issue> {
+    if item.get("pull_request").is_some() {
+        return None;
+    }
+
+    let reactions = item.get("reactions");
+    let reactions_plus1 = reactions
+        .and_then(|r| r.get("+1"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let reactions_total = reactions
+        .and_then(|r| r.get("total_count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+
+    let state = item.get("state").and_then(|v| v.as_str()).unwrap_or("open");
+
+    Some(Issue {
+        number: item["number"].as_u64().unwrap_or(0),
+        title: item["title"].as_str().unwrap_or("").to_string(),
+        body: item.get("body").and_then(|v| v.as_str()).map(String::from),
+        state: state.to_string(),
+        labels: super::extract_labels(item),
+        author: super::extract_author(item),
+        created_at: item["created_at"].as_str().unwrap_or("").to_string(),
+        updated_at: item["updated_at"].as_str().unwrap_or("").to_string(),
+        reactions_plus1,
+        reactions_total,
+    })
+}
+
 impl Client {
     pub async fn fetch_issues(&self, since: Option<&str>) -> Result<Vec<Issue>> {
         self.fetch_issues_with_state("open", since).await
@@ -17,78 +52,87 @@ impl Client {
         self.fetch_issues_with_state("all", since).await
     }
 
+    /// Fetch a single issue by number from the canonical (strongly consistent)
+    /// `/issues/{number}` endpoint.
+    ///
+    /// The list endpoint is served from a replicated index that lags behind
+    /// issue creation by seconds, so a list sync triggered right after an
+    /// `issues.opened` webhook can miss the brand-new issue. The single-issue
+    /// endpoint always reflects the latest state, so we use it to guarantee a
+    /// freshly opened issue is in cache before triage.
+    ///
+    /// Returns `Ok(None)` when the number is a pull request (the issues
+    /// endpoint also serves PRs) or the issue was deleted/transferred (404).
+    pub async fn fetch_issue(&self, number: u64) -> Result<Option<Issue>> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/issues/{number}",
+            self.owner, self.repo
+        );
+
+        let body = crate::retry::with_retry("github: fetch issue", || async {
+            let response = self
+                .octocrab
+                ._get(&url)
+                .await
+                .with_context(|| format!("Failed to fetch issue #{number}"))?;
+            self.octocrab
+                .body_to_string(response)
+                .await
+                .context("Failed to read issue response body")
+        })
+        .await?;
+
+        let item: serde_json::Value =
+            serde_json::from_str(&body).context("Failed to parse issue JSON")?;
+
+        // A 404 (deleted/transferred issue) comes back as an object with a
+        // `message` field rather than an issue payload.
+        if item.get("number").is_none() {
+            if let Some(msg) = item.get("message").and_then(|v| v.as_str()) {
+                if msg.eq_ignore_ascii_case("Not Found") {
+                    return Ok(None);
+                }
+                anyhow::bail!("GitHub error while fetching issue #{number}: {msg}");
+            }
+            return Ok(None);
+        }
+
+        Ok(parse_issue(&item))
+    }
+
     async fn fetch_issues_with_state(
         &self,
         state: &str,
         since: Option<&str>,
     ) -> Result<Vec<Issue>> {
         let mut all_issues = Vec::with_capacity(128);
+        let mut url = format!(
+            "https://api.github.com/repos/{}/{}/issues?state={state}&per_page={pp}",
+            self.owner,
+            self.repo,
+            pp = super::GITHUB_PER_PAGE
+        );
+        if let Some(since) = since {
+            url.push_str(&format!("&since={since}"));
+        }
         let mut page = 1u32;
 
         loop {
-            let mut url =
-                format!(
-                "https://api.github.com/repos/{}/{}/issues?state={state}&per_page={pp}&page={page}",
-                self.owner, self.repo, pp = super::GITHUB_PER_PAGE
-            );
-            if let Some(since) = since {
-                url.push_str(&format!("&since={since}"));
-            }
-
-            let response = self
-                .octocrab
-                ._get(&url)
-                .await
-                .context("Failed to fetch issues")?;
-
-            let body = self
-                .octocrab
-                .body_to_string(response)
-                .await
-                .context("Failed to read issues response body")?;
-
+            let (body, next) = self.get_page(&url, "github: fetch issues").await?;
             let items = super::parse_json_array(&body, "issues")?;
 
             debug!("Fetched page {page} with {} items", items.len());
 
-            if items.is_empty() {
-                break;
-            }
-
             for item in &items {
                 // Skip PRs (the issues endpoint includes them)
-                if item.get("pull_request").is_some() {
-                    continue;
+                if let Some(issue) = parse_issue(item) {
+                    all_issues.push(issue);
                 }
-
-                let reactions = item.get("reactions");
-                let reactions_plus1 = reactions
-                    .and_then(|r| r.get("+1"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
-                let reactions_total = reactions
-                    .and_then(|r| r.get("total_count"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
-
-                let state = item.get("state").and_then(|v| v.as_str()).unwrap_or("open");
-
-                all_issues.push(Issue {
-                    number: item["number"].as_u64().unwrap_or(0),
-                    title: item["title"].as_str().unwrap_or("").to_string(),
-                    body: item.get("body").and_then(|v| v.as_str()).map(String::from),
-                    state: state.to_string(),
-                    labels: super::extract_labels(item),
-                    author: super::extract_author(item),
-                    created_at: item["created_at"].as_str().unwrap_or("").to_string(),
-                    updated_at: item["updated_at"].as_str().unwrap_or("").to_string(),
-                    reactions_plus1,
-                    reactions_total,
-                });
             }
 
-            if items.len() < 100 || page >= 100 {
-                break; // Last page or safety cap
+            match next {
+                Some(next) if page < super::GITHUB_MAX_PAGES => url = next,
+                _ => break, // Last page or safety cap
             }
             page += 1;
         }
@@ -97,12 +141,15 @@ impl Client {
     }
 
     pub async fn label_issue(&self, number: u64, labels: &[String]) -> Result<()> {
-        self.octocrab
-            .issues(&self.owner, &self.repo)
-            .add_labels(number, labels)
-            .await
-            .with_context(|| format!("Failed to label issue #{number}"))?;
-        Ok(())
+        crate::retry::with_retry("github: label issue", || async {
+            self.octocrab
+                .issues(&self.owner, &self.repo)
+                .add_labels(number, labels)
+                .await
+                .with_context(|| format!("Failed to label issue #{number}"))?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
     }
 
     /// Add assignees to an issue or PR (GitHub uses the same endpoint).
@@ -113,19 +160,23 @@ impl Client {
         );
         let body = serde_json::json!({ "assignees": assignees });
 
-        let response = self
-            .octocrab
-            ._post(&url, Some(&body))
-            .await
-            .with_context(|| format!("Failed to assign {assignees:?} to #{number}"))?;
+        // POST endpoint — use connect-only retry so a post-send EOF doesn't
+        // re-issue the write.
+        crate::retry::with_retry_connect_only("github: add assignees", || async {
+            let response = self
+                .octocrab
+                ._post(&url, Some(&body))
+                .await
+                .with_context(|| format!("Failed to assign {assignees:?} to #{number}"))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let resp_body = self.octocrab.body_to_string(response).await?;
-            anyhow::bail!("Failed to assign #{number}: {status} {resp_body}");
-        }
-
-        Ok(())
+            let status = response.status();
+            if !status.is_success() {
+                let resp_body = self.octocrab.body_to_string(response).await?;
+                anyhow::bail!("Failed to assign #{number}: {status} {resp_body}");
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
     }
 
     /// Post or update a wshm comment on an issue.
@@ -138,11 +189,17 @@ impl Client {
             self.update_comment(comment_id, &body_with_marker).await?;
         } else {
             debug!("Creating new wshm comment on issue #{number}");
-            self.octocrab
-                .issues(&self.owner, &self.repo)
-                .create_comment(number, &body_with_marker)
-                .await
-                .with_context(|| format!("Failed to comment on issue #{number}"))?;
+            // Connect-only retry: re-issuing a create after a post-send body
+            // EOF would duplicate the comment.
+            crate::retry::with_retry_connect_only("github: create comment", || async {
+                self.octocrab
+                    .issues(&self.owner, &self.repo)
+                    .create_comment(number, &body_with_marker)
+                    .await
+                    .with_context(|| format!("Failed to comment on issue #{number}"))?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await?;
         }
         Ok(())
     }
@@ -151,31 +208,18 @@ impl Client {
     /// Returns `Some(comment_id)` if found, `None` otherwise.
     /// Searches for both the custom marker and the legacy `<!-- wshm -->` marker.
     pub async fn find_wshm_comment(&self, number: u64, marker: &str) -> Result<Option<u64>> {
+        let mut url = format!(
+            "https://api.github.com/repos/{}/{}/issues/{number}/comments?per_page={pp}",
+            self.owner,
+            self.repo,
+            pp = super::GITHUB_PER_PAGE
+        );
         let mut page = 1u32;
 
         loop {
-            let url = format!(
-                "https://api.github.com/repos/{}/{}/issues/{number}/comments?per_page={pp}&page={page}",
-                self.owner, self.repo, pp = super::GITHUB_PER_PAGE
-            );
-
-            let response = self
-                .octocrab
-                ._get(&url)
-                .await
-                .with_context(|| format!("Failed to fetch comments for issue #{number}"))?;
-
-            let body = self
-                .octocrab
-                .body_to_string(response)
-                .await
-                .with_context(|| format!("Failed to read comments response for issue #{number}"))?;
-
+            let label = format!("github: fetch comments for issue #{number}");
+            let (body, next) = self.get_page(&url, &label).await?;
             let comments = super::parse_json_array(&body, "comments")?;
-
-            if comments.is_empty() {
-                break;
-            }
 
             for comment in &comments {
                 let comment_body = comment.get("body").and_then(|v| v.as_str()).unwrap_or("");
@@ -187,8 +231,9 @@ impl Client {
                 }
             }
 
-            if comments.len() < 100 {
-                break;
+            match next {
+                Some(next) if page < super::GITHUB_MAX_PAGES => url = next,
+                _ => break,
             }
             page += 1;
         }
@@ -203,19 +248,21 @@ impl Client {
             self.owner, self.repo
         );
 
-        let response = self
-            .octocrab
-            ._delete(&url, None::<&()>)
-            .await
-            .with_context(|| format!("Failed to delete comment {comment_id}"))?;
+        crate::retry::with_retry("github: delete comment", || async {
+            let response = self
+                .octocrab
+                ._delete(&url, None::<&()>)
+                .await
+                .with_context(|| format!("Failed to delete comment {comment_id}"))?;
 
-        let status = response.status();
-        if !status.is_success() && status.as_u16() != 404 {
-            let resp_body = self.octocrab.body_to_string(response).await?;
-            anyhow::bail!("Failed to delete comment {comment_id}: {status} {resp_body}");
-        }
-
-        Ok(())
+            let status = response.status();
+            if !status.is_success() && status.as_u16() != 404 {
+                let resp_body = self.octocrab.body_to_string(response).await?;
+                anyhow::bail!("Failed to delete comment {comment_id}: {status} {resp_body}");
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
     }
 
     /// Update an existing comment by ID.
@@ -227,19 +274,21 @@ impl Client {
 
         let patch_body = serde_json::json!({ "body": body });
 
-        let response = self
-            .octocrab
-            ._patch(&url, Some(&patch_body))
-            .await
-            .with_context(|| format!("Failed to update comment {comment_id}"))?;
+        crate::retry::with_retry("github: update comment", || async {
+            let response = self
+                .octocrab
+                ._patch(&url, Some(&patch_body))
+                .await
+                .with_context(|| format!("Failed to update comment {comment_id}"))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let resp_body = self.octocrab.body_to_string(response).await?;
-            anyhow::bail!("Failed to update comment {comment_id}: {status} {resp_body}");
-        }
-
-        Ok(())
+            let status = response.status();
+            if !status.is_success() {
+                let resp_body = self.octocrab.body_to_string(response).await?;
+                anyhow::bail!("Failed to update comment {comment_id}: {status} {resp_body}");
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
     }
 
     pub async fn remove_label(&self, number: u64, label: &str) -> Result<()> {
@@ -249,32 +298,40 @@ impl Client {
             self.owner, self.repo
         );
 
-        let response = self
-            .octocrab
-            ._delete(&url, None::<&()>)
-            .await
-            .with_context(|| format!("Failed to remove label '{label}' from #{number}"))?;
+        crate::retry::with_retry("github: remove label", || async {
+            let response = self
+                .octocrab
+                ._delete(&url, None::<&()>)
+                .await
+                .with_context(|| format!("Failed to remove label '{label}' from #{number}"))?;
 
-        let status = response.status();
-        if !status.is_success() && status.as_u16() != 404 {
-            let resp_body = self.octocrab.body_to_string(response).await?;
-            anyhow::bail!("Failed to remove label '{label}' from #{number}: {status} {resp_body}");
-        }
-
-        Ok(())
+            let status = response.status();
+            if !status.is_success() && status.as_u16() != 404 {
+                let resp_body = self.octocrab.body_to_string(response).await?;
+                anyhow::bail!(
+                    "Failed to remove label '{label}' from #{number}: {status} {resp_body}"
+                );
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
     }
 
     pub async fn create_issue(&self, title: &str, body: &str, labels: &[String]) -> Result<u64> {
         let body = ensure_comment_marker(body, &self.comment_marker);
-        let issue = self
-            .octocrab
-            .issues(&self.owner, &self.repo)
-            .create(title)
-            .body(&body)
-            .labels(labels.to_vec())
-            .send()
-            .await
-            .with_context(|| format!("Failed to create issue: {title}"))?;
+        // Connect-only retry: re-issuing after a post-send EOF would create
+        // a duplicate issue.
+        let issue = crate::retry::with_retry_connect_only("github: create issue", || async {
+            self.octocrab
+                .issues(&self.owner, &self.repo)
+                .create(title)
+                .body(&body)
+                .labels(labels.to_vec())
+                .send()
+                .await
+                .with_context(|| format!("Failed to create issue: {title}"))
+        })
+        .await?;
         Ok(issue.number)
     }
 
@@ -357,5 +414,40 @@ mod tests {
         let body = "This is a comment";
         let result = ensure_wshm_marker(body);
         assert!(result.contains(WSHM_COMMENT_MARKER));
+    }
+
+    #[test]
+    fn test_parse_issue_builds_issue() {
+        let item = serde_json::json!({
+            "number": 338,
+            "title": "Something broke",
+            "body": "details",
+            "state": "open",
+            "labels": [{ "name": "bug" }],
+            "user": { "login": "octocat" },
+            "created_at": "2026-05-01T00:00:00Z",
+            "updated_at": "2026-05-02T00:00:00Z",
+            "reactions": { "+1": 3, "total_count": 5 },
+        });
+        let issue = parse_issue(&item).expect("issue should parse");
+        assert_eq!(issue.number, 338);
+        assert_eq!(issue.title, "Something broke");
+        assert_eq!(issue.state, "open");
+        assert_eq!(issue.labels, vec!["bug".to_string()]);
+        assert_eq!(issue.author.as_deref(), Some("octocat"));
+        assert_eq!(issue.reactions_plus1, 3);
+        assert_eq!(issue.reactions_total, 5);
+    }
+
+    #[test]
+    fn test_parse_issue_skips_pull_requests() {
+        // The issues endpoint also returns PRs; they carry a `pull_request` key.
+        let item = serde_json::json!({
+            "number": 339,
+            "title": "A pull request",
+            "state": "open",
+            "pull_request": { "url": "https://api.github.com/..." },
+        });
+        assert!(parse_issue(&item).is_none());
     }
 }

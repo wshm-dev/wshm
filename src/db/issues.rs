@@ -54,10 +54,18 @@ impl Database {
         self.with_conn(get_untriaged_issues)
     }
 
-    /// Get issues that need triage: either never triaged OR content changed since last triage.
-    /// Returns up to `limit` issues prioritized by reaction count.
-    pub fn get_issues_needing_triage(&self, limit: usize) -> Result<Vec<Issue>> {
-        self.with_conn(|conn| get_issues_needing_triage(conn, limit))
+    /// Get issues that need triage: either never triaged OR content changed since last triage,
+    /// OR carrying a `relabel_labels` marker, OR (zero-label + last triage older than
+    /// `no_labels_min_age_hours`). Returns up to `limit` issues prioritized by reaction count.
+    pub fn get_issues_needing_triage(
+        &self,
+        limit: usize,
+        relabel_labels: &[String],
+        no_labels_min_age_hours: u32,
+    ) -> Result<Vec<Issue>> {
+        self.with_conn(|conn| {
+            get_issues_needing_triage(conn, limit, relabel_labels, no_labels_min_age_hours)
+        })
     }
 
     /// Merge new labels into the issue's existing labels in the DB cache (additive, no overwrite).
@@ -182,15 +190,25 @@ pub fn get_untriaged_issues(conn: &Connection) -> Result<Vec<Issue>> {
     Ok(issues)
 }
 
-/// Get issues that need triage: either never triaged OR content changed since last triage.
+/// Get issues that need triage. An open issue qualifies if any of:
+///   * never triaged (no stored content_hash),
+///   * its content_hash differs from the freshly recomputed one,
+///   * it carries one of `relabel_labels` (case-insensitive),
+///   * it has zero labels AND its last triage is older than
+///     `no_labels_min_age_hours` (0 disables this trigger).
+///
 /// Returns up to `limit` issues prioritized by reaction count, then issue number.
-pub fn get_issues_needing_triage(conn: &Connection, limit: usize) -> Result<Vec<Issue>> {
+pub fn get_issues_needing_triage(
+    conn: &Connection,
+    limit: usize,
+    relabel_labels: &[String],
+    no_labels_min_age_hours: u32,
+) -> Result<Vec<Issue>> {
     use crate::db::schema::compute_issue_hash;
 
-    // First, get all open issues with their triage status
     let mut stmt = conn.prepare(
         "SELECT i.number, i.title, i.body, i.state, i.labels, i.author, i.created_at, i.updated_at, i.reactions_plus1, i.reactions_total,
-                t.content_hash
+                t.content_hash, t.acted_at
          FROM issues i
          LEFT JOIN triage_results t ON i.number = t.issue_number
          WHERE i.state = 'open'
@@ -212,19 +230,46 @@ pub fn get_issues_needing_triage(conn: &Connection, limit: usize) -> Result<Vec<
             reactions_total: row.get(9)?,
         };
         let stored_hash: Option<String> = row.get(10)?;
-        Ok((issue, stored_hash))
+        let acted_at: Option<String> = row.get(11)?;
+        Ok((issue, stored_hash, acted_at))
     })?;
+
+    let now = chrono::Utc::now();
+    let age_cutoff = if no_labels_min_age_hours > 0 {
+        Some(now - chrono::Duration::hours(no_labels_min_age_hours as i64))
+    } else {
+        None
+    };
 
     for row in rows {
         if issues_needing_triage.len() >= limit {
             break;
         }
 
-        let (issue, stored_hash) = row?;
-        let current_hash = compute_issue_hash(&issue.title, issue.body.as_deref(), &issue.labels);
+        let (issue, stored_hash, acted_at) = row?;
 
-        // Need triage if: never triaged (NULL hash) OR content changed (hash mismatch)
-        if stored_hash.is_none() || stored_hash.as_deref() != Some(current_hash.as_str()) {
+        // Short-circuit: a never-triaged issue (no stored hash) always
+        // needs triage, so we can skip the comparatively expensive content
+        // hash computation entirely.
+        let needs_triage = stored_hash.is_none()
+            || stored_hash.as_deref()
+                != Some(compute_issue_hash(&issue.title, issue.body.as_deref()).as_str())
+            || (!relabel_labels.is_empty()
+                && issue
+                    .labels
+                    .iter()
+                    .any(|l| relabel_labels.iter().any(|r| r.eq_ignore_ascii_case(l))))
+            || (issue.labels.is_empty()
+                && match age_cutoff {
+                    Some(cutoff) => acted_at
+                        .as_deref()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&chrono::Utc) < cutoff)
+                        .unwrap_or(false),
+                    None => false,
+                });
+
+        if needs_triage {
             issues_needing_triage.push(issue);
         }
     }
@@ -287,9 +332,34 @@ mod tests {
         assert_eq!(untriaged.len(), 1);
     }
 
+    fn test_classification() -> crate::ai::schemas::IssueClassification {
+        crate::ai::schemas::IssueClassification {
+            category: "bug".to_string(),
+            confidence: 0.9,
+            priority: Some("high".to_string()),
+            summary: "Test summary".to_string(),
+            suggested_labels: vec![],
+            is_duplicate_of: None,
+            is_simple_fix: false,
+            relevant_files: vec![],
+        }
+    }
+
+    /// Overwrite `acted_at` for an existing triage row (the public upsert
+    /// stamps `now()`, but the relabel/age triggers need historic timestamps).
+    fn force_acted_at(db: &Database, issue_number: u64, acted_at: &str) {
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE triage_results SET acted_at = ?1 WHERE issue_number = ?2",
+                params![acted_at, issue_number],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
     #[test]
     fn test_get_issues_needing_triage() {
-        use crate::ai::schemas::IssueClassification;
         use crate::db::schema::compute_issue_hash;
 
         let db = Database::open_memory().unwrap();
@@ -304,17 +374,8 @@ mod tests {
         issue2.number = 2;
         issue2.title = "Already triaged".to_string();
         db.upsert_issue(&issue2).unwrap();
-        let classification = IssueClassification {
-            category: "bug".to_string(),
-            confidence: 0.9,
-            priority: Some("high".to_string()),
-            summary: "Test summary".to_string(),
-            suggested_labels: vec![],
-            is_duplicate_of: None,
-            is_simple_fix: false,
-            relevant_files: vec![],
-        };
-        let hash2 = compute_issue_hash(&issue2.title, issue2.body.as_deref(), &issue2.labels);
+        let classification = test_classification();
+        let hash2 = compute_issue_hash(&issue2.title, issue2.body.as_deref());
         db.upsert_triage_result_with_hash(&classification, 2, Some(&hash2))
             .unwrap();
 
@@ -323,7 +384,7 @@ mod tests {
         issue3.number = 3;
         issue3.title = "Content changed".to_string();
         db.upsert_issue(&issue3).unwrap();
-        let hash3_old = compute_issue_hash(&issue3.title, issue3.body.as_deref(), &issue3.labels);
+        let hash3_old = compute_issue_hash(&issue3.title, issue3.body.as_deref());
         db.upsert_triage_result_with_hash(&classification, 3, Some(&hash3_old))
             .unwrap();
 
@@ -331,7 +392,7 @@ mod tests {
         issue3.title = "Content changed - UPDATED".to_string();
         db.upsert_issue(&issue3).unwrap();
 
-        let needing_triage = db.get_issues_needing_triage(10).unwrap();
+        let needing_triage = db.get_issues_needing_triage(10, &[], 0).unwrap();
 
         // Should return issue 1 (never triaged) and issue 3 (content changed)
         assert_eq!(needing_triage.len(), 2);
@@ -339,5 +400,83 @@ mod tests {
         assert!(numbers.contains(&1));
         assert!(numbers.contains(&3));
         assert!(!numbers.contains(&2)); // Issue 2 unchanged, should not be returned
+    }
+
+    #[test]
+    fn test_relabel_label_forces_retriage() {
+        use crate::db::schema::compute_issue_hash;
+
+        let db = Database::open_memory().unwrap();
+
+        // Issue triaged, content unchanged, but carries the relabel marker.
+        let mut issue = test_issue();
+        issue.number = 42;
+        issue.labels = vec!["bug".to_string(), "wshm:relabel".to_string()];
+        db.upsert_issue(&issue).unwrap();
+        let hash = compute_issue_hash(&issue.title, issue.body.as_deref());
+        db.upsert_triage_result_with_hash(&test_classification(), 42, Some(&hash))
+            .unwrap();
+
+        let relabel = vec!["wshm:relabel".to_string()];
+
+        // Without the relabel list, the issue would be skipped (hash matches).
+        let none = db.get_issues_needing_triage(10, &[], 0).unwrap();
+        assert!(!none.iter().any(|i| i.number == 42));
+
+        // With the relabel list, the issue is forced back into the batch.
+        let forced = db.get_issues_needing_triage(10, &relabel, 0).unwrap();
+        assert!(forced.iter().any(|i| i.number == 42));
+
+        // Case-insensitive match.
+        let forced_ci = db
+            .get_issues_needing_triage(10, &["WSHM:Relabel".to_string()], 0)
+            .unwrap();
+        assert!(forced_ci.iter().any(|i| i.number == 42));
+    }
+
+    #[test]
+    fn test_no_labels_triggers_retriage_after_age() {
+        use crate::db::schema::compute_issue_hash;
+
+        let db = Database::open_memory().unwrap();
+
+        // Issue triaged, content unchanged, zero labels — the no-labels
+        // trigger should pick it up once acted_at is older than the cap.
+        let mut issue = test_issue();
+        issue.number = 7;
+        issue.labels = vec![]; // zero labels
+        db.upsert_issue(&issue).unwrap();
+        let hash = compute_issue_hash(&issue.title, issue.body.as_deref());
+        db.upsert_triage_result_with_hash(&test_classification(), 7, Some(&hash))
+            .unwrap();
+
+        // Case A: acted_at = now - 25h → triggers when min_age = 24.
+        let old = (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+        force_acted_at(&db, 7, &old);
+        let triggered = db.get_issues_needing_triage(10, &[], 24).unwrap();
+        assert!(
+            triggered.iter().any(|i| i.number == 7),
+            "expected zero-label issue to re-trigger after 25h, got {:?}",
+            triggered.iter().map(|i| i.number).collect::<Vec<_>>()
+        );
+
+        // Case B: acted_at = now - 1h → does NOT trigger.
+        let recent = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        force_acted_at(&db, 7, &recent);
+        let not_triggered = db.get_issues_needing_triage(10, &[], 24).unwrap();
+        assert!(!not_triggered.iter().any(|i| i.number == 7));
+
+        // Case C: min_age = 0 disables the trigger even when old.
+        force_acted_at(&db, 7, &old);
+        let disabled = db.get_issues_needing_triage(10, &[], 0).unwrap();
+        assert!(!disabled.iter().any(|i| i.number == 7));
+
+        // Case D: same old timestamp but the issue has labels → not triggered.
+        let mut labelled = issue.clone();
+        labelled.labels = vec!["bug".to_string()];
+        db.upsert_issue(&labelled).unwrap();
+        force_acted_at(&db, 7, &old);
+        let labelled_skip = db.get_issues_needing_triage(10, &[], 24).unwrap();
+        assert!(!labelled_skip.iter().any(|i| i.number == 7));
     }
 }

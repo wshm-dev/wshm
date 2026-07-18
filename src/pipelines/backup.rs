@@ -91,10 +91,31 @@ pub fn restore(args: &RestoreArgs) -> Result<()> {
     let dec = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(dec);
 
+    // Resolve the canonical destination root once. Every extracted file
+    // must end up strictly inside this directory.
+    fs::create_dir_all(&wshm_dir)?;
+    let canonical_root = wshm_dir
+        .canonicalize()
+        .with_context(|| format!("Cannot resolve {}", wshm_dir.display()))?;
+
     let mut restored = 0u32;
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_path_buf();
+
+        // Security: reject Zip-Slip style entries. An absolute path or any
+        // `..` component lets the entry escape .wshm/ even when its declared
+        // prefix looks safe (e.g. ".wshm/../../etc/cron.d/evil").
+        use std::path::Component;
+        if path.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) {
+            tracing::warn!("Skipping unsafe archive entry: {}", path.display());
+            continue;
+        }
 
         // Security: only extract into .wshm/
         if !path.starts_with("wshm/") && !path.starts_with(".wshm/") {
@@ -106,6 +127,22 @@ pub fn restore(args: &RestoreArgs) -> Result<()> {
         let target = PathBuf::from(".").join(&path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
+        }
+
+        // Defense in depth: after creating the parent dirs, verify the
+        // resolved parent is still inside the canonical .wshm/ root before
+        // writing anything. This catches symlink-based escapes too.
+        if let Some(parent) = target.parent() {
+            let canonical_parent = parent
+                .canonicalize()
+                .with_context(|| format!("Cannot resolve {}", parent.display()))?;
+            if !canonical_parent.starts_with(&canonical_root) {
+                tracing::warn!(
+                    "Skipping entry resolving outside .wshm/: {}",
+                    path.display()
+                );
+                continue;
+            }
         }
 
         entry
@@ -122,7 +159,12 @@ pub fn restore(args: &RestoreArgs) -> Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&creds, fs::Permissions::from_mode(0o600));
+            if let Err(e) = fs::set_permissions(&creds, fs::Permissions::from_mode(0o600)) {
+                tracing::warn!(
+                    "Failed to secure restored credentials file {}: {e}; the secret may be world-readable",
+                    creds.display()
+                );
+            }
         }
     }
 

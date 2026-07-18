@@ -1,6 +1,6 @@
 [package]
 name = "wshm-core"
-version = "0.30.0"
+version = "0.31.5"
 edition = "2021"
 description = "Core library for wshm"
 license = "SSPL-1.0"
@@ -14,7 +14,6 @@ default = []
 
 # Export sinks (cloud storage)
 export-s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
-export-azure = ["dep:azure_storage_blobs", "dep:azure_storage"]
 export-gcs = ["dep:google-cloud-storage"]
 
 # Export sinks (databases)
@@ -28,16 +27,15 @@ export-mysql = ["dep:mysql_async"]
 # Vault providers
 vault-hashicorp = ["dep:vaultrs"]
 vault-aws = ["dep:aws-sdk-secretsmanager", "dep:aws-config"]
-vault-azure = ["dep:azure_security_keyvault", "dep:azure_identity"]
 vault-gcp = ["dep:google-cloud-secretmanager-v1"]
 
 # Convenience bundles
 export-all = [
-    "export-s3", "export-azure", "export-gcs",
+    "export-s3", "export-gcs",
     "export-elastic", "export-opensearch", "export-mongodb",
     "export-mysql",
 ]
-vault-all = ["vault-hashicorp", "vault-aws", "vault-azure", "vault-gcp"]
+vault-all = ["vault-hashicorp", "vault-aws", "vault-gcp"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
@@ -85,8 +83,6 @@ aes-gcm = "0.10"
 # Optional: Export - Cloud Storage
 aws-sdk-s3 = { version = "1", optional = true }
 aws-config = { version = "1", optional = true }
-azure_storage_blobs = { version = "0.21", optional = true }
-azure_storage = { version = "0.21", optional = true }
 google-cloud-storage = { version = "1", optional = true }
 
 # Optional: Export - Databases
@@ -98,8 +94,6 @@ mysql_async = { version = "0.36", optional = true }
 # Optional: Vault
 vaultrs = { version = "0.7", optional = true }
 aws-sdk-secretsmanager = { version = "1", optional = true }
-azure_security_keyvault = { version = "0.21", optional = true }
-azure_identity = { version = "0.33", optional = true }
 google-cloud-secretmanager-v1 = { version = "1", optional = true }
 mime_guess = "2"
 rust-embed = "8"

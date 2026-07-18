@@ -9,6 +9,29 @@ pub use client::Client;
 /// Maximum items per page for GitHub API pagination.
 pub const GITHUB_PER_PAGE: u32 = 100;
 
+/// Maximum number of pages to follow when paginating a list endpoint.
+/// Safety cap against runaway pagination (100 pages × 100 items = 10k).
+pub const GITHUB_MAX_PAGES: u32 = 100;
+
+/// Extract the `rel="next"` URL from a `Link` response header.
+///
+/// GitHub rejects `page=N` pagination on large datasets ("Pagination with
+/// the page parameter is not supported for large datasets, please use
+/// cursor based pagination (after/before)") and instead hands out an
+/// opaque `after` cursor in this header, so list fetchers must follow it
+/// rather than build page-number URLs themselves.
+pub fn parse_link_next(link: &str) -> Option<String> {
+    link.split(',').find_map(|part| {
+        let (url, params) = part.split_once(';')?;
+        if params.contains(r#"rel="next""#) {
+            let url = url.trim().strip_prefix('<')?.strip_suffix('>')?;
+            Some(url.to_string())
+        } else {
+            None
+        }
+    })
+}
+
 /// Extract label names from a GitHub API JSON object.
 pub fn extract_labels(json: &serde_json::Value) -> Vec<String> {
     json.get("labels")
@@ -68,5 +91,30 @@ pub fn parse_json_array(body: &str, what: &str) -> anyhow::Result<Vec<serde_json
             }
             Err(anyhow::Error::from(e).context(format!("Failed to parse {what} JSON")))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_link_next;
+
+    #[test]
+    fn link_next_with_cursor() {
+        let link = r#"<https://api.github.com/repositories/1/issues?per_page=100&after=Y3Vyc29yOnYy>; rel="next", <https://api.github.com/repositories/1/issues?per_page=100>; rel="prev""#;
+        assert_eq!(
+            parse_link_next(link).as_deref(),
+            Some("https://api.github.com/repositories/1/issues?per_page=100&after=Y3Vyc29yOnYy")
+        );
+    }
+
+    #[test]
+    fn link_next_absent_on_last_page() {
+        let link = r#"<https://api.github.com/repositories/1/issues?page=3>; rel="prev", <https://api.github.com/repositories/1/issues?page=1>; rel="first""#;
+        assert_eq!(parse_link_next(link), None);
+    }
+
+    #[test]
+    fn link_next_empty_header() {
+        assert_eq!(parse_link_next(""), None);
     }
 }

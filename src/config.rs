@@ -31,6 +31,9 @@ pub struct Config {
     pub queue: QueueConfig,
 
     #[serde(default)]
+    pub scoring: ScoringConfig,
+
+    #[serde(default)]
     pub conflicts: ConflictConfig,
 
     #[serde(default)]
@@ -279,6 +282,275 @@ fn default_merge_threshold() -> i32 {
 }
 fn default_merge_strategy() -> String {
     "rebase".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Scoring (PR queue + issue ranking)
+// ---------------------------------------------------------------------------
+
+/// Tunable weights for the PR queue and issue ranking algorithms.
+///
+/// Defaults are chosen so the typical PR scores 0..30 (review-ready),
+/// blocked PRs score below 0, and the merge queue threshold of 15
+/// (`[queue].merge_threshold`) lands on PRs with green CI + an
+/// approval-equivalent label or a fixed bug.
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+pub struct ScoringConfig {
+    #[serde(default)]
+    pub pr: PrScoringConfig,
+
+    #[serde(default)]
+    pub issue: IssueScoringConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PrScoringConfig {
+    /// Reward for green CI.
+    #[serde(default = "pr_default_ci_green")]
+    pub ci_green: i32,
+    /// Penalty for failing CI (was missing pre-2026-05).
+    #[serde(default = "pr_default_ci_failure")]
+    pub ci_failure: i32,
+    /// Penalty for pending CI (slows merge until checks land).
+    #[serde(default = "pr_default_ci_pending")]
+    pub ci_pending: i32,
+
+    /// Reward for a clean mergeable state.
+    #[serde(default = "pr_default_mergeable")]
+    pub mergeable: i32,
+    /// Penalty for a known conflict against the base branch.
+    #[serde(default = "pr_default_conflict")]
+    pub conflict: i32,
+
+    /// Reward when the PR body links an issue ("fixes #N", "closes #N", ...).
+    #[serde(default = "pr_default_linked_issue")]
+    pub linked_issue: i32,
+
+    /// Boosts driven by labels on the PR.
+    #[serde(default = "pr_default_label_critical")]
+    pub label_priority_critical: i32,
+    #[serde(default = "pr_default_label_high")]
+    pub label_priority_high: i32,
+    #[serde(default = "pr_default_label_medium")]
+    pub label_priority_medium: i32,
+    #[serde(default = "pr_default_label_bug")]
+    pub label_bug: i32,
+    /// Block-style labels that should sink a PR even if CI is green.
+    #[serde(default = "pr_default_label_blocked")]
+    pub label_blocked: i32,
+
+    /// Per-day age bonus, capped by `age_max_days` so old PRs don't dominate.
+    #[serde(default = "pr_default_age_bonus_max")]
+    pub age_bonus_max: i32,
+    #[serde(default = "pr_default_age_decay_after_days")]
+    pub age_decay_after_days: i64,
+    /// Penalty applied once a PR is older than the decay window.
+    #[serde(default = "pr_default_age_decay_penalty")]
+    pub age_decay_penalty: i32,
+
+    /// Reward for recent activity (commit / comment within 24h).
+    #[serde(default = "pr_default_momentum_recent")]
+    pub momentum_recent: i32,
+    /// Penalty for total dormancy (no update >30 days).
+    #[serde(default = "pr_default_momentum_stale")]
+    pub momentum_stale: i32,
+    /// Threshold (days) under which a PR counts as "recent".
+    #[serde(default = "pr_default_recent_days")]
+    pub recent_days: i64,
+    /// Threshold (days) above which a PR counts as "stale".
+    #[serde(default = "pr_default_stale_days")]
+    pub stale_days: i64,
+}
+
+impl Default for PrScoringConfig {
+    fn default() -> Self {
+        Self {
+            ci_green: pr_default_ci_green(),
+            ci_failure: pr_default_ci_failure(),
+            ci_pending: pr_default_ci_pending(),
+            mergeable: pr_default_mergeable(),
+            conflict: pr_default_conflict(),
+            linked_issue: pr_default_linked_issue(),
+            label_priority_critical: pr_default_label_critical(),
+            label_priority_high: pr_default_label_high(),
+            label_priority_medium: pr_default_label_medium(),
+            label_bug: pr_default_label_bug(),
+            label_blocked: pr_default_label_blocked(),
+            age_bonus_max: pr_default_age_bonus_max(),
+            age_decay_after_days: pr_default_age_decay_after_days(),
+            age_decay_penalty: pr_default_age_decay_penalty(),
+            momentum_recent: pr_default_momentum_recent(),
+            momentum_stale: pr_default_momentum_stale(),
+            recent_days: pr_default_recent_days(),
+            stale_days: pr_default_stale_days(),
+        }
+    }
+}
+
+fn pr_default_ci_green() -> i32 {
+    25
+}
+fn pr_default_ci_failure() -> i32 {
+    -30
+}
+fn pr_default_ci_pending() -> i32 {
+    -5
+}
+fn pr_default_mergeable() -> i32 {
+    2
+}
+fn pr_default_conflict() -> i32 {
+    -25
+}
+fn pr_default_linked_issue() -> i32 {
+    5
+}
+fn pr_default_label_critical() -> i32 {
+    30
+}
+fn pr_default_label_high() -> i32 {
+    15
+}
+fn pr_default_label_medium() -> i32 {
+    5
+}
+fn pr_default_label_bug() -> i32 {
+    5
+}
+fn pr_default_label_blocked() -> i32 {
+    -50
+}
+fn pr_default_age_bonus_max() -> i32 {
+    10
+}
+fn pr_default_age_decay_after_days() -> i64 {
+    60
+}
+fn pr_default_age_decay_penalty() -> i32 {
+    -15
+}
+fn pr_default_momentum_recent() -> i32 {
+    5
+}
+fn pr_default_momentum_stale() -> i32 {
+    -10
+}
+fn pr_default_recent_days() -> i64 {
+    1
+}
+fn pr_default_stale_days() -> i64 {
+    30
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct IssueScoringConfig {
+    /// Boost from the AI-assigned priority field.
+    #[serde(default = "issue_default_ai_critical")]
+    pub ai_priority_critical: i32,
+    #[serde(default = "issue_default_ai_high")]
+    pub ai_priority_high: i32,
+    #[serde(default = "issue_default_ai_medium")]
+    pub ai_priority_medium: i32,
+    /// AI confidence threshold below which the AI-priority boost is halved.
+    #[serde(default = "issue_default_low_conf_threshold")]
+    pub low_confidence_threshold: f64,
+
+    /// Boost per `+1` reaction, capped by `reaction_max_bonus`.
+    #[serde(default = "issue_default_reaction_per_plus1")]
+    pub reaction_per_plus1: i32,
+    #[serde(default = "issue_default_reaction_max")]
+    pub reaction_max_bonus: i32,
+
+    /// Label-driven boosts/penalties on issues.
+    #[serde(default = "issue_default_label_security")]
+    pub label_security: i32,
+    #[serde(default = "issue_default_label_regression")]
+    pub label_regression: i32,
+    #[serde(default = "issue_default_label_bug")]
+    pub label_bug: i32,
+    #[serde(default = "issue_default_label_first")]
+    pub label_first_issue: i32,
+    #[serde(default = "issue_default_label_blocked")]
+    pub label_blocked: i32,
+
+    /// Recency window — issues updated within `recent_days` get the bonus.
+    #[serde(default = "issue_default_recent_days")]
+    pub recent_days: i64,
+    #[serde(default = "issue_default_recent_bonus")]
+    pub recent_bonus: i32,
+    /// Issues without activity for `stale_days` get the penalty.
+    #[serde(default = "issue_default_stale_days")]
+    pub stale_days: i64,
+    #[serde(default = "issue_default_stale_penalty")]
+    pub stale_penalty: i32,
+}
+
+impl Default for IssueScoringConfig {
+    fn default() -> Self {
+        Self {
+            ai_priority_critical: issue_default_ai_critical(),
+            ai_priority_high: issue_default_ai_high(),
+            ai_priority_medium: issue_default_ai_medium(),
+            low_confidence_threshold: issue_default_low_conf_threshold(),
+            reaction_per_plus1: issue_default_reaction_per_plus1(),
+            reaction_max_bonus: issue_default_reaction_max(),
+            label_security: issue_default_label_security(),
+            label_regression: issue_default_label_regression(),
+            label_bug: issue_default_label_bug(),
+            label_first_issue: issue_default_label_first(),
+            label_blocked: issue_default_label_blocked(),
+            recent_days: issue_default_recent_days(),
+            recent_bonus: issue_default_recent_bonus(),
+            stale_days: issue_default_stale_days(),
+            stale_penalty: issue_default_stale_penalty(),
+        }
+    }
+}
+
+fn issue_default_ai_critical() -> i32 {
+    50
+}
+fn issue_default_ai_high() -> i32 {
+    25
+}
+fn issue_default_ai_medium() -> i32 {
+    10
+}
+fn issue_default_low_conf_threshold() -> f64 {
+    0.5
+}
+fn issue_default_reaction_per_plus1() -> i32 {
+    1
+}
+fn issue_default_reaction_max() -> i32 {
+    20
+}
+fn issue_default_label_security() -> i32 {
+    30
+}
+fn issue_default_label_regression() -> i32 {
+    15
+}
+fn issue_default_label_bug() -> i32 {
+    8
+}
+fn issue_default_label_first() -> i32 {
+    3
+}
+fn issue_default_label_blocked() -> i32 {
+    -10
+}
+fn issue_default_recent_days() -> i64 {
+    7
+}
+fn issue_default_recent_bonus() -> i32 {
+    5
+}
+fn issue_default_stale_days() -> i64 {
+    90
+}
+fn issue_default_stale_penalty() -> i32 {
+    -10
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -659,8 +931,14 @@ impl WebConfig {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ =
-                    std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600));
+                if let Err(e) =
+                    std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600))
+                {
+                    tracing::warn!(
+                        "Failed to set 0o600 on {}: {e}; web credentials may be world-readable",
+                        creds_path.display()
+                    );
+                }
             }
         }
 
@@ -1046,6 +1324,12 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub update: UpdateConfig,
 
+    /// Transient-HTTP-error retry policy, shared by every outbound HTTP
+    /// call (poller, git providers, AI, self-update). Editable live from
+    /// Settings -> Reliability.
+    #[serde(default)]
+    pub retry: crate::retry::RetryConfig,
+
     #[serde(default)]
     pub repos: Vec<RepoEntry>,
 }
@@ -1166,9 +1450,9 @@ impl RepoFeatures {
     /// flips off→on; never overrides explicit user choices.
     pub fn merge_legacy_apply(&mut self, apply: bool) {
         if apply {
-            self.triage_issues = self.triage_issues || true;
-            self.analyze_prs = self.analyze_prs || true;
-            self.auto_pr = self.auto_pr || true;
+            self.triage_issues = true;
+            self.analyze_prs = true;
+            self.auto_pr = true;
         }
     }
 }
@@ -1176,7 +1460,7 @@ impl RepoFeatures {
 /// Per-action filters (whitelist + blacklist combinable). Empty vector
 /// or `0` numeric = no filter on that dimension. All fields default to
 /// permissive — restrict explicitly when narrower behavior is wanted.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RepoFilters {
     // ── Global (apply to every action) ────────────────────────────
     #[serde(default)]
@@ -1193,6 +1477,28 @@ pub struct RepoFilters {
     pub triage_skip_labels: Vec<String>,
     #[serde(default)]
     pub triage_max_age_days: u32,
+    /// Labels that, when present on an open issue, force re-triage even
+    /// when the content hash is unchanged. After a successful applied
+    /// triage the bot removes these labels so they don't re-fire forever.
+    #[serde(default = "default_triage_relabel_labels")]
+    pub triage_relabel_labels: Vec<String>,
+    /// Re-triage an open issue that has zero labels if its last triage is
+    /// older than this many hours. `0` disables the trigger.
+    #[serde(default = "default_triage_no_labels_min_age_hours")]
+    pub triage_no_labels_min_age_hours: u32,
+    /// Label-name prefixes that wshm treats as "already triaged" evidence
+    /// on the forge. When an open issue carries any label whose name starts
+    /// with one of these prefixes and has no local `triage_results` row,
+    /// the pipeline seeds a stub row from the labels instead of spending
+    /// an LLM call. Empty disables the safety net (legacy behaviour).
+    #[serde(default = "default_triage_managed_label_prefixes")]
+    pub triage_managed_label_prefixes: Vec<String>,
+    /// Grace window before label-based seeding kicks in. An open issue
+    /// must have been quiet (no `updated_at` change) for at least this
+    /// many hours before its labels are trusted as evidence of a prior
+    /// triage. `0` (default) means seed immediately.
+    #[serde(default)]
+    pub triage_managed_label_grace_hours: u32,
 
     // ── Analyze PRs ───────────────────────────────────────────────
     #[serde(default)]
@@ -1215,6 +1521,43 @@ pub struct RepoFilters {
     pub auto_merge_min_approvals: u32,
     #[serde(default)]
     pub auto_merge_max_loc: u32,
+}
+
+fn default_triage_relabel_labels() -> Vec<String> {
+    vec!["wshm:relabel".to_string()]
+}
+
+fn default_triage_no_labels_min_age_hours() -> u32 {
+    24
+}
+
+fn default_triage_managed_label_prefixes() -> Vec<String> {
+    vec!["priority:".to_string(), "category:".to_string()]
+}
+
+impl Default for RepoFilters {
+    fn default() -> Self {
+        Self {
+            skip_authors: Vec::new(),
+            target_branches: Vec::new(),
+            skip_drafts: false,
+            triage_only_labels: Vec::new(),
+            triage_skip_labels: Vec::new(),
+            triage_max_age_days: 0,
+            triage_relabel_labels: default_triage_relabel_labels(),
+            triage_no_labels_min_age_hours: default_triage_no_labels_min_age_hours(),
+            triage_managed_label_prefixes: default_triage_managed_label_prefixes(),
+            triage_managed_label_grace_hours: 0,
+            analyze_min_loc: 0,
+            analyze_max_loc: 0,
+            auto_pr_only_labels: Vec::new(),
+            auto_pr_target_branch: String::new(),
+            auto_merge_only_authors: Vec::new(),
+            auto_merge_only_labels: Vec::new(),
+            auto_merge_min_approvals: 0,
+            auto_merge_max_loc: 0,
+        }
+    }
 }
 
 impl RepoFilters {
@@ -1526,6 +1869,45 @@ enabled = true
 merge_threshold = 15
 strategy = "rebase"
 
+# Tunable weights for the merge-queue + issue ranking algorithms.
+# Defaults below are the in-code defaults; uncomment to override.
+# [scoring.pr]
+# ci_green = 25
+# ci_failure = -30
+# ci_pending = -5
+# mergeable = 2
+# conflict = -25
+# linked_issue = 5
+# label_priority_critical = 30
+# label_priority_high = 15
+# label_priority_medium = 5
+# label_bug = 5
+# label_blocked = -50
+# age_bonus_max = 10
+# age_decay_after_days = 60
+# age_decay_penalty = -15
+# momentum_recent = 5
+# momentum_stale = -10
+# recent_days = 1
+# stale_days = 30
+#
+# [scoring.issue]
+# ai_priority_critical = 50
+# ai_priority_high = 25
+# ai_priority_medium = 10
+# low_confidence_threshold = 0.5
+# reaction_per_plus1 = 1
+# reaction_max_bonus = 20
+# label_security = 30
+# label_regression = 15
+# label_bug = 8
+# label_first_issue = 3
+# label_blocked = -10
+# recent_days = 7
+# recent_bonus = 5
+# stale_days = 90
+# stale_penalty = -10
+
 [conflicts]
 enabled = true
 auto_resolve = false
@@ -1652,7 +2034,7 @@ full_sync_interval_hours = 24
 # Or use env var: WSHM_LICENSE_KEY=WSHM-XXXX-XXXX-XXXX
 
 # [vault]
-# provider = "hashicorp"               # "hashicorp" | "aws" | "azure" | "gcp"
+# provider = "hashicorp"               # "hashicorp" | "aws" | "gcp"
 # address = "https://vault.example.com"
 # mount = "secret"
 # Auth from env: VAULT_TOKEN, VAULT_ROLE_ID, etc.
@@ -1678,7 +2060,7 @@ full_sync_interval_hours = 24
 # secret = "hmac-secret"
 
 # [export.storage]
-# provider = "s3"                      # "s3" | "azure" | "gcs"
+# provider = "s3"                      # "s3" | "gcs"
 # bucket = "wshm-logs"
 # prefix = "repos/{repo}/"
 # region = "eu-west-1"
@@ -1751,6 +2133,7 @@ impl Default for Config {
             triage: TriageConfig::default(),
             pr: PrConfig::default(),
             queue: QueueConfig::default(),
+            scoring: ScoringConfig::default(),
             conflicts: ConflictConfig::default(),
             sync: SyncConfig::default(),
             fix: FixConfig::default(),

@@ -23,6 +23,9 @@
 
 	let activities: ActivityEntry[] = $state([]);
 	let error: string | null = $state(null);
+	// True until the first fetch settles - stops the empty-state text from
+	// flashing "No results" while the list is still loading.
+	let loading = $state(true);
 	let sortColumns: SortColumn[] = $state([{ key: 'created_at', asc: false }]);
 	let filters: Record<string, string> = $state({
 		created_at: '', action: '', target: '', summary: ''
@@ -70,6 +73,8 @@
 		} catch (e) {
 			if (myToken !== loadToken) return;
 			error = e instanceof Error ? e.message : 'Failed to load activity';
+		} finally {
+			if (myToken === loadToken) loading = false;
 		}
 	}
 
@@ -176,7 +181,17 @@
 					</TableBodyRow>
 				{:else}
 					<TableBodyRow>
-						<TableBodyCell colspan={4} class="text-center text-gray-600 py-8">No activity recorded yet</TableBodyCell>
+						<TableBodyCell colspan={4} class="text-center text-gray-600 py-8">
+							{#if loading}
+								Loading…
+							{:else}
+								No activity recorded yet.
+								<span class="block text-xs text-gray-500 mt-1">
+									Activity appears here once wshm applies triage labels or PR analyses —
+									sync your repos and enable features in <a href="/settings" class="text-blue-400 hover:underline">Settings → Repos</a>.
+								</span>
+							{/if}
+						</TableBodyCell>
 					</TableBodyRow>
 				{/each}
 			</TableBody>

@@ -22,9 +22,12 @@
 
 	let entries: QueueEntry[] = $state([]);
 	let error: string | null = $state(null);
+	// True until the first fetch settles - stops the empty-state text from
+	// flashing "No results" while the list is still loading.
+	let loading = $state(true);
 	let sortColumns: SortColumn[] = $state([{ key: 'score', asc: false }]);
 	let filters: Record<string, string> = $state({
-		pr_number: '', title: '', score: '', ci: '', approvals: '', conflicts: '', risk: ''
+		number: '', title: '', score: '', ci: '', conflicts: '', risk: ''
 	});
 
 	function handleSort(key: string, event: MouseEvent) {
@@ -33,16 +36,16 @@
 
 	let enriched = $derived(entries.map(e => ({
 		...e,
-		ci: e.ci_passing ? 'passing' : 'failing',
-		conflicts: e.has_conflicts ? 'yes' : 'no'
+		ci: e.ci_status === 'success' ? 'passing' : (e.ci_status ? 'failing' : 'unknown'),
+		conflicts: e.mergeable === false ? 'yes' : (e.mergeable === true ? 'no' : 'unknown'),
+		risk: e.risk_level ?? ''
 	})));
 
 	let filtered = $derived(applyFilters(enriched, {
-		pr_number: filters.pr_number,
+		number: filters.number,
 		title: filters.title,
 		score: filters.score,
 		ci: filters.ci,
-		approvals: filters.approvals,
 		conflicts: filters.conflicts,
 		risk: filters.risk
 	}));
@@ -71,6 +74,8 @@
 		} catch (e) {
 			if (myToken !== loadToken) return;
 			error = e instanceof Error ? e.message : 'Failed to load merge queue';
+		} finally {
+			if (myToken === loadToken) loading = false;
 		}
 	}
 
@@ -138,8 +143,8 @@
 		<Table striped hoverable class="w-full">
 			<TableHead class="text-xs uppercase text-gray-400">
 				<TableHeadCell class="px-2 py-1.5 w-[50px]">Rank</TableHeadCell>
-				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[60px]" onclick={(e: MouseEvent) => handleSort('pr_number', e)}>
-					PR <span class={sortArrowClass(sortColumns, 'pr_number')}>{sortArrow(sortColumns, 'pr_number')}</span>{#if sortIndex(sortColumns, 'pr_number') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'pr_number')}</span>{/if}
+				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[60px]" onclick={(e: MouseEvent) => handleSort('number', e)}>
+					PR <span class={sortArrowClass(sortColumns, 'number')}>{sortArrow(sortColumns, 'number')}</span>{#if sortIndex(sortColumns, 'number') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'number')}</span>{/if}
 				</TableHeadCell>
 				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5" onclick={(e: MouseEvent) => handleSort('title', e)}>
 					Title <span class={sortArrowClass(sortColumns, 'title')}>{sortArrow(sortColumns, 'title')}</span>{#if sortIndex(sortColumns, 'title') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'title')}</span>{/if}
@@ -149,9 +154,6 @@
 				</TableHeadCell>
 				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[70px]" onclick={(e: MouseEvent) => handleSort('ci', e)}>
 					CI <span class={sortArrowClass(sortColumns, 'ci')}>{sortArrow(sortColumns, 'ci')}</span>{#if sortIndex(sortColumns, 'ci') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'ci')}</span>{/if}
-				</TableHeadCell>
-				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[70px]" onclick={(e: MouseEvent) => handleSort('approvals', e)}>
-					Apprvls <span class={sortArrowClass(sortColumns, 'approvals')}>{sortArrow(sortColumns, 'approvals')}</span>{#if sortIndex(sortColumns, 'approvals') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'approvals')}</span>{/if}
 				</TableHeadCell>
 				<TableHeadCell class="cursor-pointer select-none px-2 py-1.5 w-[80px]" onclick={(e: MouseEvent) => handleSort('conflicts', e)}>
 					Conflicts <span class={sortArrowClass(sortColumns, 'conflicts')}>{sortArrow(sortColumns, 'conflicts')}</span>{#if sortIndex(sortColumns, 'conflicts') > 0}<span class="text-[0.625rem] text-blue-400 ml-0.5">{sortIndex(sortColumns, 'conflicts')}</span>{/if}
@@ -163,40 +165,42 @@
 			<TableBody>
 				<TableBodyRow class="border-b border-gray-700">
 					<TableBodyCell class="px-2 py-1"></TableBodyCell>
-					<TableBodyCell class="px-2 py-1"><Input type="text" bind:value={filters.pr_number} placeholder="#" size="sm" class="!py-0.5 !px-1 text-xs" /></TableBodyCell>
+					<TableBodyCell class="px-2 py-1"><Input type="text" bind:value={filters.number} placeholder="#" size="sm" class="!py-0.5 !px-1 text-xs" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><Input type="text" bind:value={filters.title} placeholder="filter..." size="sm" class="!py-0.5 !px-1 text-xs" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><Input type="text" bind:value={filters.score} placeholder=">15" size="sm" class="!py-0.5 !px-1 text-xs" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><FilterSelect bind:value={filters.ci} options={ciOptions} /></TableBodyCell>
-					<TableBodyCell class="px-2 py-1"><Input type="text" bind:value={filters.approvals} placeholder=">0" size="sm" class="!py-0.5 !px-1 text-xs" /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><FilterSelect bind:value={filters.conflicts} options={conflictsOptions} /></TableBodyCell>
 					<TableBodyCell class="px-2 py-1"><FilterSelect bind:value={filters.risk} options={riskOptions} /></TableBodyCell>
 				</TableBodyRow>
 				{#each sorted as entry, i}
-					<TableBodyRow class="cursor-pointer" onclick={() => openPr(entry.pr_number)}>
+					<TableBodyRow class="cursor-pointer" onclick={() => openPr(entry.number)}>
 						<TableBodyCell class="px-2 py-1.5 mono text-gray-500 font-bold text-sm">{i + 1}</TableBodyCell>
-						<TableBodyCell class="px-2 py-1.5 mono">#{entry.pr_number}</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5 mono">#{entry.number}</TableBodyCell>
 						<TableBodyCell class="px-2 py-1.5 truncate">{entry.title}</TableBodyCell>
 						<TableBodyCell class="px-2 py-1.5">
 							<span class="mono font-bold {scoreColor(entry.score)}">{entry.score}</span>
 						</TableBodyCell>
 						<TableBodyCell class="px-2 py-1.5">
-							{#if entry.ci_passing}
+							{#if entry.ci_status === 'success'}
 								<Badge color="green">passing</Badge>
-							{:else}
+							{:else if entry.ci_status}
 								<Badge color="red">failing</Badge>
-							{/if}
-						</TableBodyCell>
-						<TableBodyCell class="px-2 py-1.5 mono">{entry.approvals}</TableBodyCell>
-						<TableBodyCell class="px-2 py-1.5">
-							{#if entry.has_conflicts}
-								<Badge color="red">yes</Badge>
 							{:else}
-								<Badge color="green">no</Badge>
+								<span class="text-gray-500">-</span>
 							{/if}
 						</TableBodyCell>
 						<TableBodyCell class="px-2 py-1.5">
-							{#if entry.risk}
-								<Badge color={riskColor(entry.risk)}>{entry.risk}</Badge>
+							{#if entry.mergeable === false}
+								<Badge color="red">yes</Badge>
+							{:else if entry.mergeable === true}
+								<Badge color="green">no</Badge>
+							{:else}
+								<span class="text-gray-500">-</span>
+							{/if}
+						</TableBodyCell>
+						<TableBodyCell class="px-2 py-1.5">
+							{#if entry.risk_level}
+								<Badge color={riskColor(entry.risk_level)}>{entry.risk_level}</Badge>
 							{:else}
 								<span class="text-gray-500">-</span>
 							{/if}
@@ -204,7 +208,7 @@
 					</TableBodyRow>
 				{:else}
 					<TableBodyRow>
-						<TableBodyCell colspan={8} class="text-center text-gray-600 py-8">No pull requests in queue</TableBodyCell>
+						<TableBodyCell colspan={7} class="text-center text-gray-600 py-8">{loading ? 'Loading…' : 'No pull requests in queue'}</TableBodyCell>
 					</TableBodyRow>
 				{/each}
 			</TableBody>

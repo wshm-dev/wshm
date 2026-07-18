@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { Card, Badge } from 'flowbite-svelte';
 	import type { PullRequest } from '$lib/api';
+	import Markdown from './Markdown.svelte';
 
 	let { pr }: { pr: PullRequest } = $props();
 
@@ -92,6 +93,6 @@
 {#if pr.body}
 	<Card class="bg-gray-800 p-3 max-w-none">
 		<div class="text-[0.625rem] uppercase text-gray-500 mb-2">Description</div>
-		<pre class="text-sm text-gray-300 whitespace-pre-wrap break-words max-h-96 overflow-y-auto">{pr.body}</pre>
+		<Markdown source={pr.body} />
 	</Card>
 {/if}

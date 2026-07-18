@@ -28,7 +28,7 @@ jobs:
       - name: Build Web UI
         run: cd web && bun install --frozen-lockfile && bun run build
       - name: Build
-        run: cargo build --release --bin wshm --target x86_64-unknown-linux-gnu
+        run: cargo build --locked --release --bin wshm --target x86_64-unknown-linux-gnu
       - name: Package tar.gz
         run: |
           cd target/x86_64-unknown-linux-gnu/release
@@ -53,6 +53,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: wshm-x86_64-unknown-linux-gnu
+          # Short retention: these are only a hand-off to the `release`
+          # job below. The published binaries live permanently on the
+          # GitHub Release (free storage); keeping run artifacts for the
+          # default 90 days silently fills the 0.5 GB Actions quota.
+          retention-days: 7
           path: |
             wshm-x86_64-unknown-linux-gnu.tar.gz
             wshm_*_amd64.deb
@@ -71,7 +76,7 @@ jobs:
       - name: Build Web UI
         run: cd web && bun install --frozen-lockfile && bun run build
       - name: Build
-        run: cargo build --release --bin wshm --target aarch64-unknown-linux-gnu
+        run: cargo build --locked --release --bin wshm --target aarch64-unknown-linux-gnu
       - name: Package tar.gz
         run: |
           cd target/aarch64-unknown-linux-gnu/release
@@ -96,6 +101,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: wshm-aarch64-unknown-linux-gnu
+          retention-days: 7
           path: |
             wshm-aarch64-unknown-linux-gnu.tar.gz
             wshm_*_arm64.deb
@@ -114,7 +120,7 @@ jobs:
       - name: Build Web UI
         run: cd web && bun install --frozen-lockfile && bun run build
       - name: Build
-        run: cargo build --release --bin wshm --target x86_64-pc-windows-msvc
+        run: cargo build --locked --release --bin wshm --target x86_64-pc-windows-msvc
       - name: Package
         shell: pwsh
         run: |
@@ -122,6 +128,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: wshm-x86_64-pc-windows-msvc
+          retention-days: 7
           path: wshm-x86_64-pc-windows-msvc.zip
 
   release:

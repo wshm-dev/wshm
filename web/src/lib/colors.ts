@@ -28,7 +28,9 @@ export interface ColorConfig {
 const STORAGE_KEY = 'wshm-color-config';
 
 const defaults: ColorConfig = {
-	noPr: '#6b2126',
+	// "No PR" is the normal state for most issues — keep it neutral so red
+	// stays reserved for real signals (critical priority, conflicts, high risk).
+	noPr: '#30363d',
 	hasPr: '#1e3a5f',
 	prReady: '#1a4731',
 
@@ -44,6 +46,43 @@ const defaults: ColorConfig = {
 	bug: '#f85149',
 	feature: '#a371f7',
 	docs: '#58a6ff',
+};
+
+/// Predefined palettes for Settings → Appearance. `default` mirrors the
+/// built-in colors; `highContrast` boosts saturation for visibility;
+/// `muted` tones everything down for calmer dashboards.
+export const colorPresets: Record<string, ColorConfig> = {
+	default: { ...defaults },
+	highContrast: {
+		noPr: '#484f58',
+		hasPr: '#1f6feb',
+		prReady: '#2ea043',
+		critical: '#ff3b30',
+		high: '#ff9f0a',
+		medium: '#0a84ff',
+		low: '#c9d1d9',
+		riskHigh: '#ff3b30',
+		riskMedium: '#ff9f0a',
+		riskLow: '#30d158',
+		bug: '#ff3b30',
+		feature: '#bf5af2',
+		docs: '#0a84ff',
+	},
+	muted: {
+		noPr: '#2d333b',
+		hasPr: '#2d3a4d',
+		prReady: '#2d4d3a',
+		critical: '#b35b5b',
+		high: '#a08a4d',
+		medium: '#5b80a0',
+		low: '#7d8590',
+		riskHigh: '#b35b5b',
+		riskMedium: '#a08a4d',
+		riskLow: '#5ba05b',
+		bug: '#b35b5b',
+		feature: '#8a7dab',
+		docs: '#5b80a0',
+	},
 };
 
 function loadColors(): ColorConfig {

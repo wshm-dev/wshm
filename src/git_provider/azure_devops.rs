@@ -72,60 +72,73 @@ impl AzureDevOpsProvider {
     }
 
     async fn get(&self, url: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .http
-            .get(url)
-            .basic_auth("", Some(&self.token))
-            .send()
-            .await
-            .context("Azure DevOps GET")?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!(
-                "Azure DevOps API error ({status}): {}",
-                &text[..text.len().min(200)]
-            );
-        }
-        Ok(serde_json::from_str(&text)?)
+        crate::retry::with_retry("Azure DevOps GET", || async {
+            let resp = self
+                .http
+                .get(url)
+                .basic_auth("", Some(&self.token))
+                .send()
+                .await
+                .context("Azure DevOps GET")?;
+            let status = resp.status();
+            let text = resp.text().await?;
+            if !status.is_success() {
+                anyhow::bail!(
+                    "Azure DevOps API error ({status}): {}",
+                    &text[..text.len().min(200)]
+                );
+            }
+            Ok(serde_json::from_str(&text)?)
+        })
+        .await
     }
 
     async fn post(&self, url: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
-        let resp = self
-            .http
-            .post(url)
-            .basic_auth("", Some(&self.token))
-            .json(body)
-            .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!(
-                "Azure DevOps API error ({status}): {}",
-                &text[..text.len().min(200)]
-            );
-        }
-        Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+        // Connect-only retry: POST creates non-idempotent resources (comments,
+        // threads). A response-body EOF after the server already created the
+        // resource must NOT be retried, or the comment is duplicated. The one
+        // read-only POST caller (WIQL query) is also safe under connect-only.
+        crate::retry::with_retry_connect_only("Azure DevOps POST", || async {
+            let resp = self
+                .http
+                .post(url)
+                .basic_auth("", Some(&self.token))
+                .json(body)
+                .send()
+                .await?;
+            let status = resp.status();
+            let text = resp.text().await?;
+            if !status.is_success() {
+                anyhow::bail!(
+                    "Azure DevOps API error ({status}): {}",
+                    &text[..text.len().min(200)]
+                );
+            }
+            Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+        })
+        .await
     }
 
     async fn patch(&self, url: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
-        let resp = self
-            .http
-            .patch(url)
-            .basic_auth("", Some(&self.token))
-            .json(body)
-            .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!(
-                "Azure DevOps API error ({status}): {}",
-                &text[..text.len().min(200)]
-            );
-        }
-        Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+        crate::retry::with_retry("Azure DevOps PATCH", || async {
+            let resp = self
+                .http
+                .patch(url)
+                .basic_auth("", Some(&self.token))
+                .json(body)
+                .send()
+                .await?;
+            let status = resp.status();
+            let text = resp.text().await?;
+            if !status.is_success() {
+                anyhow::bail!(
+                    "Azure DevOps API error ({status}): {}",
+                    &text[..text.len().min(200)]
+                );
+            }
+            Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+        })
+        .await
     }
 }
 
@@ -280,6 +293,9 @@ impl GitProvider for AzureDevOpsProvider {
                 ci_status: None,
                 created_at: pr["creationDate"].as_str().unwrap_or("").to_string(),
                 updated_at: pr["creationDate"].as_str().unwrap_or("").to_string(),
+                // Populated by the dedicated review-decision sync pass, not here.
+                review_decision: None,
+                review_decision_at: None,
             })
             .collect())
     }

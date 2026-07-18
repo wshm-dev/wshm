@@ -66,7 +66,13 @@ impl Cipher {
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = self
             .inner
-            .encrypt(nonce, Payload { msg: plaintext, aad })
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
             .map_err(|e| anyhow!("AES-GCM encrypt failed: {e}"))?;
         Ok((nonce_bytes.to_vec(), ciphertext))
     }
@@ -77,7 +83,13 @@ impl Cipher {
         }
         let n = Nonce::from_slice(nonce);
         self.inner
-            .decrypt(n, Payload { msg: ciphertext, aad })
+            .decrypt(
+                n,
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
             .map_err(|e| anyhow!("AES-GCM decrypt failed: {e}"))
     }
 

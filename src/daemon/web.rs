@@ -49,7 +49,7 @@ pub struct WebState {
     /// Optional RBAC store. `Some` enables multi-user accounts with roles
     /// (admin/member/viewer); `None` keeps the legacy single-credential
     /// `[web].username/password` Basic Auth flow.
-    pub users: Option<Arc<crate::auth::UserStore>>,
+    pub users: Option<Arc<dyn crate::auth::UserStoreBackend>>,
     /// Optional in-memory log buffer fed by the tracing layer. When `Some`,
     /// `GET /api/v1/logs` returns the daemon's recent log lines.
     pub logs: Option<Arc<crate::daemon::log_buffer::LogBuffer>>,
@@ -80,6 +80,9 @@ struct ListQuery {
     state: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
+    /// Sort field. Default: `updated_at` (descending). Pass `score` to
+    /// rank by the issue/PR scoring algorithm (see `[scoring]` config).
+    sort: Option<String>,
 }
 
 const PAGE_DEFAULT_LIMIT: usize = 50;
@@ -93,9 +96,7 @@ fn paginate<T: serde::Serialize>(
     offset: Option<usize>,
 ) -> serde_json::Value {
     let total = items.len();
-    let limit = limit
-        .unwrap_or(PAGE_DEFAULT_LIMIT)
-        .clamp(1, PAGE_MAX_LIMIT);
+    let limit = limit.unwrap_or(PAGE_DEFAULT_LIMIT).clamp(1, PAGE_MAX_LIMIT);
     let offset = offset.unwrap_or(0).min(total);
     let slice: Vec<T> = items.into_iter().skip(offset).take(limit).collect();
     json!({
@@ -145,8 +146,8 @@ fn read_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 fn mint_session_cookie(password: &str, ttl_secs: i64) -> (String, i64) {
     let expires_at = chrono::Utc::now().timestamp() + ttl_secs;
     let payload = expires_at.to_string();
-    let mut mac = Hmac::<Sha256>::new_from_slice(password.as_bytes())
-        .expect("HMAC accepts any key size");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(password.as_bytes()).expect("HMAC accepts any key size");
     mac.update(payload.as_bytes());
     let sig = mac.finalize().into_bytes();
     let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
@@ -167,8 +168,8 @@ fn verify_session_cookie(password: &str, value: &str) -> bool {
     if expires_at <= chrono::Utc::now().timestamp() {
         return false;
     }
-    let mut mac = Hmac::<Sha256>::new_from_slice(password.as_bytes())
-        .expect("HMAC accepts any key size");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(password.as_bytes()).expect("HMAC accepts any key size");
     mac.update(expires_str.as_bytes());
     let expected_sig = mac.finalize().into_bytes();
     let expected_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(expected_sig);
@@ -261,10 +262,47 @@ pub fn verify_user_cookie(value: &str) -> Option<i64> {
 /// cookie first, falls back to `X-Auth-Request-Email` / `X-Forwarded-Email`
 /// (oauth2-proxy SSO), upserting the SSO row on first sight. Returns `None`
 /// when no users store is configured or the request has no usable identity.
-async fn current_user(
-    state: &Arc<WebState>,
-    headers: &HeaderMap,
-) -> Option<crate::auth::User> {
+/// Optional defense-in-depth for the `WSHM_TRUST_PROXY_AUTH` trust model.
+///
+/// `WSHM_TRUST_PROXY_AUTH=1` makes the daemon trust forwarded-identity headers
+/// (`X-Forwarded-User` / `X-Forwarded-Email` / `X-Auth-Request-Email`) set by
+/// an upstream oauth2-proxy. That trust is only safe if the daemon listener is
+/// network-isolated so ONLY the proxy can reach it — otherwise any client that
+/// can connect directly (a sidecar, SSRF, direct pod/port access) can forge
+/// those headers and authenticate as any email.
+///
+/// When `WSHM_PROXY_AUTH_TOKEN` is set, the proxy must additionally forward a
+/// matching `X-Wshm-Proxy-Token` header (compared in constant time), so mere
+/// header presence is no longer sufficient. A dedicated header name (rather than
+/// the `X-Auth-Request-*` family) avoids any collision with headers oauth2-proxy
+/// sets/strips itself, so the shared secret survives the proxy hop intact.
+///
+/// Fail-closed by default: if `WSHM_TRUST_PROXY_AUTH` is enabled but no shared
+/// secret is configured, forwarded-identity headers are REJECTED. Trusting
+/// those headers with no shared secret is only safe behind a network-isolated
+/// listener, so relying on isolation alone must be acknowledged explicitly via
+/// `WSHM_TRUST_PROXY_AUTH_NO_TOKEN=1` — otherwise any client that can reach the
+/// listener directly could forge an identity (and self-promote to admin when
+/// the forged email matches `WSHM_ADMIN_EMAIL`).
+fn proxy_shared_secret_ok(headers: &HeaderMap) -> bool {
+    let expected = std::env::var("WSHM_PROXY_AUTH_TOKEN").unwrap_or_default();
+    if expected.is_empty() {
+        // No shared secret configured. Fail closed unless the operator has
+        // explicitly acknowledged that the trusted listener is network
+        // isolated (only the upstream proxy can reach it).
+        return std::env::var("WSHM_TRUST_PROXY_AUTH_NO_TOKEN")
+            .ok()
+            .filter(|v| v == "1" || v == "true")
+            .is_some();
+    }
+    let presented = headers
+        .get("x-wshm-proxy-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    ct_eq(presented.as_bytes(), expected.as_bytes())
+}
+
+async fn current_user(state: &Arc<WebState>, headers: &HeaderMap) -> Option<crate::auth::User> {
     let store = state.users.as_ref()?;
 
     if let Some(cookie_val) = read_cookie(headers, "wshm_session") {
@@ -279,7 +317,7 @@ async fn current_user(
         .ok()
         .filter(|v| v == "1" || v == "true")
         .is_some();
-    if trusts_proxy {
+    if trusts_proxy && proxy_shared_secret_ok(headers) {
         let email = headers
             .get("x-auth-request-email")
             .or_else(|| headers.get("x-forwarded-email"))
@@ -317,8 +355,11 @@ async fn current_user(
 /// third-party site, including sibling subdomains under the shared
 /// `.cloud.rtk-ai.app` cookie domain).
 ///
-/// Public bootstrap endpoints (login, logout, license activate) are
-/// exempt — they have no authenticated state to abuse.
+/// Only the unauthenticated bootstrap endpoints (login, logout) are exempt —
+/// they have no authenticated state to abuse. `license/activate` is an
+/// authenticated, state-changing endpoint, so it must carry the CSRF header
+/// like every other mutating route.
+#[allow(clippy::result_large_err)] // axum Response is the natural error shape here
 fn csrf_check(req: &Request<Body>) -> Result<(), Response> {
     let method = req.method();
     if !matches!(method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE") {
@@ -328,10 +369,7 @@ fn csrf_check(req: &Request<Body>) -> Result<(), Response> {
     if !path.starts_with("/api/v1/") {
         return Ok(());
     }
-    if matches!(
-        path,
-        "/api/v1/auth/login" | "/api/v1/auth/logout" | "/api/v1/license/activate"
-    ) {
+    if matches!(path, "/api/v1/auth/login" | "/api/v1/auth/logout") {
         return Ok(());
     }
     let has_token = req
@@ -349,6 +387,93 @@ fn csrf_check(req: &Request<Body>) -> Result<(), Response> {
         })),
     )
         .into_response())
+}
+
+/// Build the "not authenticated" response for a rejected request.
+///
+/// Browsers (and SPA fetches) get a 302 to `/login`; API/curl callers get a
+/// 401 (with a `WWW-Authenticate: Basic` challenge for non-browser clients
+/// so CLI tooling can retry with Basic Auth).
+fn unauthorized_response(path: &str, headers: &HeaderMap) -> Response {
+    let accept = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let wants_json = path.starts_with("/api/") || accept.contains("application/json");
+    let is_browser_fetch = headers.contains_key("sec-fetch-mode")
+        || headers.contains_key("sec-fetch-site")
+        || headers.contains_key("origin");
+
+    if wants_json {
+        if is_browser_fetch {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unauthorized"})),
+            )
+                .into_response()
+        } else {
+            (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Basic realm=\"wshm\"")],
+                Json(json!({"error": "unauthorized"})),
+            )
+                .into_response()
+        }
+    } else {
+        (
+            StatusCode::FOUND,
+            [(header::LOCATION, HeaderValue::from_static("/login"))],
+        )
+            .into_response()
+    }
+}
+
+/// Whether running completely without configured credentials is explicitly
+/// permitted. Without this opt-in, a daemon that has neither RBAC users nor
+/// a `[web].password` denies all non-public requests (deny-by-default)
+/// rather than serving every repo's data anonymously.
+fn auth_explicitly_disabled() -> bool {
+    std::env::var("WSHM_AUTH_DISABLED")
+        .ok()
+        .filter(|v| v == "1" || v == "true")
+        .is_some()
+}
+
+/// Gather every repo's configured `[web]` (username, password) credential.
+async fn gather_web_cfgs(state: &Arc<WebState>) -> Vec<(String, String)> {
+    let repos = state.multi.repos.read().await;
+    repos
+        .values()
+        .filter_map(|ds| {
+            ds.config
+                .web
+                .password
+                .as_ref()
+                .map(|p| (ds.config.web.username.clone(), p.clone()))
+        })
+        .collect()
+}
+
+/// Constant-time Basic Auth check against any configured `[web]` credential.
+/// A match is a real authenticated request (a valid shared password), not an
+/// anonymous one, so honoring it does not reopen the fail-open hole.
+fn basic_auth_matches(headers: &HeaderMap, web_cfgs: &[(String, String)]) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Basic "))
+        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .map(|decoded| {
+            if let Some((user, pass)) = decoded.split_once(':') {
+                web_cfgs.iter().any(|(u, p)| {
+                    ct_eq(user.as_bytes(), u.as_bytes()) & ct_eq(pass.as_bytes(), p.as_bytes())
+                })
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
 }
 
 async fn auth_middleware(
@@ -373,8 +498,21 @@ async fn auth_middleware(
                 .insert(Some(user) as Option<crate::auth::User>);
             return next.run(req).await;
         }
-        // Fall through to the legacy paths below: a CLI client may still be
-        // hitting the API with Basic Auth even though local accounts exist.
+        // RBAC is active but the request carries no valid identity. Do NOT
+        // fall through to the legacy "no password configured" branch (that
+        // used to serve all data unauthenticated even with RBAC on). But
+        // still honor the documented Basic Auth escape hatch
+        // (`WSHM_WEB_PASSWORD` / `[web].password`) used by CLI/curl and the
+        // dev proxy: a valid shared password is authenticated, not anonymous.
+        // Such a request carries no `User`, so role-gated handlers
+        // (require_min_role) still demand a real RBAC login.
+        let web_cfgs = gather_web_cfgs(&state).await;
+        if !web_cfgs.is_empty() && basic_auth_matches(req.headers(), &web_cfgs) {
+            req.extensions_mut()
+                .insert(None as Option<crate::auth::User>);
+            return next.run(req).await;
+        }
+        return unauthorized_response(&path, req.headers());
     }
     req.extensions_mut()
         .insert(None as Option<crate::auth::User>);
@@ -388,22 +526,16 @@ async fn auth_middleware(
     // New behavior: a Basic Auth pair / signed cookie is accepted when
     // it matches ANY configured repo's [web] block. Empty credential
     // lists (no [web] anywhere) keep "auth disabled" semantics.
-    let repos = state.multi.repos.read().await;
-    let web_cfgs: Vec<(String, String)> = repos
-        .values()
-        .filter_map(|ds| {
-            ds.config
-                .web
-                .password
-                .as_ref()
-                .map(|p| (ds.config.web.username.clone(), p.clone()))
-        })
-        .collect();
-    drop(repos);
+    let web_cfgs = gather_web_cfgs(&state).await;
 
-    // No password configured anywhere → auth disabled (single-user dev mode).
+    // No credentials configured anywhere. Deny by default — serving every
+    // repo's data to anonymous callers must be an explicit opt-in
+    // (WSHM_AUTH_DISABLED=1), not the silent fallback it used to be.
     if web_cfgs.is_empty() {
-        return next.run(req).await;
+        if auth_explicitly_disabled() {
+            return next.run(req).await;
+        }
+        return unauthorized_response(&path, req.headers());
     }
     let valid_passwords: Vec<String> = web_cfgs.iter().map(|(_, p)| p.clone()).collect();
 
@@ -414,6 +546,7 @@ async fn auth_middleware(
         .ok()
         .filter(|v| v == "1" || v == "true")
         .is_some()
+        && proxy_shared_secret_ok(req.headers())
     {
         let has_proxy_header = req.headers().keys().any(|k| {
             let n = k.as_str().to_ascii_lowercase();
@@ -444,65 +577,28 @@ async fn auth_middleware(
     // 3) Basic Auth fallback (CLI / curl). Match against ANY configured
     //    repo's (username, password) pair so a single CI script can hit
     //    a multi-repo daemon without picking the "right" repo's creds.
-    let basic_ok = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Basic "))
-        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .map(|decoded| {
-            if let Some((user, pass)) = decoded.split_once(':') {
-                web_cfgs.iter().any(|(u, p)| user == u && pass == p)
-            } else {
-                false
-            }
-        })
-        .unwrap_or(false);
-    if basic_ok {
+    if basic_auth_matches(req.headers(), &web_cfgs) {
         return next.run(req).await;
     }
 
-    // Decide between 302 (browser → /login) and 401 (API/curl).
-    // Heuristic: API paths and Accept: application/json get JSON; everything
-    // else gets a redirect so the SPA can render the login page.
-    let accept = req
-        .headers()
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let wants_json = path.starts_with("/api/") || accept.contains("application/json");
+    unauthorized_response(&path, req.headers())
+}
 
-    // Detect SPA/browser fetches so we don't trigger the native Basic Auth
-    // dialog. CLI clients (curl) don't send Sec-Fetch-* or Origin and still
-    // get the WWW-Authenticate challenge.
-    let headers = req.headers();
-    let is_browser_fetch = headers.contains_key("sec-fetch-mode")
-        || headers.contains_key("sec-fetch-site")
-        || headers.contains_key("origin");
-
-    if wants_json {
-        if is_browser_fetch {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "unauthorized"})),
-            )
-                .into_response()
-        } else {
-            (
-                StatusCode::UNAUTHORIZED,
-                [(header::WWW_AUTHENTICATE, "Basic realm=\"wshm\"")],
-                Json(json!({"error": "unauthorized"})),
-            )
-                .into_response()
-        }
-    } else {
-        (
-            StatusCode::FOUND,
-            [(header::LOCATION, HeaderValue::from_static("/login"))],
-        )
-            .into_response()
+/// Constant-time byte-slice equality. Returns `true` only when both slices
+/// have the same length and identical contents, without short-circuiting on
+/// the first differing byte (no timing oracle on the shared secret).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        // Length is not itself secret here (it leaks nothing about the
+        // matching prefix), and comparing different-length inputs as equal
+        // would be wrong. Diverge only on length.
+        return false;
     }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// POST /api/v1/auth/login -- validate credentials and set a session cookie.
@@ -547,6 +643,11 @@ async fn api_auth_login(
         let (user, hash) = match lookup {
             Some((u, Some(h))) => (u, h),
             _ => {
+                // No such user, or a user with no local password hash (SSO-
+                // only). Verify the supplied password against a fixed dummy
+                // hash so this path pays the same argon2 cost as a real wrong
+                // password — closing the username-enumeration timing oracle.
+                crate::auth::verify_password(&password, crate::auth::dummy_password_hash());
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(json!({"error": "invalid credentials"})),
@@ -604,7 +705,12 @@ async fn api_auth_login(
         }
     };
 
-    if username != web_cfg.username || password != required_password {
+    // Constant-time comparison so the static shared secret can't be
+    // recovered character-by-character via response timing. Both checks
+    // always run (no short-circuit) via the non-short-circuiting `&`.
+    let creds_ok = ct_eq(username.as_bytes(), web_cfg.username.as_bytes())
+        & ct_eq(password.as_bytes(), required_password.as_bytes());
+    if !creds_ok {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "invalid credentials"})),
@@ -655,24 +761,34 @@ async fn api_auth_me(
             .into_response();
     }
 
-    let email = headers
-        .get("x-auth-request-email")
-        .or_else(|| headers.get("x-forwarded-email"))
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let user = headers
-        .get("x-forwarded-user")
-        .or_else(|| headers.get("x-forwarded-preferred-username"))
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    // Only reflect forwarded-identity headers when the daemon is configured to
+    // trust the upstream proxy AND the shared-secret gate passes — matching the
+    // guard used in current_user(). Otherwise an attacker who can reach the
+    // listener could make the UI display a forged identity string.
+    let trusts_proxy = std::env::var("WSHM_TRUST_PROXY_AUTH")
+        .ok()
+        .filter(|v| v == "1" || v == "true")
+        .is_some();
+    if trusts_proxy && proxy_shared_secret_ok(&headers) {
+        let email = headers
+            .get("x-auth-request-email")
+            .or_else(|| headers.get("x-forwarded-email"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let user = headers
+            .get("x-forwarded-user")
+            .or_else(|| headers.get("x-forwarded-preferred-username"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
 
-    if email.is_some() || user.is_some() {
-        return Json(json!({
-            "email": email,
-            "username": user,
-            "auth_method": "sso",
-        }))
-        .into_response();
+        if email.is_some() || user.is_some() {
+            return Json(json!({
+                "email": email,
+                "username": user,
+                "auth_method": "sso",
+            }))
+            .into_response();
+        }
     }
 
     let repos = state.multi.repos.read().await;
@@ -693,6 +809,7 @@ async fn api_auth_me(
 
 /// Helper for admin-gated handlers. Returns Err response when the request is
 /// not authenticated or the user is not an admin.
+#[allow(clippy::result_large_err)] // axum Response is the natural error shape here
 fn require_admin(
     user: &axum::Extension<Option<crate::auth::User>>,
 ) -> Result<crate::auth::User, Response> {
@@ -703,6 +820,7 @@ fn require_admin(
 /// otherwise a 401/403 response. Routes that don't require any specific
 /// minimum still go through the auth middleware so we always have an
 /// authenticated user when this helper is called.
+#[allow(clippy::result_large_err)] // axum Response is the natural error shape here
 fn require_min_role(
     user: &axum::Extension<Option<crate::auth::User>>,
     min: crate::auth::Role,
@@ -965,8 +1083,14 @@ async fn api_status(
         repos: Vec::new(),
     };
 
-    let __repos_guard = state.multi.repos.read().await;
-    for (slug, ds) in __repos_guard.iter() {
+    // Snapshot the repo map and drop the read guard before the per-repo
+    // blocking DB work, so the RwLock is not held across the whole scan
+    // (which would block repos.write(): repo add/remove/config reload).
+    let __repos_snapshot: Vec<(String, Arc<super::DaemonState>)> = {
+        let g = state.multi.repos.read().await;
+        g.iter().map(|(s, d)| (s.clone(), Arc::clone(d))).collect()
+    };
+    for (slug, ds) in __repos_snapshot.iter() {
         if let Some(ref f) = filter.repo {
             if f != slug {
                 continue;
@@ -998,7 +1122,7 @@ async fn api_status(
             unanalyzed: unanalyzed.len(),
             conflicts,
             last_sync: last_sync.clone(),
-            apply: ds.apply,
+            apply: ds.apply(),
         };
 
         resp.open_issues += repo_status.open_issues;
@@ -1029,14 +1153,23 @@ async fn api_issues(
 ) -> impl IntoResponse {
     let mut all_issues = Vec::new();
 
-    let __repos_guard = state.multi.repos.read().await;
-    for (slug, ds) in __repos_guard.iter() {
+    // Snapshot the repo map and drop the read guard before the per-repo
+    // blocking DB work, so the RwLock is not held across the whole scan
+    // (which would block repos.write(): repo add/remove/config reload).
+    let __repos_snapshot: Vec<(String, Arc<super::DaemonState>)> = {
+        let g = state.multi.repos.read().await;
+        g.iter().map(|(s, d)| (s.clone(), Arc::clone(d))).collect()
+    };
+    for (slug, ds) in __repos_snapshot.iter() {
         if let Some(ref f) = q.repo {
             if f != slug {
                 continue;
             }
         }
         if let Ok(issues) = ds.db.get_open_issues() {
+            // Batch-load all triage results once (avoids an N+1 per-issue
+            // get_triage_result query).
+            let triage_results = ds.db.get_all_triage_results().unwrap_or_default();
             // Build a map: issue_number -> list of linked PRs (from open PRs bodies)
             let open_prs = ds.db.get_open_pulls().unwrap_or_default();
             let mut issue_prs: std::collections::HashMap<u64, Vec<serde_json::Value>> =
@@ -1057,7 +1190,12 @@ async fn api_issues(
             }
 
             for issue in issues {
-                let triage = ds.db.get_triage_result(issue.number).ok().flatten();
+                let triage = triage_results.get(&issue.number).cloned();
+                let (score, score_breakdown) = crate::pipelines::pr_health::score_issue_with(
+                    &issue,
+                    triage.as_ref(),
+                    &ds.config.scoring.issue,
+                );
                 let linked = issue_prs.get(&issue.number);
                 let pr_status = match linked {
                     None => "no_pr",
@@ -1091,7 +1229,10 @@ async fn api_issues(
                     "reactions_plus1": issue.reactions_plus1,
                     "reactions_total": issue.reactions_total,
                     "priority": triage.as_ref().and_then(|t| t.priority.as_deref()),
+                    "confidence": triage.as_ref().map(|t| t.confidence),
                     "category": triage.as_ref().map(|t| t.category.as_str()),
+                    "score": score,
+                    "score_breakdown": score_breakdown,
                     "pr_status": pr_status,
                     "linked_prs": linked,
                     "url": crate::git_provider::web_url_for_issue(&ds.config, issue.number),
@@ -1100,15 +1241,28 @@ async fn api_issues(
         }
     }
 
-    all_issues.sort_by(|a, b| {
-        let ka = a["updated_at"].as_str().unwrap_or("");
-        let kb = b["updated_at"].as_str().unwrap_or("");
-        kb.cmp(ka).then_with(|| {
-            let na = a["number"].as_u64().unwrap_or(0);
-            let nb = b["number"].as_u64().unwrap_or(0);
-            nb.cmp(&na)
-        })
-    });
+    let sort_by_score = q.sort.as_deref() == Some("score");
+    if sort_by_score {
+        all_issues.sort_by(|a, b| {
+            let sa = a["score"].as_i64().unwrap_or(i64::MIN);
+            let sb = b["score"].as_i64().unwrap_or(i64::MIN);
+            sb.cmp(&sa).then_with(|| {
+                let na = a["number"].as_u64().unwrap_or(0);
+                let nb = b["number"].as_u64().unwrap_or(0);
+                nb.cmp(&na)
+            })
+        });
+    } else {
+        all_issues.sort_by(|a, b| {
+            let ka = a["updated_at"].as_str().unwrap_or("");
+            let kb = b["updated_at"].as_str().unwrap_or("");
+            kb.cmp(ka).then_with(|| {
+                let na = a["number"].as_u64().unwrap_or(0);
+                let nb = b["number"].as_u64().unwrap_or(0);
+                nb.cmp(&na)
+            })
+        });
+    }
 
     Json(paginate(all_issues, q.limit, q.offset))
 }
@@ -1122,16 +1276,23 @@ async fn api_pulls(
 ) -> impl IntoResponse {
     let mut all_prs = Vec::new();
 
-    let __repos_guard = state.multi.repos.read().await;
-    for (slug, ds) in __repos_guard.iter() {
+    // Snapshot the repo map and drop the read guard before the per-repo
+    // blocking DB work, so the RwLock is not held across the whole scan
+    // (which would block repos.write(): repo add/remove/config reload).
+    let __repos_snapshot: Vec<(String, Arc<super::DaemonState>)> = {
+        let g = state.multi.repos.read().await;
+        g.iter().map(|(s, d)| (s.clone(), Arc::clone(d))).collect()
+    };
+    for (slug, ds) in __repos_snapshot.iter() {
         if let Some(ref f) = q.repo {
             if f != slug {
                 continue;
             }
         }
         if let Ok(prs) = ds.db.get_open_pulls() {
+            let analyses = ds.db.get_all_pr_analyses().unwrap_or_default();
             for pr in prs {
-                let analysis = ds.db.get_pr_analysis(pr.number).ok().flatten();
+                let analysis = analyses.get(&pr.number);
                 all_prs.push(json!({
                     "repo": slug,
                     "number": pr.number,
@@ -1146,9 +1307,11 @@ async fn api_pulls(
                     "ci_status": pr.ci_status,
                     "created_at": pr.created_at,
                     "updated_at": pr.updated_at,
-                    "risk_level": analysis.as_ref().map(|a| a.risk_level.as_str()),
-                    "pr_type": analysis.as_ref().map(|a| a.pr_type.as_str()),
-                    "summary": analysis.as_ref().map(|a| a.summary.as_str()),
+                    "review_decision": pr.review_decision,
+                    "review_decision_at": pr.review_decision_at,
+                    "risk_level": analysis.map(|a| a.risk_level.as_str()),
+                    "pr_type": analysis.map(|a| a.pr_type.as_str()),
+                    "summary": analysis.map(|a| a.summary.as_str()),
                     "url": crate::git_provider::web_url_for_pr(&ds.config, pr.number),
                 }));
             }
@@ -1176,8 +1339,14 @@ async fn api_triage(
 ) -> impl IntoResponse {
     let mut all_results = Vec::new();
 
-    let __repos_guard = state.multi.repos.read().await;
-    for (slug, ds) in __repos_guard.iter() {
+    // Snapshot the repo map and drop the read guard before the per-repo
+    // blocking DB work, so the RwLock is not held across the whole scan
+    // (which would block repos.write(): repo add/remove/config reload).
+    let __repos_snapshot: Vec<(String, Arc<super::DaemonState>)> = {
+        let g = state.multi.repos.read().await;
+        g.iter().map(|(s, d)| (s.clone(), Arc::clone(d))).collect()
+    };
+    for (slug, ds) in __repos_snapshot.iter() {
         if let Some(ref f) = q.repo {
             if f != slug {
                 continue;
@@ -1218,14 +1387,21 @@ async fn api_queue(
 ) -> impl IntoResponse {
     let mut queue = Vec::new();
 
-    let __repos_guard = state.multi.repos.read().await;
-    for (slug, ds) in __repos_guard.iter() {
+    // Snapshot the repo map and drop the read guard before the per-repo
+    // blocking DB work, so the RwLock is not held across the whole scan
+    // (which would block repos.write(): repo add/remove/config reload).
+    let __repos_snapshot: Vec<(String, Arc<super::DaemonState>)> = {
+        let g = state.multi.repos.read().await;
+        g.iter().map(|(s, d)| (s.clone(), Arc::clone(d))).collect()
+    };
+    for (slug, ds) in __repos_snapshot.iter() {
         if let Some(ref f) = q.repo {
             if f != slug {
                 continue;
             }
         }
         if let Ok(prs) = ds.db.get_open_pulls() {
+            let analyses = ds.db.get_all_pr_analyses().unwrap_or_default();
             for pr in prs {
                 // Basic scoring (mirrors pipelines::merge_queue logic)
                 let mut score: i64 = 0;
@@ -1249,8 +1425,8 @@ async fn api_queue(
                 }
 
                 // Analysis data (if available)
-                let analysis = ds.db.get_pr_analysis(pr.number).ok().flatten();
-                if let Some(ref a) = analysis {
+                let analysis = analyses.get(&pr.number);
+                if let Some(a) = analysis {
                     match a.risk_level.as_str() {
                         "low" => score += 5,
                         "high" => score -= 5,
@@ -1266,8 +1442,8 @@ async fn api_queue(
                     "mergeable": pr.mergeable,
                     "ci_status": pr.ci_status,
                     "score": score,
-                    "risk_level": analysis.as_ref().map(|a| &a.risk_level),
-                    "pr_type": analysis.as_ref().map(|a| &a.pr_type),
+                    "risk_level": analysis.map(|a| &a.risk_level),
+                    "pr_type": analysis.map(|a| &a.pr_type),
                     "created_at": pr.created_at,
                 }));
             }
@@ -1296,8 +1472,14 @@ async fn api_activity(
 ) -> impl IntoResponse {
     let mut entries: Vec<ActivityEntry> = Vec::new();
 
-    let __repos_guard = state.multi.repos.read().await;
-    for (slug, ds) in __repos_guard.iter() {
+    // Snapshot the repo map and drop the read guard before the per-repo
+    // blocking DB work, so the RwLock is not held across the whole scan
+    // (which would block repos.write(): repo add/remove/config reload).
+    let __repos_snapshot: Vec<(String, Arc<super::DaemonState>)> = {
+        let g = state.multi.repos.read().await;
+        g.iter().map(|(s, d)| (s.clone(), Arc::clone(d))).collect()
+    };
+    for (slug, ds) in __repos_snapshot.iter() {
         if let Some(ref f) = q.repo {
             if f != slug {
                 continue;
@@ -1320,20 +1502,19 @@ async fn api_activity(
             }
         }
 
-        // PR analysis activity -- iterate open PRs and check for analyses
-        if let Ok(prs) = ds.db.get_open_pulls() {
-            for pr in prs {
-                if let Ok(Some(a)) = ds.db.get_pr_analysis(pr.number) {
-                    entries.push(ActivityEntry {
-                        entry_type: "pr_analysis".to_string(),
-                        repo: slug.clone(),
-                        number: pr.number,
-                        summary: Some(a.summary),
-                        category: Some(a.pr_type),
-                        risk_level: Some(a.risk_level),
-                        at: a.analyzed_at,
-                    });
-                }
+        // PR analysis activity -- one batched query returns every analysis
+        // row directly (only analyzed PRs produce an ActivityEntry).
+        if let Ok(analyses) = ds.db.get_all_pr_analyses() {
+            for (pr_number, a) in analyses {
+                entries.push(ActivityEntry {
+                    entry_type: "pr_analysis".to_string(),
+                    repo: slug.clone(),
+                    number: pr_number,
+                    summary: Some(a.summary),
+                    category: Some(a.pr_type),
+                    risk_level: Some(a.risk_level),
+                    at: a.analyzed_at,
+                });
             }
         }
     }
@@ -1401,33 +1582,33 @@ async fn api_changelog(
     let mut sections: std::collections::HashMap<String, Vec<serde_json::Value>> =
         std::collections::HashMap::new();
 
-    let __repos_guard = state.multi.repos.read().await;
-    for (slug, ds) in __repos_guard.iter() {
+    // Snapshot the repo map and drop the read guard before the per-repo
+    // blocking DB work, so the RwLock is not held across the whole scan
+    // (which would block repos.write(): repo add/remove/config reload).
+    let __repos_snapshot: Vec<(String, Arc<super::DaemonState>)> = {
+        let g = state.multi.repos.read().await;
+        g.iter().map(|(s, d)| (s.clone(), Arc::clone(d))).collect()
+    };
+    for (slug, ds) in __repos_snapshot.iter() {
         if let Some(ref f) = filter.repo {
             if f != slug {
                 continue;
             }
         }
 
-        let closed_prs = ds.db.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT number, title, labels, author, updated_at
-                 FROM pull_requests WHERE state = 'closed'
-                 ORDER BY updated_at DESC LIMIT 100",
-            )?;
-            let rows = stmt
-                .query_map([], |row| {
-                    let labels_str: String = row.get(2)?;
-                    Ok(json!({
-                        "number": row.get::<_, u64>(0)?,
-                        "title": row.get::<_, String>(1)?,
-                        "labels": serde_json::from_str::<Vec<String>>(&labels_str).unwrap_or_default(),
-                        "author": row.get::<_, Option<String>>(3)?,
-                        "merged_at": row.get::<_, String>(4)?,
-                    }))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
+        let closed_prs = ds.db.get_closed_pulls(100).map(|pulls| {
+            pulls
+                .into_iter()
+                .map(|pr| {
+                    json!({
+                        "number": pr.number,
+                        "title": pr.title,
+                        "labels": pr.labels,
+                        "author": pr.author,
+                        "merged_at": pr.updated_at,
+                    })
+                })
+                .collect::<Vec<_>>()
         });
 
         if let Ok(prs) = closed_prs {
@@ -1508,8 +1689,14 @@ async fn api_revert_preview(
 ) -> impl IntoResponse {
     let mut preview = Vec::new();
 
-    let __repos_guard = state.multi.repos.read().await;
-    for (slug, ds) in __repos_guard.iter() {
+    // Snapshot the repo map and drop the read guard before the per-repo
+    // blocking DB work, so the RwLock is not held across the whole scan
+    // (which would block repos.write(): repo add/remove/config reload).
+    let __repos_snapshot: Vec<(String, Arc<super::DaemonState>)> = {
+        let g = state.multi.repos.read().await;
+        g.iter().map(|(s, d)| (s.clone(), Arc::clone(d))).collect()
+    };
+    for (slug, ds) in __repos_snapshot.iter() {
         if let Some(ref f) = filter.repo {
             if f != slug {
                 continue;
@@ -1519,13 +1706,12 @@ async fn api_revert_preview(
         let mut comments_count = 0usize;
         let mut labels_count = 0usize;
 
+        // Batch-load per-issue applied-label counts once (avoids one
+        // get_wshm_applied_labels query per open issue).
         if let Ok(issues) = ds.db.get_open_issues() {
+            let label_counts = ds.db.get_applied_label_counts().unwrap_or_default();
             for issue in &issues {
-                if let Ok(labels) = ds.db.get_wshm_applied_labels(issue.number) {
-                    if !labels.is_empty() {
-                        labels_count += labels.len();
-                    }
-                }
+                labels_count += label_counts.get(&issue.number).copied().unwrap_or(0);
             }
         }
 
@@ -1533,12 +1719,15 @@ async fn api_revert_preview(
             comments_count = results.len();
         }
 
+        // Count open PRs that have an analysis row using the batched map
+        // instead of a per-PR get_pr_analysis query.
+        let analyses = ds.db.get_all_pr_analyses().unwrap_or_default();
         let pr_analyses_count = ds
             .db
             .get_open_pulls()
             .unwrap_or_default()
             .iter()
-            .filter(|pr| ds.db.get_pr_analysis(pr.number).ok().flatten().is_some())
+            .filter(|pr| analyses.contains_key(&pr.number))
             .count();
 
         preview.push(json!({
@@ -1675,17 +1864,35 @@ async fn run_sync(state: &WebState, repo_filter: Option<&str>, full: bool) -> Re
             .into_response();
     }
 
+    // Sync repos concurrently with bounded fan-out so an all-repos sync
+    // does not run strictly serially. Keep the concurrency modest to respect
+    // GitHub rate limits (mirrors github/sync.rs).
+    const SYNC_CONCURRENCY: usize = 4;
+    use futures::stream::StreamExt;
+    let results: Vec<(String, Result<(), anyhow::Error>)> = futures::stream::iter(targets)
+        .map(|(slug, daemon)| async move {
+            let result = if full {
+                crate::github::sync::full_sync(&daemon.gh(), daemon.db.as_ref()).await
+            } else {
+                crate::github::sync::incremental_sync_full(&daemon.gh(), daemon.db.as_ref()).await
+            };
+            (slug, result)
+        })
+        .buffer_unordered(SYNC_CONCURRENCY)
+        .collect()
+        .await;
+
     let mut synced = Vec::new();
     let mut errors = Vec::new();
-    for (slug, daemon) in targets {
-        let result = if full {
-            crate::github::sync::full_sync(&daemon.gh(), &daemon.db).await
-        } else {
-            crate::github::sync::incremental_sync_full(&daemon.gh(), &daemon.db).await
-        };
+    for (slug, result) in results {
         match result {
             Ok(()) => synced.push(slug),
-            Err(e) => errors.push(json!({"repo": slug, "error": format!("{e:#}")})),
+            Err(e) => {
+                // Log the full chain server-side; return a sanitized
+                // message in the HTTP body to avoid leaking internal paths.
+                tracing::warn!("[{slug}] sync failed: {e:#}");
+                errors.push(json!({"repo": slug, "error": "sync failed; see server logs"}));
+            }
         }
     }
 
@@ -1708,7 +1915,7 @@ async fn api_restore_backup(
             return e;
         }
     }
-    let path = match body.get("path").and_then(|v| v.as_str()) {
+    let requested = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => {
             return (
@@ -1722,8 +1929,34 @@ async fn api_restore_backup(
         }
     };
 
+    // Restore is a privileged operation regardless of RBAC mode: it can
+    // overwrite the database, config, and credentials. Constrain the source
+    // to the .wshm/ backups directory so a single-password session cannot
+    // restore from an arbitrary filesystem path (which, combined with the
+    // tarball it points at, would otherwise grant arbitrary file write).
+    let backups_dir = std::path::PathBuf::from(".wshm");
+    let candidate = std::path::Path::new(&requested);
+    // Only accept a bare backup file name (no separators, no parent refs).
+    let file_name = candidate.file_name().and_then(|n| n.to_str());
+    let is_bare_name = file_name == Some(requested.as_str());
+    if !is_bare_name
+        || requested.contains("..")
+        || candidate.is_absolute()
+        || file_name.is_none_or(|n| !n.starts_with("backup-") || !n.ends_with(".tar.gz"))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error",
+                "message": "path must be a backup file name inside the .wshm/ directory",
+            })),
+        )
+            .into_response();
+    }
+    let resolved = backups_dir.join(file_name.unwrap());
+
     let args = crate::cli::RestoreArgs {
-        file: path,
+        file: resolved.to_string_lossy().to_string(),
         force: true,
     };
     match crate::pipelines::backup::restore(&args) {
@@ -1778,6 +2011,18 @@ async fn api_license() -> impl IntoResponse {
         // the feature too — re-activation just adds the explicit
         // entry, no behavior change.
         ("search", "Global full-text search", is_pro),
+        // PR Insights is a Pro-only feature: its route and page live
+        // in wshm-pro, not here. Declared in this list so the SPA can
+        // gate the sidebar entry; `is_pro` is the enabled flag.
+        ("pr-insights", "PR insights dashboard", is_pro),
+        // Issue Insights — like pr-insights, the route and page live in
+        // wshm-pro. Declared here only so the SPA can gate the sidebar
+        // entry; `is_pro` is the enabled flag.
+        ("issue-insights", "Issue insights dashboard", is_pro),
+        // Usage dashboard (Pro). Tracks LLM invocations from the Pro
+        // Postgres backend + live GitHub rate limit. Sidebar entry is
+        // gated; the page itself ships only in the Pro web bundle.
+        ("usage-dashboard", "LLM + API usage dashboard", is_pro),
     ];
 
     let features: Vec<serde_json::Value> = pro_features
@@ -1878,7 +2123,27 @@ fn activate_license(key: &str) -> Result<String, String> {
         .map_err(|e| format!("Invalid response: {e}"))?;
 
     if let Some(token) = body["token"].as_str() {
-        // Cache JWT
+        let plan = body["license"]["type"]
+            .as_str()
+            .unwrap_or("pro")
+            .to_string();
+
+        // Persist to DB first (authoritative store — survives PVC file
+        // truncation that historically wiped license.jwt). Then mirror
+        // to the legacy file path for rétrocompat with operators that
+        // still read it directly.
+        let db_path = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".wshm")
+            .join("state.db");
+        if let Ok(conn) = crate::db::licenses::open_state_db(&db_path) {
+            if let Err(e) =
+                crate::db::licenses::store(&conn, token, Some(key), Some(&plan), None, None)
+            {
+                tracing::warn!("Failed to persist license to state.db: {e}");
+            }
+        }
+
         let path = dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(".wshm")
@@ -1886,17 +2151,24 @@ fn activate_license(key: &str) -> Result<String, String> {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&path, token);
+        if let Err(e) = std::fs::write(&path, token) {
+            tracing::warn!("Failed to mirror license to {}: {e}", path.display());
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            {
+                // A failure here can leave the license JWT world-readable
+                // (default umask). The DB copy is authoritative, but warn so
+                // an operator can tighten the on-disk file's permissions.
+                tracing::warn!(
+                    "Failed to set 0o600 on license file {}: {e}",
+                    path.display()
+                );
+            }
         }
 
-        let plan = body["license"]["type"]
-            .as_str()
-            .unwrap_or("pro")
-            .to_string();
         Ok(plan)
     } else {
         Err(body["error"]
@@ -1914,7 +2186,7 @@ async fn api_list_repos(State(state): State<Arc<WebState>>) -> impl IntoResponse
         .map(|(slug, ds)| {
             json!({
                 "slug": slug,
-                "apply": ds.apply,
+                "apply": ds.apply(),
                 "wshm_dir": ds.config.wshm_dir.display().to_string(),
                 "features": ds.features(),
             })
@@ -1925,13 +2197,21 @@ async fn api_list_repos(State(state): State<Arc<WebState>>) -> impl IntoResponse
 }
 
 /// GET /api/v1/repos/{slug}/features -- read the per-repo feature toggles.
+/// Includes `apply` (master dry-run/apply toggle) on top of the standard
+/// RepoFeatures fields, so the Settings UI can render a single modal.
 async fn api_repo_features_get(
     State(state): State<Arc<WebState>>,
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> Response {
     let repos = state.multi.repos.read().await;
     match repos.get(&slug) {
-        Some(ds) => Json(json!(ds.features())).into_response(),
+        Some(ds) => {
+            let mut resp = json!(ds.features());
+            if let Some(obj) = resp.as_object_mut() {
+                obj.insert("apply".to_string(), json!(ds.apply()));
+            }
+            Json(resp).into_response()
+        }
         None => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": format!("repo '{slug}' not configured")})),
@@ -1988,15 +2268,21 @@ async fn api_repo_features_patch(
 
     // Filters: full replace if a `filters` object is in the body.
     if let Some(f_body) = body.get("filters") {
-        if let Ok(parsed) =
-            serde_json::from_value::<crate::config::RepoFilters>(f_body.clone())
-        {
+        if let Ok(parsed) = serde_json::from_value::<crate::config::RepoFilters>(f_body.clone()) {
             features.filters = parsed;
         }
     }
 
     // Apply to in-memory state immediately.
     ds.set_features(features.clone());
+
+    // Master apply-mode toggle. Lives on RepoEntry, not RepoFeatures, so
+    // it's patched separately. The flag flips dry-run ↔ apply at runtime
+    // without daemon restart — pipelines read `state.apply()` per request.
+    let apply_change = body.get("apply").and_then(|v| v.as_bool());
+    if let Some(new_apply) = apply_change {
+        ds.set_apply(new_apply);
+    }
 
     // Persist to global.toml so the change survives restart. Errors are
     // logged but not propagated — the in-memory state is already updated,
@@ -2007,6 +2293,9 @@ async fn api_repo_features_patch(
             for entry in &mut global.repos {
                 if entry.slug == slug {
                     entry.features = features.clone();
+                    if let Some(new_apply) = apply_change {
+                        entry.apply = Some(new_apply);
+                    }
                 }
             }
             if let Err(e) = global.save(&global_path) {
@@ -2015,7 +2304,62 @@ async fn api_repo_features_patch(
         }
     }
 
-    Json(json!(features)).into_response()
+    let mut resp = json!(features);
+    if let Some(obj) = resp.as_object_mut() {
+        obj.insert("apply".to_string(), json!(ds.apply()));
+    }
+    Json(resp).into_response()
+}
+
+/// GET /api/v1/config/retry -- read the live HTTP retry policy.
+async fn api_retry_get() -> Response {
+    Json(crate::retry::global()).into_response()
+}
+
+/// PATCH /api/v1/config/retry -- update the HTTP retry policy. Body is a
+/// partial RetryConfig JSON (any subset of fields). Applies live without a
+/// daemon restart and persists to ~/.wshm/global.toml.
+async fn api_retry_patch(
+    State(state): State<Arc<WebState>>,
+    user: axum::Extension<Option<crate::auth::User>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if state.users.is_some() {
+        if let Err(e) = require_admin(&user) {
+            return e;
+        }
+    }
+
+    // Merge the partial body over the current live policy.
+    let mut cfg = crate::retry::global();
+    if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
+        cfg.enabled = v;
+    }
+    if let Some(v) = body.get("max_attempts").and_then(|v| v.as_u64()) {
+        cfg.max_attempts = v as u32;
+    }
+    if let Some(v) = body.get("initial_backoff_ms").and_then(|v| v.as_u64()) {
+        cfg.initial_backoff_ms = v;
+    }
+    if let Some(v) = body.get("max_backoff_ms").and_then(|v| v.as_u64()) {
+        cfg.max_backoff_ms = v;
+    }
+    // sanitized() clamps to safe ranges so a bad entry can't wedge retries.
+    let cfg = cfg.sanitized();
+
+    // Apply live, then persist so the policy survives a restart.
+    crate::retry::set_global(cfg.clone());
+    let global_path = crate::config::GlobalConfig::default_path();
+    if global_path.exists() {
+        if let Ok(mut global) = crate::config::GlobalConfig::load(&global_path) {
+            global.retry = cfg.clone();
+            if let Err(e) = global.save(&global_path) {
+                tracing::warn!("Failed to persist retry config to global.toml: {e}");
+            }
+        }
+    }
+
+    Json(cfg).into_response()
 }
 
 /// POST /api/v1/repos -- add a repo at runtime (multi-repo mode only).
@@ -2044,12 +2388,29 @@ async fn api_add_repo(
 
     // Path: explicit if provided, else add_repo derives it from the runtime
     // config dir so per-repo state lives on the same volume as global.toml.
-    let path = body
+    // A caller-supplied path is a directory-creation + SQLite-write primitive
+    // (add_repo does create_dir_all + opens a DB there and loads any existing
+    // config.toml), so reject absolute paths and any parent-dir traversal —
+    // mirroring the hardening in api_restore_backup. add_repo then anchors the
+    // value under the global config dir's repos/ subtree.
+    let path_str = body
         .get("path")
         .and_then(|v| v.as_str())
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(std::path::PathBuf::from);
+        .filter(|s| !s.is_empty());
+    if let Some(p) = path_str {
+        let candidate = std::path::Path::new(p);
+        if candidate.is_absolute() || candidate.components().any(|c| c.as_os_str() == "..") {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "path must be a relative name without '..' (it is anchored under the config repos/ directory)"
+                })),
+            )
+                .into_response();
+        }
+    }
+    let path = path_str.map(std::path::PathBuf::from);
 
     match state.multi.add_repo(&slug, path).await {
         Ok(state) => (
@@ -2104,14 +2465,28 @@ async fn api_summary(
 
     let slug = format!("{}/{}", ds.config.repo_owner, ds.config.repo_name);
     let issues = ds.db.get_open_issues().unwrap_or_default();
-    let untriaged = ds.db.get_untriaged_issues().unwrap_or_default();
     let prs = ds.db.get_open_pulls().unwrap_or_default();
     let conflicts = prs.iter().filter(|p| p.mergeable == Some(false)).count();
+
+    // Untriaged count: derive it from the already-loaded open issues and the
+    // triage-results key set instead of issuing a second full LEFT JOIN scan of
+    // the issues table (the former get_untriaged_issues query). A single
+    // get_all_triage_results() index read replaces that join.
+    let triage = ds.db.get_all_triage_results().unwrap_or_default();
+    let untriaged_count = issues
+        .iter()
+        .filter(|i| !triage.contains_key(&i.number))
+        .count();
+
+    // Batch-load all PR analyses once; the three passes below (unanalyzed
+    // count, high-risk, top PRs) all index into this map instead of issuing
+    // a per-PR get_pr_analysis query.
+    let analyses = ds.db.get_all_pr_analyses().unwrap_or_default();
 
     // unanalyzed_prs: count PRs without an analysis row.
     let unanalyzed_count = prs
         .iter()
-        .filter(|p| ds.db.get_pr_analysis(p.number).ok().flatten().is_none())
+        .filter(|p| !analyses.contains_key(&p.number))
         .count();
 
     let now = chrono::Utc::now();
@@ -2154,22 +2529,27 @@ async fn api_summary(
         .map(to_issue_brief)
         .collect();
 
-    // Top issues: by reactions+1, then by recency.
-    let mut sorted_issues = issues.clone();
+    // Top issues: by reactions+1, then by recency. Sort a Vec of
+    // references to avoid a full deep clone of every issue just to take 5.
+    let mut sorted_issues: Vec<&crate::db::issues::Issue> = issues.iter().collect();
     sorted_issues.sort_by(|a, b| {
         b.reactions_plus1
             .cmp(&a.reactions_plus1)
             .then_with(|| b.updated_at.cmp(&a.updated_at))
     });
-    let top_issues: Vec<_> = sorted_issues.iter().take(5).map(to_issue_brief).collect();
+    let top_issues: Vec<_> = sorted_issues
+        .iter()
+        .take(5)
+        .map(|i| to_issue_brief(i))
+        .collect();
 
     // High-risk PRs: where analysis.risk_level is high or critical.
     let high_risk_prs: Vec<_> = prs
         .iter()
         .filter_map(|p| {
-            ds.db.get_pr_analysis(p.number).ok().flatten().and_then(|a| {
+            analyses.get(&p.number).and_then(|a| {
                 if a.risk_level == "high" || a.risk_level == "critical" {
-                    Some(to_pr_brief(p, Some(a.risk_level)))
+                    Some(to_pr_brief(p, Some(a.risk_level.clone())))
                 } else {
                     None
                 }
@@ -2178,19 +2558,15 @@ async fn api_summary(
         .take(5)
         .collect();
 
-    // Top PRs: oldest open first (these are the ones at risk of being forgotten).
-    let mut sorted_prs = prs.clone();
+    // Top PRs: oldest open first (these are the ones at risk of being
+    // forgotten). Sort references to avoid deep-cloning every PR.
+    let mut sorted_prs: Vec<&crate::db::pulls::PullRequest> = prs.iter().collect();
     sorted_prs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
     let top_prs: Vec<_> = sorted_prs
         .iter()
         .take(5)
         .map(|p| {
-            let risk = ds
-                .db
-                .get_pr_analysis(p.number)
-                .ok()
-                .flatten()
-                .map(|a| a.risk_level);
+            let risk = analyses.get(&p.number).map(|a| a.risk_level.clone());
             to_pr_brief(p, risk)
         })
         .collect();
@@ -2199,7 +2575,7 @@ async fn api_summary(
         "repo": slug,
         "timestamp": now.to_rfc3339(),
         "open_issues": issues.len(),
-        "untriaged_issues": untriaged.len(),
+        "untriaged_issues": untriaged_count,
         "high_priority_issues": high_priority_issues,
         "top_issues": top_issues,
         "open_prs": prs.len(),
@@ -2219,29 +2595,31 @@ async fn api_summary(
 async fn api_auth_status(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let creds = crate::login::load_credentials();
 
-    let secrets_has = |key: &str| -> bool {
-        if let Some(store) = state.secrets.as_ref() {
-            if let Ok(Some(v)) =
-                store.get_blocking(crate::secrets::Scope::Global, None, key)
-            {
+    // Use the async get() (yields at the await point) rather than the
+    // blocking variant, so this handler never holds a std Mutex across a
+    // synchronous sqlite query on the tokio worker.
+    let store = state.secrets.as_ref();
+    let secrets_has = |key: &'static str| async move {
+        if let Some(store) = store {
+            if let Ok(Some(v)) = store.get(crate::secrets::Scope::Global, None, key).await {
                 return !v.is_empty();
             }
         }
         false
     };
 
-    let github = secrets_has("github_token")
+    let github = secrets_has("github_token").await
         || creds.contains_key("GITHUB_TOKEN")
         || std::env::var("GITHUB_TOKEN").is_ok()
         || std::env::var("WSHM_TOKEN").is_ok();
 
-    let anthropic_kind = if secrets_has("anthropic_oauth_token")
+    let anthropic_kind = if secrets_has("anthropic_oauth_token").await
         || creds.contains_key("ANTHROPIC_OAUTH_TOKEN")
         || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
         || std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok()
     {
         Some("oauth")
-    } else if secrets_has("anthropic_api_key")
+    } else if secrets_has("anthropic_api_key").await
         || creds.contains_key("ANTHROPIC_API_KEY")
         || std::env::var("ANTHROPIC_API_KEY").is_ok()
     {
@@ -2297,9 +2675,13 @@ async fn api_auth_github(
             )
             .await
         {
+            tracing::warn!("Failed to persist GitHub token to secret store: {e:#}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"status": "error", "message": format!("{e}")})),
+                Json(json!({
+                    "status": "error",
+                    "message": "failed to persist GitHub token; see server logs",
+                })),
             )
                 .into_response();
         }
@@ -2307,7 +2689,14 @@ async fn api_auth_github(
         // plaintext copy so we don't keep two sources of truth.
         let mut creds = crate::login::load_credentials();
         if creds.remove("GITHUB_TOKEN").is_some() {
-            let _ = crate::login::save_credentials(&creds);
+            if let Err(e) = crate::login::save_credentials(&creds) {
+                // The token now lives in the encrypted store but the
+                // legacy plaintext copy could NOT be scrubbed — surface it
+                // so the operator knows the secret still exists on disk.
+                tracing::warn!(
+                    "Failed to scrub legacy plaintext GITHUB_TOKEN after encrypting: {e:#}"
+                );
+            }
         }
         "encrypted store"
     } else {
@@ -2315,9 +2704,13 @@ async fn api_auth_github(
         let mut creds = crate::login::load_credentials();
         creds.insert("GITHUB_TOKEN".to_string(), token.clone());
         if let Err(e) = crate::login::save_credentials(&creds) {
+            tracing::warn!("Failed to persist GitHub token to credentials file: {e:#}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"status": "error", "message": format!("{e}")})),
+                Json(json!({
+                    "status": "error",
+                    "message": "failed to persist GitHub token; see server logs",
+                })),
             )
                 .into_response();
         }
@@ -2358,8 +2751,13 @@ async fn api_auth_github_delete(
         if let Ok(list) = store.list().await {
             for s in list {
                 if s.scope == "global" && s.slug.is_none() && s.key == "github_token" {
-                    let _ = store.delete(s.id, None).await;
-                    removed_any = true;
+                    match store.delete(s.id, None).await {
+                        Ok(true) => removed_any = true,
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!(
+                            "Failed to delete github_token from encrypted store: {e:#}"
+                        ),
+                    }
                 }
             }
         }
@@ -2368,8 +2766,12 @@ async fn api_auth_github_delete(
     // Remove from plaintext file.
     let mut creds = crate::login::load_credentials();
     if creds.remove("GITHUB_TOKEN").is_some() {
-        let _ = crate::login::save_credentials(&creds);
-        removed_any = true;
+        match crate::login::save_credentials(&creds) {
+            Ok(()) => removed_any = true,
+            Err(e) => tracing::warn!(
+                "Failed to scrub GITHUB_TOKEN from plaintext credentials file: {e:#}"
+            ),
+        }
     }
 
     // Clear from process env.
@@ -2413,10 +2815,7 @@ async fn api_auth_anthropic(
                 .into_response();
         }
     };
-    let kind = body
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("oauth");
+    let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("oauth");
 
     let (env_key, secret_key, other_env, other_secret) = match kind {
         "oauth" => (
@@ -2446,7 +2845,11 @@ async fn api_auth_anthropic(
         if let Ok(list) = store.list().await {
             for s in list {
                 if s.scope == "global" && s.slug.is_none() && s.key == other_secret {
-                    let _ = store.delete(s.id, None).await;
+                    if let Err(e) = store.delete(s.id, None).await {
+                        tracing::warn!(
+                            "Failed to delete stale {other_secret} from encrypted store: {e:#}"
+                        );
+                    }
                 }
             }
         }
@@ -2460,9 +2863,13 @@ async fn api_auth_anthropic(
             )
             .await
         {
+            tracing::warn!("Failed to persist Anthropic token to secret store: {e:#}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"status": "error", "message": format!("{e}")})),
+                Json(json!({
+                    "status": "error",
+                    "message": "failed to persist token; see server logs",
+                })),
             )
                 .into_response();
         }
@@ -2472,7 +2879,13 @@ async fn api_auth_anthropic(
         scrubbed |= creds.remove(env_key).is_some();
         scrubbed |= creds.remove(other_env).is_some();
         if scrubbed {
-            let _ = crate::login::save_credentials(&creds);
+            if let Err(e) = crate::login::save_credentials(&creds) {
+                // Token is in the encrypted store but the legacy plaintext
+                // copy could not be scrubbed — warn so the operator knows.
+                tracing::warn!(
+                    "Failed to scrub legacy plaintext Anthropic token after encrypting: {e:#}"
+                );
+            }
         }
         "encrypted store"
     } else {
@@ -2480,9 +2893,13 @@ async fn api_auth_anthropic(
         creds.remove(other_env);
         creds.insert(env_key.to_string(), token.clone());
         if let Err(e) = crate::login::save_credentials(&creds) {
+            tracing::warn!("Failed to persist Anthropic token to credentials file: {e:#}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"status": "error", "message": format!("{e}")})),
+                Json(json!({
+                    "status": "error",
+                    "message": "failed to persist token; see server logs",
+                })),
             )
                 .into_response();
         }
@@ -2521,8 +2938,13 @@ async fn api_auth_anthropic_delete(
                     && s.slug.is_none()
                     && (s.key == "anthropic_oauth_token" || s.key == "anthropic_api_key")
                 {
-                    let _ = store.delete(s.id, None).await;
-                    removed_any = true;
+                    match store.delete(s.id, None).await {
+                        Ok(true) => removed_any = true,
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!("Failed to delete {} from encrypted store: {e:#}", s.key)
+                        }
+                    }
                 }
             }
         }
@@ -2533,8 +2955,12 @@ async fn api_auth_anthropic_delete(
     creds.remove("ANTHROPIC_OAUTH_TOKEN");
     creds.remove("ANTHROPIC_API_KEY");
     if creds.len() != before {
-        let _ = crate::login::save_credentials(&creds);
-        removed_any = true;
+        match crate::login::save_credentials(&creds) {
+            Ok(()) => removed_any = true,
+            Err(e) => tracing::warn!(
+                "Failed to scrub Anthropic tokens from plaintext credentials file: {e:#}"
+            ),
+        }
     }
 
     std::env::remove_var("ANTHROPIC_OAUTH_TOKEN");
@@ -2667,9 +3093,7 @@ async fn api_secrets_put(
         )
             .into_response();
     }
-    if scope == crate::secrets::Scope::Repo
-        && slug.map(str::trim).is_none_or(|s| s.is_empty())
-    {
+    if scope == crate::secrets::Scope::Repo && slug.map(str::trim).is_none_or(|s| s.is_empty()) {
         tracing::warn!(
             target: "wshm_core::secrets_trace",
             "api_secrets_put: validation FAILED — Repo scope requires non-empty slug"
@@ -2736,11 +3160,7 @@ async fn api_secrets_put(
 /// matches the secret that was just written or removed. Errors are logged
 /// but never propagate — a failed reload doesn't mean the secret write
 /// itself failed.
-async fn reload_github_clients(
-    state: &WebState,
-    scope: crate::secrets::Scope,
-    slug: Option<&str>,
-) {
+async fn reload_github_clients(state: &WebState, scope: crate::secrets::Scope, slug: Option<&str>) {
     let repos_guard = state.multi.repos.read().await;
     tracing::debug!(
         target: "wshm_core::secrets_trace",
@@ -2792,11 +3212,7 @@ async fn api_secrets_reveal(
     };
     match store.reveal(id, Some(admin.id)).await {
         Ok(Some(v)) => Json(json!({ "value": v })).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "not found"})),
-        )
-            .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
@@ -2917,6 +3333,10 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         .route("/api/v1/license/activate", post(api_license_activate))
         .route("/api/v1/repos", get(api_list_repos).post(api_add_repo))
         .route(
+            "/api/v1/config/retry",
+            get(api_retry_get).patch(api_retry_patch),
+        )
+        .route(
             "/api/v1/repos/{slug}/features",
             get(api_repo_features_get).patch(api_repo_features_patch),
         )
@@ -2938,8 +3358,14 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
             axum::routing::patch(api_users_update).delete(api_users_delete),
         )
         .route("/api/v1/logs", get(api_logs))
-        .route("/api/v1/secrets", get(api_secrets_list).post(api_secrets_put))
-        .route("/api/v1/secrets/{id}", axum::routing::delete(api_secrets_delete))
+        .route(
+            "/api/v1/secrets",
+            get(api_secrets_list).post(api_secrets_put),
+        )
+        .route(
+            "/api/v1/secrets/{id}",
+            axum::routing::delete(api_secrets_delete),
+        )
         .route("/api/v1/secrets/{id}/reveal", post(api_secrets_reveal))
         .route("/api/v1/summary", get(api_summary))
 }
@@ -2973,6 +3399,15 @@ pub fn web_routes(multi: Arc<MultiDaemonState>) -> Router {
 ///
 /// - `users`: enable RBAC mode by passing a populated UserStore. `None`
 ///   keeps the legacy single-credential `[web].username/password` flow.
+///
+///   SECURITY: in legacy mode (`users = None`) there is no role model, so the
+///   privileged, secret-writing token-management endpoints
+///   (`POST`/`DELETE /api/v1/auth/github` and `/api/v1/auth/anthropic`) cannot
+///   enforce an admin gate — any authenticated caller (the single shared web
+///   password / trusted proxy identity) can write or delete the GitHub and
+///   Anthropic tokens. The OSS `run()` path always opens a UserStore so RBAC is
+///   active there; embedders MUST NOT use `users = None` with a
+///   network-exposed listener.
 /// - `extra_api`: additional `Router<Arc<WebState>>` whose routes get merged
 ///   into the main router under the same auth layer. Use this to register
 ///   Pro API endpoints from extension crates.
@@ -2983,7 +3418,7 @@ pub fn web_routes(multi: Arc<MultiDaemonState>) -> Router {
 /// The `WebState` is built from these inputs and shared with every sub-router.
 pub fn web_routes_with_extensions(
     multi: Arc<MultiDaemonState>,
-    users: Option<Arc<crate::auth::UserStore>>,
+    users: Option<Arc<dyn crate::auth::UserStoreBackend>>,
     logs: Option<Arc<crate::daemon::log_buffer::LogBuffer>>,
     secrets: Option<Arc<dyn crate::secrets::SecretStore>>,
     extra_api: Option<Router<Arc<WebState>>>,

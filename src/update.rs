@@ -61,24 +61,25 @@ async fn fetch_latest_release(
 ) -> Result<(String, String)> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
 
-    let mut req = http
-        .get(&url)
-        .header("User-Agent", format!("{binary_name}-updater"))
-        .header("Accept", "application/vnd.github+json");
-
-    if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {t}"));
-    }
-
-    let resp = req.send().await.context("Failed to fetch latest release")?;
-    let status = resp.status();
-    let body = resp.text().await?;
-
-    if !status.is_success() {
-        let end = crate::ai::prompts::truncate_utf8(&body, 200);
-        let safe_body = &body[..end];
-        anyhow::bail!("GitHub API error ({status}): {safe_body}");
-    }
+    let body = crate::retry::with_retry("update: fetch latest release", || async {
+        let mut req = http
+            .get(&url)
+            .header("User-Agent", format!("{binary_name}-updater"))
+            .header("Accept", "application/vnd.github+json");
+        if let Some(t) = token {
+            req = req.header("Authorization", format!("Bearer {t}"));
+        }
+        let resp = req.send().await.context("Failed to fetch latest release")?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        if !status.is_success() {
+            let end = crate::ai::prompts::truncate_utf8(&body, 200);
+            let safe_body = &body[..end];
+            anyhow::bail!("GitHub API error ({status}): {safe_body}");
+        }
+        Ok::<_, anyhow::Error>(body)
+    })
+    .await?;
 
     let json: serde_json::Value = serde_json::from_str(&body)?;
     let tag = json["tag_name"]
@@ -99,20 +100,23 @@ async fn fetch_release_assets(
 ) -> Result<Vec<(String, String)>> {
     let url = format!("https://api.github.com/repos/{repo}/releases/tags/{tag}");
 
-    let mut req = http
-        .get(&url)
-        .header("User-Agent", format!("{binary_name}-updater"))
-        .header("Accept", "application/vnd.github+json");
-    if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {t}"));
-    }
+    let text = crate::retry::with_retry("update: fetch release assets", || async {
+        let mut req = http
+            .get(&url)
+            .header("User-Agent", format!("{binary_name}-updater"))
+            .header("Accept", "application/vnd.github+json");
+        if let Some(t) = token {
+            req = req.header("Authorization", format!("Bearer {t}"));
+        }
+        let resp = req.send().await.context("Failed to fetch release assets")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Failed to fetch release {tag} ({})", resp.status());
+        }
+        Ok::<_, anyhow::Error>(resp.text().await?)
+    })
+    .await?;
 
-    let resp = req.send().await.context("Failed to fetch release assets")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("Failed to fetch release {tag} ({})", resp.status());
-    }
-
-    let json: serde_json::Value = serde_json::from_str(&resp.text().await?)?;
+    let json: serde_json::Value = serde_json::from_str(&text)?;
     let assets = json["assets"]
         .as_array()
         .context("Missing assets in release")?;
@@ -135,20 +139,21 @@ async fn download_asset(
     api_url: &str,
     token: Option<&str>,
 ) -> Result<Vec<u8>> {
-    let mut req = http
-        .get(api_url)
-        .header("User-Agent", format!("{binary_name}-updater"))
-        .header("Accept", "application/octet-stream");
-    if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {t}"));
-    }
-
-    let resp = req.send().await.context("Failed to download asset")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("Failed to download asset ({})", resp.status());
-    }
-
-    Ok(resp.bytes().await?.to_vec())
+    crate::retry::with_retry("update: download asset", || async {
+        let mut req = http
+            .get(api_url)
+            .header("User-Agent", format!("{binary_name}-updater"))
+            .header("Accept", "application/octet-stream");
+        if let Some(t) = token {
+            req = req.header("Authorization", format!("Bearer {t}"));
+        }
+        let resp = req.send().await.context("Failed to download asset")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Failed to download asset ({})", resp.status());
+        }
+        Ok(resp.bytes().await?.to_vec())
+    })
+    .await
 }
 
 async fn fetch_checksums(

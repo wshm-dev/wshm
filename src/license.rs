@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::config::LicenseConfig;
+use crate::db::licenses as license_store;
 
 const LICENSE_API: &str = "https://api.wshm.dev/api/v1/license";
 
@@ -15,6 +16,38 @@ fn default_token_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".wshm")
         .join("license.jwt")
+}
+
+/// Path to the SQLite state.db used by the daemon. The license module
+/// opens its own short-lived `Connection` (not the long-lived `Database`
+/// handle) because resolve runs during startup before the daemon's DB
+/// pool exists.
+fn state_db_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".wshm")
+        .join("state.db")
+}
+
+/// Best-effort read of the active license JWT from the DB. Returns
+/// `None` on any error (missing DB, missing table, missing row) so the
+/// resolve chain falls through cleanly to the next source.
+fn load_jwt_from_db() -> Option<String> {
+    let conn = license_store::open_state_db(&state_db_path()).ok()?;
+    license_store::load_jwt(&conn).ok().flatten()
+}
+
+/// Best-effort persistence to DB. Failures are logged but never
+/// propagated — the file cache is the rétrocompat fallback.
+fn store_jwt_in_db(jwt: &str, key: Option<&str>, plan: Option<&str>) {
+    match license_store::open_state_db(&state_db_path()) {
+        Ok(conn) => {
+            if let Err(e) = license_store::store(&conn, jwt, key, plan, None, None) {
+                tracing::warn!("Failed to persist license to state.db: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("Failed to open state.db for license persistence: {e}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -33,14 +66,21 @@ pub enum ResolvedLicense {
 
 /// Resolve the license using the full resolution chain:
 ///
+/// 0. SQLite `licenses` table (active JWT persisted via web UI / CLI activation)
 /// 1. Vault placeholder in config `[license] key = "vault(...)"`
 /// 2. Environment variable `WSHM_LICENSE_KEY`
 /// 3. Config `[license] path = "..."` (JWT file)
-/// 4. Fallback `~/.wshm/license.jwt`
+/// 4. Fallback `~/.wshm/license.jwt` (auto-migrated to DB on first read)
 pub async fn resolve(
     config: &LicenseConfig,
     vault_config: Option<&crate::config::VaultConfig>,
 ) -> ResolvedLicense {
+    // Step 0: DB-backed cache (survives file truncation / PVC quirks)
+    if let Some(jwt) = load_jwt_from_db() {
+        tracing::debug!("License JWT loaded from state.db");
+        return ResolvedLicense::Jwt(jwt);
+    }
+
     // Step 1: Check config key field (may contain vault placeholder)
     if let Some(ref key_value) = config.key {
         let key_value = key_value.trim();
@@ -101,13 +141,16 @@ pub async fn resolve(
         }
     }
 
-    // Step 4: Fallback to default path ~/.wshm/license.jwt
+    // Step 4: Fallback to default path ~/.wshm/license.jwt — auto-migrate
+    // into the DB so subsequent reads hit Step 0 and the file becoming
+    // empty / truncated stops mattering.
     let default_path = default_token_path();
     if default_path.exists() {
         if let Ok(content) = fs::read_to_string(&default_path) {
             let content = content.trim().to_string();
             if !content.is_empty() {
                 tracing::debug!("License JWT loaded from {}", default_path.display());
+                store_jwt_in_db(&content, None, None);
                 return ResolvedLicense::Jwt(content);
             }
         }
@@ -118,6 +161,11 @@ pub async fn resolve(
 
 /// Synchronous version for contexts where async isn't available.
 pub fn resolve_sync(config: &LicenseConfig) -> ResolvedLicense {
+    // Step 0: DB-backed cache
+    if let Some(jwt) = load_jwt_from_db() {
+        return ResolvedLicense::Jwt(jwt);
+    }
+
     // Step 1: Config key (vault not available in sync context — skip)
     if let Some(ref key_value) = config.key {
         let key_value = key_value.trim();
@@ -153,11 +201,12 @@ pub fn resolve_sync(config: &LicenseConfig) -> ResolvedLicense {
         }
     }
 
-    // Step 4: Fallback
+    // Step 4: Fallback (auto-migrates file → DB so next call hits Step 0)
     let default_path = default_token_path();
     if let Ok(content) = fs::read_to_string(&default_path) {
         let content = content.trim().to_string();
         if !content.is_empty() {
+            store_jwt_in_db(&content, None, None);
             return ResolvedLicense::Jwt(content);
         }
     }
@@ -237,8 +286,9 @@ pub fn activate_key(key: &str) -> Result<()> {
         Ok(r) => {
             let body: serde_json::Value = r.into_json().unwrap_or_default();
             if let Some(token) = body["token"].as_str() {
-                cache_token(token)?;
                 let plan = body["license"]["type"].as_str().unwrap_or("pro");
+                cache_token(token)?;
+                store_jwt_in_db(token, Some(key), Some(plan));
                 println!("License activated — plan: {plan}");
                 Ok(())
             } else {
@@ -291,12 +341,26 @@ fn cache_token(token: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(
+                "Failed to set 0o600 on cached license token {}: {e}; it may be world-readable",
+                path.display()
+            );
+        }
     }
     Ok(())
 }
 
 pub fn generate_machine_id() -> String {
+    // Explicit override for environments where the hostname is unstable
+    // (K8s pod names change on every rollout — each would otherwise burn
+    // a fresh activation slot on the license server).
+    if let Ok(id) = std::env::var("WSHM_MACHINE_ID") {
+        let id = id.trim().to_string();
+        if !id.is_empty() {
+            return id;
+        }
+    }
     use sha2::{Digest, Sha256};
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
@@ -342,7 +406,12 @@ fn save_credential(key: &str, value: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(
+                "Failed to set 0o600 on credentials file {}: {e}; secrets may be world-readable",
+                path.display()
+            );
+        }
     }
     Ok(())
 }

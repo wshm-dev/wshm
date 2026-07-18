@@ -1,13 +1,16 @@
 pub mod backend;
 pub mod events;
 pub mod issues;
+pub mod licenses;
 pub mod pulls;
 pub mod schema;
 pub mod search;
 pub mod sync;
 pub mod triage;
+pub mod usage;
 
 pub use search::{sanitize_query, SearchHit};
+pub use usage::{UsageByKind, UsageCounts};
 
 pub use backend::DatabaseBackend;
 
@@ -80,6 +83,17 @@ impl Database {
     {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         f(&conn)
+    }
+
+    /// Wipe every triage result and PR analysis. Used by the `revert` flow.
+    /// Lives here (rather than in the revert pipeline) so the same operation
+    /// is available to any `DatabaseBackend` impl.
+    pub fn clear_triage_and_analyses(&self) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute("DELETE FROM triage_results", [])?;
+            conn.execute("DELETE FROM pr_analyses", [])?;
+            Ok(())
+        })
     }
 }
 

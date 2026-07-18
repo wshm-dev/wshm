@@ -91,7 +91,9 @@
 	</div>
 {:else if result}
 	<div class="rounded-lg border border-gray-700 bg-gray-800 p-10 text-center">
-		<div class="text-2xl mb-2">&#128220;</div>
+		<svg class="h-10 w-10 mx-auto mb-2 text-gray-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+			<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+		</svg>
 		<p class="text-gray-400">No merged PRs found in the database.</p>
 		<p class="text-xs text-gray-500 mt-2">
 			Run <code class="bg-gray-900 px-2 py-1 rounded text-xs">wshm changelog --days 30</code> to generate a changelog from CLI, or sync your repos to populate the database.

@@ -21,6 +21,9 @@
 
 	let results: TriageResult[] = $state([]);
 	let error: string | null = $state(null);
+	// True until the first fetch settles - stops the empty-state text from
+	// flashing "No results" while the list is still loading.
+	let loading = $state(true);
 	let sortColumns: SortColumn[] = $state([{ key: 'issue_number', asc: true }]);
 	let filters: Record<string, string> = $state({
 		issue_number: '', category: '', confidence: '', priority: '', acted_at: ''
@@ -66,6 +69,8 @@
 		} catch (e) {
 			if (myToken !== loadToken) return;
 			error = e instanceof Error ? e.message : 'Failed to load triage results';
+		} finally {
+			if (myToken === loadToken) loading = false;
 		}
 	}
 
@@ -150,7 +155,17 @@
 					</TableBodyRow>
 				{:else}
 					<TableBodyRow>
-						<TableBodyCell colspan={5} class="text-center text-gray-600 py-8">No triage results yet</TableBodyCell>
+						<TableBodyCell colspan={5} class="text-center text-gray-600 py-8">
+							{#if loading}
+								Loading…
+							{:else}
+								No triage results yet.
+								<span class="block text-xs text-gray-500 mt-1">
+									Run <code class="bg-gray-900 px-1.5 py-0.5 rounded">wshm triage</code> from the CLI,
+									or enable the triage feature in <a href="/settings" class="text-blue-400 hover:underline">Settings → Repos</a>.
+								</span>
+							{/if}
+						</TableBodyCell>
 					</TableBodyRow>
 				{/each}
 			</TableBody>

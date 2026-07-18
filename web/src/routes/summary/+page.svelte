@@ -27,15 +27,69 @@
 
 	onMount(() => {
 		load();
-		const unsub = selectedRepo.subscribe(() => { load(); });
+		const unsub = selectedRepo.subscribe(() => {
+			load();
+		});
 		return unsub;
 	});
 
-	function priorityColor(p: string | null): 'red' | 'yellow' | 'blue' | 'dark' {
+	function priorityColor(p: string | null | undefined): 'red' | 'yellow' | 'blue' | 'dark' {
 		if (p === 'critical' || p === 'high') return 'red';
 		if (p === 'medium') return 'yellow';
 		if (p === 'low') return 'blue';
 		return 'dark';
+	}
+
+	// Bucket items by urgency. The page answers "what should I do right now?",
+	// not "what's the full inventory" — that's what /issues and /prs are for.
+	// NOW = critical / high priority issues, plus PRs that are either flagged
+	// high-risk or have merge conflicts. TODAY = the rest of the curated
+	// top_* lists, deduped against NOW. THIS WEEK is just counters.
+	type Bucketed = {
+		nowIssues: Issue[];
+		nowPrs: PullRequest[];
+		todayIssues: Issue[];
+		todayPrs: PullRequest[];
+	};
+
+	let bucketed = $derived.by<Bucketed>(() => {
+		if (!summary) return { nowIssues: [], nowPrs: [], todayIssues: [], todayPrs: [] };
+		const nowIssues = summary.high_priority_issues.slice(0, 10);
+		const nowIssueSet = new Set(nowIssues.map((i) => i.number));
+
+		const nowPrSet = new Set<number>();
+		const nowPrs: PullRequest[] = [];
+		for (const pr of summary.high_risk_prs) {
+			if (!nowPrSet.has(pr.number)) {
+				nowPrSet.add(pr.number);
+				nowPrs.push(pr);
+			}
+		}
+		for (const pr of summary.top_prs) {
+			if (pr.has_conflicts && !nowPrSet.has(pr.number)) {
+				nowPrSet.add(pr.number);
+				nowPrs.push(pr);
+			}
+		}
+
+		const todayIssues = summary.top_issues
+			.filter((i) => !nowIssueSet.has(i.number))
+			.slice(0, 8);
+		const todayPrs = summary.top_prs.filter((p) => !nowPrSet.has(p.number)).slice(0, 8);
+
+		return { nowIssues, nowPrs: nowPrs.slice(0, 10), todayIssues, todayPrs };
+	});
+
+	function relativeMinutes(iso: string | undefined): string {
+		if (!iso) return '';
+		const t = new Date(iso).getTime();
+		if (isNaN(t)) return '';
+		const mins = Math.max(0, Math.floor((Date.now() - t) / 60000));
+		if (mins < 1) return 'just now';
+		if (mins < 60) return `${mins} min ago`;
+		const hrs = Math.floor(mins / 60);
+		if (hrs < 24) return `${hrs}h ago`;
+		return `${Math.floor(hrs / 24)}d ago`;
 	}
 
 	let issueModalOpen = $state(false);
@@ -83,130 +137,173 @@
 	<title>wshm - Summary</title>
 </svelte:head>
 
-<div class="mb-6">
-	<h2 class="text-xl font-semibold text-gray-100 mb-1">Summary</h2>
-	<p class="text-sm text-gray-500">Daily digest — same data as Discord notifications</p>
+<div class="mb-6 flex flex-wrap items-end justify-between gap-3">
+	<div>
+		<h2 class="text-xl font-semibold text-gray-100 mb-1">Daily summary</h2>
+		<p class="text-sm text-gray-500">What needs your attention, sorted by urgency.</p>
+	</div>
+	{#if summary?.timestamp}
+		<p class="text-xs text-gray-500 mono">Synced {relativeMinutes(summary.timestamp)}</p>
+	{/if}
 </div>
+
+{#snippet issueRow(issue: Issue)}
+	<li
+		class="flex items-center gap-2 text-sm cursor-pointer hover:bg-gray-700/50 rounded px-2 py-1"
+		onclick={() => openIssue(issue.number)}
+		onkeydown={(e) => e.key === 'Enter' && openIssue(issue.number)}
+		role="button"
+		tabindex="0"
+	>
+		<span class="mono text-yellow-400 text-xs w-12 shrink-0">#{issue.number}</span>
+		{#if issue.priority}
+			<Badge color={priorityColor(issue.priority)} class="shrink-0">{issue.priority}</Badge>
+		{/if}
+		<span class="text-gray-300 flex-1 truncate">{issue.title}</span>
+		{#if issue.age_days > 0}
+			<span class="text-gray-500 text-xs mono shrink-0">{issue.age_days}d</span>
+		{/if}
+		<span class="text-gray-600 shrink-0">→</span>
+	</li>
+{/snippet}
+
+{#snippet prRow(pr: PullRequest)}
+	<li
+		class="flex items-center gap-2 text-sm cursor-pointer hover:bg-gray-700/50 rounded px-2 py-1"
+		onclick={() => openPr(pr.number)}
+		onkeydown={(e) => e.key === 'Enter' && openPr(pr.number)}
+		role="button"
+		tabindex="0"
+	>
+		<span class="mono text-yellow-400 text-xs w-12 shrink-0">#{pr.number}</span>
+		{#if pr.has_conflicts}
+			<Badge color="red" class="shrink-0">conflict</Badge>
+		{:else if pr.risk_level}
+			<Badge color={priorityColor(pr.risk_level)} class="shrink-0">{pr.risk_level}</Badge>
+		{/if}
+		<span class="text-gray-300 flex-1 truncate">{pr.title}</span>
+		{#if pr.age_days > 0}
+			<span class="text-gray-500 text-xs mono shrink-0">{pr.age_days}d</span>
+		{/if}
+		<span class="text-gray-600 shrink-0">→</span>
+	</li>
+{/snippet}
 
 {#if error}
 	<Card class="border-red-500 bg-gray-800 max-w-none">
 		<p class="text-red-400">{error}</p>
-		<p class="mt-2 text-sm text-gray-500">The wshm daemon must expose <code>/api/v1/summary</code>.</p>
+		<p class="mt-2 text-sm text-gray-500">
+			The wshm daemon must expose <code>/api/v1/summary</code>.
+		</p>
 	</Card>
 {:else if summary}
-	<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-		<Card class="bg-gray-800 border-gray-700 text-center max-w-none">
-			<div class="text-xs uppercase tracking-wider text-gray-500 mb-2">Open Issues</div>
-			<div class="text-3xl font-bold text-gray-100 mono">{summary.open_issues}</div>
-			<div class="text-xs text-gray-500 mt-1">{summary.untriaged_issues} untriaged</div>
+	{@const nowCount = bucketed.nowIssues.length + bucketed.nowPrs.length}
+	{@const todayCount = bucketed.todayIssues.length + bucketed.todayPrs.length}
+
+	<div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+		<!-- NOW column: red accent — drop everything and look at this. -->
+		<Card
+			class="border-l-4 {nowCount > 0
+				? 'border-l-red-500'
+				: 'border-l-gray-700'} bg-gray-800 border-gray-700 max-w-none"
+		>
+			<div class="flex items-baseline justify-between mb-3">
+				<h3 class="text-sm font-semibold {nowCount > 0 ? 'text-red-400' : 'text-gray-400'}">
+					NOW
+				</h3>
+				<span class="text-xs text-gray-500 mono">{nowCount}</span>
+			</div>
+			<p class="text-xs text-gray-500 mb-3">Critical priority &middot; conflicts &middot; high risk</p>
+			{#if nowCount === 0}
+				<p class="text-sm text-gray-600 italic">Nothing urgent. Nice.</p>
+			{:else}
+				<ul class="space-y-1">
+					{#each bucketed.nowIssues as issue (issue.number)}
+						{@render issueRow(issue)}
+					{/each}
+					{#each bucketed.nowPrs as pr (pr.number)}
+						{@render prRow(pr)}
+					{/each}
+				</ul>
+			{/if}
 		</Card>
-		<Card class="bg-gray-800 border-gray-700 text-center max-w-none">
-			<div class="text-xs uppercase tracking-wider text-gray-500 mb-2">Open PRs</div>
-			<div class="text-3xl font-bold text-gray-100 mono">{summary.open_prs}</div>
-			<div class="text-xs text-gray-500 mt-1">{summary.unanalyzed_prs} unanalyzed</div>
+
+		<!-- TODAY column: amber accent — work through these next. -->
+		<Card
+			class="border-l-4 {todayCount > 0
+				? 'border-l-amber-500'
+				: 'border-l-gray-700'} bg-gray-800 border-gray-700 max-w-none"
+		>
+			<div class="flex items-baseline justify-between mb-3">
+				<h3 class="text-sm font-semibold {todayCount > 0 ? 'text-amber-400' : 'text-gray-400'}">
+					TODAY
+				</h3>
+				<span class="text-xs text-gray-500 mono">{todayCount}</span>
+			</div>
+			<p class="text-xs text-gray-500 mb-3">Medium priority &middot; PRs awaiting review</p>
+			{#if todayCount === 0}
+				<p class="text-sm text-gray-600 italic">Inbox zero on the medium list.</p>
+			{:else}
+				<ul class="space-y-1">
+					{#each bucketed.todayIssues as issue (issue.number)}
+						{@render issueRow(issue)}
+					{/each}
+					{#each bucketed.todayPrs as pr (pr.number)}
+						{@render prRow(pr)}
+					{/each}
+				</ul>
+			{/if}
 		</Card>
-		<Card class="bg-gray-800 border-gray-700 text-center max-w-none">
-			<div class="text-xs uppercase tracking-wider text-gray-500 mb-2">Conflicts</div>
-			<div class="text-3xl font-bold {summary.conflicts > 0 ? 'text-red-400' : 'text-gray-100'} mono">{summary.conflicts}</div>
-		</Card>
-		<Card class="bg-gray-800 border-gray-700 text-center max-w-none">
-			<div class="text-xs uppercase tracking-wider text-gray-500 mb-2">Action Required</div>
-			<div class="text-3xl font-bold {summary.high_priority_issues.length > 0 ? 'text-red-400' : 'text-gray-100'} mono">{summary.high_priority_issues.length}</div>
+
+		<!-- THIS WEEK column: counters — context, not action. -->
+		<Card class="border-l-4 border-l-gray-700 bg-gray-800 border-gray-700 max-w-none">
+			<div class="flex items-baseline justify-between mb-3">
+				<h3 class="text-sm font-semibold text-gray-300">THIS WEEK</h3>
+				<span class="text-xs text-gray-500 mono">backlog</span>
+			</div>
+			<p class="text-xs text-gray-500 mb-3">Volume across the repo, not an action list.</p>
+			<dl class="space-y-2 text-sm">
+				<div class="flex items-center justify-between">
+					<dt class="text-gray-400">Open issues</dt>
+					<dd>
+						<a href="/issues" class="mono text-blue-400 hover:text-blue-300">
+							{summary.open_issues}
+						</a>
+					</dd>
+				</div>
+				<div class="flex items-center justify-between">
+					<dt class="text-gray-400">Untriaged</dt>
+					<dd>
+						<a href="/triage" class="mono text-blue-400 hover:text-blue-300">
+							{summary.untriaged_issues}
+						</a>
+					</dd>
+				</div>
+				<div class="flex items-center justify-between">
+					<dt class="text-gray-400">Open PRs</dt>
+					<dd>
+						<a href="/prs" class="mono text-blue-400 hover:text-blue-300">{summary.open_prs}</a>
+					</dd>
+				</div>
+				<div class="flex items-center justify-between">
+					<dt class="text-gray-400">Unanalyzed</dt>
+					<dd>
+						<a href="/prs" class="mono text-blue-400 hover:text-blue-300">
+							{summary.unanalyzed_prs}
+						</a>
+					</dd>
+				</div>
+				<div class="flex items-center justify-between">
+					<dt class="text-gray-400">Conflicts</dt>
+					<dd>
+						<span
+							class="mono {summary.conflicts > 0 ? 'text-red-400' : 'text-gray-500'}"
+						>{summary.conflicts}</span>
+					</dd>
+				</div>
+			</dl>
 		</Card>
 	</div>
-
-	{#if summary.high_priority_issues.length > 0}
-		<Card class="bg-gray-800 border-gray-700 mb-4 max-w-none">
-			<h3 class="text-lg font-semibold text-red-400 mb-3">Action Required</h3>
-			<ul class="space-y-2">
-				{#each summary.high_priority_issues.slice(0, 10) as issue (issue.number)}
-					<li
-						class="flex items-start gap-2 text-sm cursor-pointer hover:bg-gray-700/50 rounded px-1 py-0.5"
-						onclick={() => openIssue(issue.number)}
-						onkeydown={(e) => e.key === 'Enter' && openIssue(issue.number)}
-						role="button"
-						tabindex="0"
-					>
-						<span class="text-yellow-400 mono">#{issue.number}</span>
-						<Badge color={priorityColor(issue.priority)}>{issue.priority ?? '?'}</Badge>
-						<span class="text-gray-300 flex-1">{issue.title}</span>
-						{#if issue.age_days > 0}<span class="text-gray-500 text-xs">{issue.age_days}d</span>{/if}
-					</li>
-				{/each}
-			</ul>
-		</Card>
-	{/if}
-
-	{#if summary.high_risk_prs.length > 0}
-		<Card class="bg-gray-800 border-gray-700 mb-4 max-w-none">
-			<h3 class="text-lg font-semibold text-purple-400 mb-3">Attention PRs</h3>
-			<ul class="space-y-2">
-				{#each summary.high_risk_prs.slice(0, 10) as pr (pr.number)}
-					<li
-						class="flex items-start gap-2 text-sm cursor-pointer hover:bg-gray-700/50 rounded px-1 py-0.5"
-						onclick={() => openPr(pr.number)}
-						onkeydown={(e) => e.key === 'Enter' && openPr(pr.number)}
-						role="button"
-						tabindex="0"
-					>
-						<span class="text-yellow-400 mono">#{pr.number}</span>
-						{#if pr.risk_level}<Badge color="purple">risk:{pr.risk_level}</Badge>{/if}
-						{#if pr.has_conflicts}<Badge color="red">CONFLICT</Badge>{/if}
-						<span class="text-gray-300 flex-1">{pr.title}</span>
-						{#if pr.age_days > 0}<span class="text-gray-500 text-xs">{pr.age_days}d</span>{/if}
-					</li>
-				{/each}
-			</ul>
-		</Card>
-	{/if}
-
-	{#if summary.top_issues.length > 0}
-		<Card class="bg-gray-800 border-gray-700 mb-4 max-w-none">
-			<h3 class="text-lg font-semibold text-cyan-400 mb-3">Issues TODO</h3>
-			<ul class="space-y-2">
-				{#each summary.top_issues as issue (issue.number)}
-					<li
-						class="flex items-start gap-2 text-sm cursor-pointer hover:bg-gray-700/50 rounded px-1 py-0.5"
-						onclick={() => openIssue(issue.number)}
-						onkeydown={(e) => e.key === 'Enter' && openIssue(issue.number)}
-						role="button"
-						tabindex="0"
-					>
-						<span class="text-yellow-400 mono">#{issue.number}</span>
-						<Badge color={priorityColor(issue.priority)}>{issue.priority ?? '-'}</Badge>
-						{#if issue.category}<span class="text-gray-500 text-xs">{issue.category}</span>{/if}
-						<span class="text-gray-300 flex-1">{issue.title}</span>
-						{#if issue.age_days > 0}<span class="text-gray-500 text-xs">{issue.age_days}d</span>{/if}
-					</li>
-				{/each}
-			</ul>
-		</Card>
-	{/if}
-
-	{#if summary.top_prs.length > 0}
-		<Card class="bg-gray-800 border-gray-700 mb-4 max-w-none">
-			<h3 class="text-lg font-semibold text-cyan-400 mb-3">PRs TODO</h3>
-			<ul class="space-y-2">
-				{#each summary.top_prs as pr (pr.number)}
-					<li
-						class="flex items-start gap-2 text-sm cursor-pointer hover:bg-gray-700/50 rounded px-1 py-0.5"
-						onclick={() => openPr(pr.number)}
-						onkeydown={(e) => e.key === 'Enter' && openPr(pr.number)}
-						role="button"
-						tabindex="0"
-					>
-						<span class="text-yellow-400 mono">#{pr.number}</span>
-						{#if pr.risk_level}<Badge color="purple">{pr.risk_level}</Badge>{/if}
-						{#if pr.has_conflicts}<Badge color="red">CONFLICT</Badge>{/if}
-						<span class="text-gray-300 flex-1">{pr.title}</span>
-						{#if pr.age_days > 0}<span class="text-gray-500 text-xs">{pr.age_days}d</span>{/if}
-					</li>
-				{/each}
-			</ul>
-		</Card>
-	{/if}
-
-	<p class="text-xs text-gray-500 mt-4">Generated at {summary.timestamp}</p>
 {:else}
 	<p class="text-gray-500">Loading…</p>
 {/if}

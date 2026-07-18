@@ -32,10 +32,7 @@ fn load_last_event_id(state: &DaemonState) -> Option<String> {
 
 fn store_last_event_id(state: &DaemonState, id: &str) {
     let now = chrono::Utc::now().to_rfc3339();
-    if let Err(e) = state
-        .db
-        .update_sync_entry(POLLER_SYNC_KEY, &now, Some(id))
-    {
+    if let Err(e) = state.db.update_sync_entry(POLLER_SYNC_KEY, &now, Some(id)) {
         warn!("Failed to persist poller last_event_id: {e}");
     }
 }
@@ -126,14 +123,23 @@ async fn poll_events(
         state.config.repo_owner, state.config.repo_name
     );
 
-    let response = state.gh().octocrab._get(&url).await?;
+    // The GitHub events fetch is retried on transient transport failures
+    // (premature connection EOF from a dropped keep-alive, 5xx, 429). Both
+    // the GET and the body read share one retried closure so a mid-body
+    // EOF re-issues the whole request.
+    let (headers, body) = crate::retry::with_retry("poller: github events", || async {
+        let response = state.gh().octocrab._get(&url).await?;
+        let headers = response.headers().clone();
+        let body = state.gh().octocrab.body_to_string(response).await?;
+        Ok::<_, anyhow::Error>((headers, body))
+    })
+    .await?;
 
-    // Surface rate-limit pressure before consuming the body. Headers
-    // we care about: `x-ratelimit-remaining` (drops as we burn quota)
-    // and `x-ratelimit-reset` (unix epoch seconds when it refills).
-    // Logging at warn! when remaining < 100 lets the operator see
-    // they're about to get throttled, well before it fires.
-    let headers = response.headers().clone();
+    // Surface rate-limit pressure. Headers we care about:
+    // `x-ratelimit-remaining` (drops as we burn quota) and
+    // `x-ratelimit-reset` (unix epoch seconds when it refills). Logging at
+    // warn! when remaining < 100 lets the operator see they're about to
+    // get throttled, well before it fires.
     if let Some(remaining) = headers
         .get("x-ratelimit-remaining")
         .and_then(|v| v.to_str().ok())
@@ -153,7 +159,6 @@ async fn poll_events(
         }
     }
 
-    let body = state.gh().octocrab.body_to_string(response).await?;
     let events = crate::github::parse_json_array(&body, "events")?;
 
     if events.is_empty() {

@@ -13,12 +13,87 @@ use anyhow::{anyhow, Context, Result};
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use async_trait::async_trait;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+/// Abstract store interface so wshm-pro can plug in a Postgres-backed
+/// implementation for stateless K8s deploys (where the per-pod users.db
+/// would be wiped on restart). OSS keeps using the SQLite `UserStore`
+/// below; Pro provides its own type that implements this trait.
+#[async_trait]
+pub trait UserStoreBackend: Send + Sync {
+    async fn count(&self) -> Result<i64>;
+    async fn list(&self) -> Result<Vec<User>>;
+    async fn find_by_id(&self, id: i64) -> Result<Option<User>>;
+    async fn find_by_email(&self, email: &str) -> Result<Option<User>>;
+    async fn find_by_login(&self, login: &str) -> Result<Option<(User, Option<String>)>>;
+    async fn create_local(
+        &self,
+        email: &str,
+        username: Option<&str>,
+        password: &str,
+        role: Role,
+    ) -> Result<i64>;
+    async fn upsert_sso(&self, email: &str, username: Option<&str>, provider: &str)
+        -> Result<User>;
+    async fn update_role(&self, id: i64, role: Role) -> Result<()>;
+    async fn update_password(&self, id: i64, password: &str) -> Result<()>;
+    async fn delete(&self, id: i64) -> Result<()>;
+    async fn touch_login(&self, id: i64) -> Result<()>;
+}
+
+#[async_trait]
+impl UserStoreBackend for UserStore {
+    async fn count(&self) -> Result<i64> {
+        UserStore::count(self).await
+    }
+    async fn list(&self) -> Result<Vec<User>> {
+        UserStore::list(self).await
+    }
+    async fn find_by_id(&self, id: i64) -> Result<Option<User>> {
+        UserStore::find_by_id(self, id).await
+    }
+    async fn find_by_email(&self, email: &str) -> Result<Option<User>> {
+        UserStore::find_by_email(self, email).await
+    }
+    async fn find_by_login(&self, login: &str) -> Result<Option<(User, Option<String>)>> {
+        UserStore::find_by_login(self, login).await
+    }
+    async fn create_local(
+        &self,
+        email: &str,
+        username: Option<&str>,
+        password: &str,
+        role: Role,
+    ) -> Result<i64> {
+        UserStore::create_local(self, email, username, password, role).await
+    }
+    async fn upsert_sso(
+        &self,
+        email: &str,
+        username: Option<&str>,
+        provider: &str,
+    ) -> Result<User> {
+        UserStore::upsert_sso(self, email, username, provider).await
+    }
+    async fn update_role(&self, id: i64, role: Role) -> Result<()> {
+        UserStore::update_role(self, id, role).await
+    }
+    async fn update_password(&self, id: i64, password: &str) -> Result<()> {
+        UserStore::update_password(self, id, password).await
+    }
+    async fn delete(&self, id: i64) -> Result<()> {
+        UserStore::delete(self, id).await
+    }
+    async fn touch_login(&self, id: i64) -> Result<()> {
+        UserStore::touch_login(self, id).await
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -38,6 +113,7 @@ impl Role {
             Role::Viewer => "viewer",
         }
     }
+    #[allow(clippy::should_implement_trait)] // not infallible enough for FromStr trait shape
     pub fn from_str(s: &str) -> Result<Self> {
         match s {
             "admin" => Ok(Role::Admin),
@@ -205,13 +281,12 @@ impl UserStore {
                  last_login_at = excluded.last_login_at",
             params![email, username, provider, now, bootstrap_admin_role],
         )?;
-        let user = conn
-            .query_row(
-                "SELECT id, email, username, role, sso_provider, created_at, last_login_at
+        let user = conn.query_row(
+            "SELECT id, email, username, role, sso_provider, created_at, last_login_at
                  FROM users WHERE email = ?1",
-                params![email],
-                row_to_user,
-            )?;
+            params![email],
+            row_to_user,
+        )?;
         Ok(user)
     }
 
@@ -249,11 +324,9 @@ impl UserStore {
         // M-3 finding). Wrap in a tx so the email never disappears
         // from the DB without being recorded.
         let email: Option<String> = conn
-            .query_row(
-                "SELECT email FROM users WHERE id = ?1",
-                params![id],
-                |r| r.get(0),
-            )
+            .query_row("SELECT email FROM users WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })
             .optional()?;
         let n = conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
         if n == 0 {
@@ -351,6 +424,20 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
         .is_ok()
 }
 
+/// A valid argon2 PHC hash of a fixed throwaway password, computed once per
+/// process. Login paths verify a supplied password against this when the
+/// looked-up user (or its password hash) is missing, so a non-existent
+/// account pays the same argon2 cost as a real wrong password — closing the
+/// username-enumeration timing oracle.
+pub fn dummy_password_hash() -> &'static str {
+    use std::sync::OnceLock;
+    static DUMMY: OnceLock<String> = OnceLock::new();
+    DUMMY.get_or_init(|| {
+        hash_password("wshm-dummy-password-for-constant-time-verification")
+            .expect("hashing a fixed dummy password cannot fail")
+    })
+}
+
 /// First-boot admin seed. If the `users` table is empty, create a local
 /// admin account so the operator can log in.
 ///
@@ -361,7 +448,7 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 ///
 /// Password resolution: `WSHM_ADMIN_PASSWORD` if set, otherwise a random
 /// 24-char password is generated and logged once at WARN level.
-pub async fn seed_admin_if_empty(store: &UserStore) -> Result<()> {
+pub async fn seed_admin_if_empty(store: &dyn UserStoreBackend) -> Result<()> {
     if store.count().await? > 0 {
         return Ok(());
     }

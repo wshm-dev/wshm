@@ -83,8 +83,8 @@ impl SqliteSecretStore {
                 let aad_legacy = aad_for_legacy(scope.as_str(), slug, key);
                 let plaintext =
                     cipher.open_with_aads(&nonce, &ciphertext, &[&aad_new, &aad_legacy])?;
-                let s = String::from_utf8(plaintext)
-                    .context("decrypted secret is not valid UTF-8")?;
+                let s =
+                    String::from_utf8(plaintext).context("decrypted secret is not valid UTF-8")?;
                 Ok(Some(s))
             }
             None => Ok(None),
@@ -138,7 +138,15 @@ impl SecretStore for SqliteSecretStore {
                  ciphertext = excluded.ciphertext,
                  updated_at = excluded.updated_at,
                  updated_by = excluded.updated_by",
-            params![scope.as_str(), slug, key, nonce, ciphertext, now, updated_by],
+            params![
+                scope.as_str(),
+                slug,
+                key,
+                nonce,
+                ciphertext,
+                now,
+                updated_by
+            ],
         )?;
         // Best-effort audit row.
         let _ = conn.execute(
@@ -150,20 +158,40 @@ impl SecretStore for SqliteSecretStore {
     }
 
     /// Read & decrypt a secret. Returns `None` if not present.
+    ///
+    /// The async connection Mutex is held only for the row read and released
+    /// before the AES-GCM decrypt, so concurrent lookups do not serialize
+    /// behind one another's crypto work.
     async fn get(&self, scope: Scope, slug: Option<&str>, key: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().await;
-        Self::get_inner(&conn, &self.cipher, scope, slug, key)
+        let row: Option<(Vec<u8>, Vec<u8>)> = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT nonce, ciphertext FROM secrets
+                 WHERE scope = ?1 AND COALESCE(slug, '') = COALESCE(?2, '') AND key = ?3",
+                params![scope.as_str(), slug, key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+        };
+        match row {
+            Some((nonce, ciphertext)) => {
+                let aad_new = aad_for(scope.as_str(), slug, key);
+                let aad_legacy = aad_for_legacy(scope.as_str(), slug, key);
+                let plaintext =
+                    self.cipher
+                        .open_with_aads(&nonce, &ciphertext, &[&aad_new, &aad_legacy])?;
+                let s =
+                    String::from_utf8(plaintext).context("decrypted secret is not valid UTF-8")?;
+                Ok(Some(s))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Synchronous variant of `get` — usable from non-async code
     /// (scheduler/poller). Uses a separate connection so it does not
     /// contend with the async writers.
-    fn get_blocking(
-        &self,
-        scope: Scope,
-        slug: Option<&str>,
-        key: &str,
-    ) -> Result<Option<String>> {
+    fn get_blocking(&self, scope: Scope, slug: Option<&str>, key: &str) -> Result<Option<String>> {
         let conn = self
             .sync_conn
             .lock()
@@ -173,14 +201,17 @@ impl SecretStore for SqliteSecretStore {
 
     /// Decrypt a secret BY ID and write an audit row.
     async fn reveal(&self, id: i64, user_id: Option<i64>) -> Result<Option<String>> {
-        let conn = self.conn.lock().await;
-        let row: Option<(String, Option<String>, String, Vec<u8>, Vec<u8>)> = conn
-            .query_row(
+        // Read the row under the lock, then release it before the AES-GCM
+        // decrypt so the connection Mutex does not serialize crypto work.
+        let row: Option<(String, Option<String>, String, Vec<u8>, Vec<u8>)> = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
                 "SELECT scope, slug, key, nonce, ciphertext FROM secrets WHERE id = ?1",
                 params![id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
-            .optional()?;
+            .optional()?
+        };
         match row {
             Some((scope, slug, key, nonce, ct)) => {
                 let aad_new = aad_for(&scope, slug.as_deref(), &key);
@@ -189,11 +220,15 @@ impl SecretStore for SqliteSecretStore {
                     .cipher
                     .open_with_aads(&nonce, &ct, &[&aad_new, &aad_legacy])?;
                 let s = String::from_utf8(pt).context("not utf-8")?;
-                let _ = conn.execute(
-                    "INSERT INTO secrets_audit (scope, slug, key, action, user_id)
-                     VALUES (?1, ?2, ?3, 'reveal', ?4)",
-                    params![scope, slug, key, user_id],
-                );
+                // Re-acquire the lock only for the best-effort audit insert.
+                {
+                    let conn = self.conn.lock().await;
+                    let _ = conn.execute(
+                        "INSERT INTO secrets_audit (scope, slug, key, action, user_id)
+                         VALUES (?1, ?2, ?3, 'reveal', ?4)",
+                        params![scope, slug, key, user_id],
+                    );
+                }
                 Ok(Some(s))
             }
             None => Ok(None),

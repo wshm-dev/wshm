@@ -2,10 +2,10 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::config::{Config, GlobalConfig, RepoEntry};
+use crate::db::backend::DatabaseBackend;
 use crate::db::issues::Issue;
 use crate::db::pulls::PullRequest;
 use crate::db::triage::TriageResultRow;
-use crate::db::Database;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -248,7 +248,7 @@ pub struct RepoRow {
 }
 
 impl App {
-    pub fn new(config: &Config, db: &Database) -> Result<Self> {
+    pub fn new(config: &Config, db: &dyn DatabaseBackend) -> Result<Self> {
         let mut app = Self {
             repo_slug: config.repo_slug(),
             active_tab: Tab::Summary,
@@ -303,7 +303,7 @@ impl App {
     }
 
     /// Load all triage results, most recent first. Used by the Triage tab.
-    pub fn load_triage_all(&mut self, db: &Database) {
+    pub fn load_triage_all(&mut self, db: &dyn DatabaseBackend) {
         match db.recent_activity(500) {
             Ok(rows) => self.triage_all = rows,
             Err(_) => self.triage_all = Vec::new(),
@@ -312,25 +312,14 @@ impl App {
 
     /// Load closed pull requests, group them by conventional-commit section.
     /// Same logic as the web /api/v1/changelog endpoint.
-    pub fn load_changelog(&mut self, db: &Database) {
-        let rows = db
-            .with_conn(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT number, title, author, updated_at
-                     FROM pull_requests WHERE state = 'closed'
-                     ORDER BY updated_at DESC LIMIT 100",
-                )?;
-                let rows = stmt
-                    .query_map([], |row| {
-                        Ok((
-                            row.get::<_, u64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                            row.get::<_, String>(3)?,
-                        ))
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
+    pub fn load_changelog(&mut self, db: &dyn crate::db::backend::DatabaseBackend) {
+        let rows: Vec<(u64, String, Option<String>, String)> = db
+            .get_closed_pulls(100)
+            .map(|pulls| {
+                pulls
+                    .into_iter()
+                    .map(|pr| (pr.number, pr.title, pr.author, pr.updated_at))
+                    .collect()
             })
             .unwrap_or_default();
 
@@ -363,21 +352,24 @@ impl App {
             .collect();
     }
 
-    pub fn load_summary(&mut self, config: &Config, db: &Database) {
+    pub fn load_summary(&mut self, config: &Config, db: &dyn DatabaseBackend) {
         self.summary = crate::pipelines::status::build_summary(config, db).ok();
     }
 
-    pub fn refresh(&mut self, db: &Database) -> Result<()> {
+    pub fn refresh(&mut self, db: &dyn DatabaseBackend) -> Result<()> {
         let open_issues = db.get_open_issues()?;
         self.open_issue_count = open_issues.len();
 
         let pulls = db.get_open_pulls()?;
 
+        // Batch-load triage results once to avoid an N+1 query per tick.
+        let triage_map = db.get_all_triage_results().unwrap_or_default();
+
         // Build issue rows with triage results + linked PRs
         self.issues = open_issues
             .into_iter()
             .map(|issue| {
-                let triage = db.get_triage_result(issue.number).ok().flatten();
+                let triage = triage_map.get(&issue.number).cloned();
                 let issue_ref = format!("#{}", issue.number);
                 let linked_prs: Vec<u64> = pulls
                     .iter()
@@ -990,7 +982,7 @@ impl App {
     /// Run a GitHub sync (incremental or full) for the current repo and
     /// reload the local DB rows so the new data shows up without a manual
     /// refresh. Bound to F5 / Shift+F5 in the run loop.
-    pub async fn sync_now(&mut self, config: &Config, db: &Database, full: bool) {
+    pub async fn sync_now(&mut self, config: &Config, db: &dyn DatabaseBackend, full: bool) {
         self.status_message = Some(if full {
             "Full sync running…".to_string()
         } else {

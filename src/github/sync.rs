@@ -2,11 +2,11 @@ use anyhow::Result;
 use chrono::Utc;
 use tracing::info;
 
-use crate::db::Database;
+use crate::db::backend::DatabaseBackend;
 use crate::github::Client;
 
 /// Full sync: fetch ALL issues and ALL PRs (open + closed). Used on first run or manual sync.
-pub async fn full_sync(gh: &Client, db: &Database) -> Result<()> {
+pub async fn full_sync(gh: &Client, db: &dyn DatabaseBackend) -> Result<()> {
     info!("Starting full sync...");
     sync_issues(gh, db, None).await?;
     sync_pulls(gh, db).await?;
@@ -20,7 +20,7 @@ pub async fn full_sync(gh: &Client, db: &Database) -> Result<()> {
 ///
 /// First call (no sync log) → fetches everything once.
 /// Subsequent calls → only fetches what changed.
-pub async fn incremental_sync_full(gh: &Client, db: &Database) -> Result<()> {
+pub async fn incremental_sync_full(gh: &Client, db: &dyn DatabaseBackend) -> Result<()> {
     info!("Starting incremental sync...");
 
     let issues_since = db
@@ -52,7 +52,11 @@ pub async fn incremental_sync_full(gh: &Client, db: &Database) -> Result<()> {
 }
 
 /// Forever-incremental PR sync: stops paginating once we hit PRs older than `since`.
-async fn sync_pulls_incremental(gh: &Client, db: &Database, since: Option<&str>) -> Result<()> {
+async fn sync_pulls_incremental(
+    gh: &Client,
+    db: &dyn DatabaseBackend,
+    since: Option<&str>,
+) -> Result<()> {
     if since.is_some() {
         info!(
             "Syncing pull requests (incremental, since {})",
@@ -66,7 +70,7 @@ async fn sync_pulls_incremental(gh: &Client, db: &Database, since: Option<&str>)
 }
 
 #[allow(dead_code)]
-pub async fn incremental_sync(gh: &Client, db: &Database, table: &str) -> Result<()> {
+pub async fn incremental_sync(gh: &Client, db: &dyn DatabaseBackend, table: &str) -> Result<()> {
     let entry = db.get_sync_entry(table)?;
 
     let since = entry.as_ref().map(|e| {
@@ -100,16 +104,16 @@ pub async fn incremental_sync(gh: &Client, db: &Database, table: &str) -> Result
 }
 
 /// Force sync issues now (bypass throttle). Used when we know there's a new event.
-pub async fn sync_issues_now(gh: &Client, db: &Database) -> Result<()> {
+pub async fn sync_issues_now(gh: &Client, db: &dyn DatabaseBackend) -> Result<()> {
     sync_issues(gh, db, None).await
 }
 
 /// Force sync pulls now (bypass throttle). Used when we know there's a new event.
-pub async fn sync_pulls_now(gh: &Client, db: &Database) -> Result<()> {
+pub async fn sync_pulls_now(gh: &Client, db: &dyn DatabaseBackend) -> Result<()> {
     sync_pulls(gh, db).await
 }
 
-async fn sync_issues(gh: &Client, db: &Database, since: Option<&str>) -> Result<()> {
+async fn sync_issues(gh: &Client, db: &dyn DatabaseBackend, since: Option<&str>) -> Result<()> {
     info!("Syncing issues...");
     // Fetch ALL states (open+closed) so closed issues get updated in local DB
     let issues = gh.fetch_all_issues(since).await?;
@@ -124,7 +128,7 @@ async fn sync_issues(gh: &Client, db: &Database, since: Option<&str>) -> Result<
     Ok(())
 }
 
-async fn sync_pulls(gh: &Client, db: &Database) -> Result<()> {
+async fn sync_pulls(gh: &Client, db: &dyn DatabaseBackend) -> Result<()> {
     info!("Syncing pull requests...");
     let mut pulls = gh.fetch_pulls().await?;
     sync_pulls_finalize(gh, db, &mut pulls).await
@@ -133,7 +137,7 @@ async fn sync_pulls(gh: &Client, db: &Database) -> Result<()> {
 /// Shared finalize step: fetch mergeable status, upsert, update sync log.
 async fn sync_pulls_finalize(
     gh: &Client,
-    db: &Database,
+    db: &dyn DatabaseBackend,
     pulls: &mut [crate::db::pulls::PullRequest],
 ) -> Result<()> {
     let count = pulls.len();
@@ -151,11 +155,19 @@ async fn sync_pulls_finalize(
             "Fetching mergeable status for {} PRs (concurrent)...",
             needs_mergeable.len()
         );
-        let results: Vec<(usize, Result<Option<bool>>)> = futures::future::join_all(
+        // Bound concurrency so a large open-PR backlog doesn't fire hundreds
+        // of simultaneous GitHub GETs (each also retrying with backoff),
+        // which risks secondary/abuse rate limits and connection-pool
+        // exhaustion. Keep N small to stay well under the abuse threshold.
+        use futures::stream::StreamExt;
+        const MERGEABLE_CONCURRENCY: usize = 6;
+        let results: Vec<(usize, Result<Option<bool>>)> = futures::stream::iter(
             needs_mergeable
-                .iter()
-                .map(|&(idx, number)| async move { (idx, gh.fetch_pr_mergeable(number).await) }),
+                .into_iter()
+                .map(|(idx, number)| async move { (idx, gh.fetch_pr_mergeable(number).await) }),
         )
+        .buffer_unordered(MERGEABLE_CONCURRENCY)
+        .collect()
         .await;
 
         for (idx, result) in results {
@@ -170,6 +182,19 @@ async fn sync_pulls_finalize(
     }
 
     db.batch_upsert_pulls(pulls)?;
+
+    // Review decisions back the "To Validate" view (ready-to-merge /
+    // awaiting-re-review buckets). Best-effort: a Search API failure
+    // (anonymous rate limit, transient error) must not fail the sync —
+    // the previous decisions simply stay in place until the next pass.
+    match gh.fetch_review_decisions().await {
+        Ok(decisions) => match db.set_review_decisions(&decisions) {
+            Ok(0) => {}
+            Ok(n) => info!("Review decisions updated for {n} PR(s)"),
+            Err(e) => tracing::warn!("Failed to store review decisions: {e}"),
+        },
+        Err(e) => tracing::warn!("Failed to fetch review decisions: {e}"),
+    }
 
     let now = Utc::now().to_rfc3339();
     db.update_sync_entry("pulls", &now, None)?;

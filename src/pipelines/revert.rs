@@ -1,11 +1,11 @@
 use anyhow::Result;
 use tracing::info;
 
-use crate::db::Database;
+use crate::db::backend::DatabaseBackend;
 use crate::github::Client as GhClient;
 
 /// Revert all wshm actions: remove comments, remove wshm-applied labels, clear triage/analysis results.
-pub async fn run(db: &Database, gh: &GhClient, apply: bool) -> Result<()> {
+pub async fn run(db: &dyn DatabaseBackend, gh: &GhClient, apply: bool) -> Result<()> {
     let open_issues = db.get_open_issues()?;
     let open_pulls = db.get_open_pulls()?;
 
@@ -67,11 +67,7 @@ pub async fn run(db: &Database, gh: &GhClient, apply: bool) -> Result<()> {
 
     // Clear DB tables
     if apply {
-        db.with_conn(|conn| {
-            conn.execute("DELETE FROM triage_results", [])?;
-            conn.execute("DELETE FROM pr_analyses", [])?;
-            Ok(())
-        })?;
+        db.clear_triage_and_analyses()?;
         info!("Cleared triage_results and pr_analyses tables.");
     }
 
