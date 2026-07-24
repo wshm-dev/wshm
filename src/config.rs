@@ -174,6 +174,12 @@ pub struct TriageConfig {
     #[serde(default)]
     pub retriage_interval_hours: u32,
 
+    /// Append AI-generated "Suggested Actions" to triage comments (default: true).
+    /// Set to false to omit the section from comments and CLI output, and to avoid
+    /// asking the AI to generate them (saves tokens).
+    #[serde(default = "default_true")]
+    pub suggested_actions: bool,
+
     /// Override the AI system prompt for triage. If not set, uses the built-in default.
     #[serde(default)]
     pub system_prompt: Option<String>,
@@ -193,6 +199,7 @@ impl Default for TriageConfig {
             labels_wontfix: default_label_wontfix(),
             labels_needs_info: default_label_needs_info(),
             retriage_interval_hours: 0,
+            suggested_actions: true,
             system_prompt: None,
         }
     }
@@ -1857,6 +1864,7 @@ labels_duplicate = "duplicate"
 labels_wontfix = "wontfix"
 labels_needs_info = "needs-info"
 # retriage_interval_hours = 24   # re-evaluate triaged issues every 24h (0 = disabled)
+# suggested_actions = true        # append "Suggested Actions" to triage comments (set false to disable)
 
 [pr]
 enabled = true
