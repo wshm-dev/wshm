@@ -1,1 +1,0 @@
-import{C as f,y as u,L as _,M as o,q as t,O as g,P as i,D as l,F as d,x as p,B as m}from"./DZ39TTlt.js";function C(n,r){let s=null,y=t;var a;if(t){s=p;for(var e=m(document.head);e!==null&&(e.nodeType!==g||e.data!==n);)e=i(e);if(e===null)l(!1);else{var E=i(e);e.remove(),d(E)}}t||(a=document.head.appendChild(f()));try{u(()=>r(a),_|o)}finally{y&&(l(!0),d(s))}}export{C as h};
