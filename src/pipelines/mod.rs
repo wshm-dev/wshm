@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod context;
+pub mod discover_domains;
 pub mod migrate;
 pub mod revert;
 

@@ -655,7 +655,7 @@ pub fn domains_prompt(domains: &[DomainDef], custom: Option<&str>) -> String {
         }
     }
     let mut out = String::from(
-        "\n## Grand domains (tag the PR/issue with EVERY domain it touches, use ONLY these):\n",
+        "\n## Grand domains — broad areas of the product/codebase. Tag the PR/issue with EVERY domain it touches.\nKnown domains (reuse these when they fit):\n",
     );
     for d in domains {
         out.push_str(&format!("- **{}**", d.name));
@@ -664,7 +664,7 @@ pub fn domains_prompt(domains: &[DomainDef], custom: Option<&str>) -> String {
         }
         out.push('\n');
     }
-    out.push_str("\nReturn the matching domains in the `domains` array. Do NOT invent domains outside this list.\n");
+    out.push_str("\nReturn them in the `domains` array (short lowercase slugs, e.g. \"codex\", \"bun\"). Reuse a known domain whenever it fits; only introduce a NEW domain name if none of the above applies.\n");
     out
 }
 
@@ -679,6 +679,12 @@ pub struct DomainDef {
     /// What this domain covers — helps the AI decide when it applies.
     #[serde(default)]
     pub description: Option<String>,
+
+    /// Human-approved. Discovery + AI accumulation add domains as `false`
+    /// (proposed); only **validated** domains are applied as `domain:<name>`
+    /// GitHub labels. Gates writes to the repo behind a human check.
+    #[serde(default)]
+    pub validated: bool,
 }
 
 // ── Assign config ─────────────────────────────────────────────

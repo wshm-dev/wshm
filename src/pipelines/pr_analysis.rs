@@ -31,6 +31,10 @@ pub async fn run(
     let model = config.model_for("pr");
     let ai = AiBackend::from_config(config, model)?;
 
+    // Infer the repo's grand domains once if none are configured yet, so the
+    // user never has to guess them. Best-effort — never blocks analysis.
+    crate::pipelines::discover_domains::ensure_discovered(config, db, gh, &ai).await;
+
     let pulls = if let Some(number) = args.pr {
         match db.get_pull(number)? {
             Some(pr) => vec![pr],
@@ -200,6 +204,33 @@ async fn analyze_pr(
 
     let analysis: PrAnalysis = ai.complete(system_prompt, &user_prompt).await?;
 
+    // Accumulate any newly-seen domains into the DB known set (best-effort),
+    // so future reviews reuse them — the stateless-safe replacement for ICM
+    // (which isn't installed on the pods).
+    let new_domains: Vec<String> = analysis
+        .domains
+        .iter()
+        .filter(|d| {
+            !review_domains
+                .iter()
+                .any(|k| k.name.eq_ignore_ascii_case(d))
+        })
+        .cloned()
+        .collect();
+    if !new_domains.is_empty() {
+        let mut merged = review_domains.clone();
+        for n in new_domains {
+            merged.push(crate::config::DomainDef {
+                name: n,
+                description: None,
+                validated: false,
+            });
+        }
+        if let Ok(j) = serde_json::to_string(&merged) {
+            let _ = db.set_app_setting(crate::db::settings::REVIEW_DOMAINS_KEY, &j);
+        }
+    }
+
     // Account for the LLM call — advisory, never fail the pipeline.
     let _ = db.record_llm_invocation("pr_analysis", None);
 
@@ -232,7 +263,22 @@ async fn analyze_pr(
     );
 
     if apply {
-        let labels = config.filter_labels(analysis.suggested_labels.clone());
+        let mut labels = config.filter_labels(analysis.suggested_labels.clone());
+        // Apply assigned "grand domains" as `domain:<name>` labels, but ONLY for
+        // VALIDATED domains — proposed ones wait for human approval. GitHub
+        // auto-creates missing labels; not run through filter_labels.
+        let validated: std::collections::HashSet<String> = review_domains
+            .iter()
+            .filter(|d| d.validated)
+            .map(|d| d.name.to_lowercase())
+            .collect();
+        labels.extend(
+            analysis
+                .domains
+                .iter()
+                .filter(|d| validated.contains(&d.to_lowercase()))
+                .map(|d| format!("domain:{d}")),
+        );
         if !labels.is_empty() {
             gh.label_pr(pr.number, &labels).await?;
         }

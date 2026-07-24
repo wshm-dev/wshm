@@ -398,6 +398,32 @@ async fn triage_issue(
 
     let classification: IssueClassification = ai.complete(system_prompt, &user_prompt).await?;
 
+    // Accumulate newly-seen domains into the DB known set (best-effort) so
+    // future reviews reuse them — the stateless-safe replacement for ICM.
+    let new_domains: Vec<String> = classification
+        .domains
+        .iter()
+        .filter(|d| {
+            !review_domains
+                .iter()
+                .any(|k| k.name.eq_ignore_ascii_case(d))
+        })
+        .cloned()
+        .collect();
+    if !new_domains.is_empty() {
+        let mut merged = review_domains.clone();
+        for n in new_domains {
+            merged.push(crate::config::DomainDef {
+                name: n,
+                description: None,
+                validated: false,
+            });
+        }
+        if let Ok(j) = serde_json::to_string(&merged) {
+            let _ = db.set_app_setting(crate::db::settings::REVIEW_DOMAINS_KEY, &j);
+        }
+    }
+
     // Account for the LLM call so the Pro usage dashboard reflects
     // real spend (vs cache-hit triages above that never reach here).
     // Errors here are advisory — never fail the pipeline because
@@ -436,7 +462,23 @@ async fn triage_issue(
                 new_labels.push(priority_label);
             }
         }
-        let new_labels = config.filter_labels(new_labels);
+        let mut new_labels = config.filter_labels(new_labels);
+        // Apply assigned "grand domains" as `domain:<name>` labels, but ONLY for
+        // VALIDATED domains — proposed ones wait for human approval. Added after
+        // filter_labels (so an allowlist doesn't strip them) and NOT part of the
+        // wshm-managed suggested_labels set, so re-triage never removes them.
+        let validated: std::collections::HashSet<String> = review_domains
+            .iter()
+            .filter(|d| d.validated)
+            .map(|d| d.name.to_lowercase())
+            .collect();
+        new_labels.extend(
+            classification
+                .domains
+                .iter()
+                .filter(|d| validated.contains(&d.to_lowercase()))
+                .map(|d| format!("domain:{d}")),
+        );
 
         // Get labels previously applied by wshm (to know what to remove on re-triage)
         let old_wshm_labels = db.get_wshm_applied_labels(issue.number)?;

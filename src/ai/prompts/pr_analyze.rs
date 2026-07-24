@@ -22,9 +22,10 @@ Response format (JSON only, no markdown):
   "domains": ["domain1", "domain2"]
 }
 
-The "domains" array tags the PR with the grand domains it touches. Use ONLY the
-domains listed in the Grand domains section below (if that section is absent, return
-an empty array). A PR may belong to several domains.
+The "domains" array tags the PR with the grand domains it touches (broad product
+areas). Reuse the known domains listed in the Grand domains section below when they
+fit; you may add a NEW domain slug if none fits. If that section is absent, return an
+empty array. A PR may belong to several domains.
 
 Detect linked issues from patterns like "fixes #X", "closes #X", "resolves #X" in the PR body.
 

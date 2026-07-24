@@ -40,6 +40,7 @@
 		updateRepoFeatures,
 		fetchRepoDomains,
 		updateRepoDomains,
+		discoverRepoDomains,
 		fetchRetrySettings,
 		updateRetrySettings,
 		type ReviewDomain,
@@ -287,11 +288,29 @@
 		}
 	}
 
+	let domainsDiscovering: boolean = $state(false);
 	function addDomain() {
-		domainsDraft = [...domainsDraft, { name: '', description: '' }];
+		domainsDraft = [...domainsDraft, { name: '', description: '', validated: true }];
 	}
 	function removeDomain(i: number) {
 		domainsDraft = domainsDraft.filter((_, idx) => idx !== i);
+	}
+	function validateAllDomains() {
+		domainsDraft = domainsDraft.map((d) => ({ ...d, validated: true }));
+	}
+	async function handleDiscoverDomains() {
+		if (!featuresSlug) return;
+		domainsDiscovering = true;
+		featuresMessage = null;
+		try {
+			const d = await discoverRepoDomains(featuresSlug);
+			domainsDraft = d.domains ?? [];
+			reviewPromptDraft = d.review_prompt ?? reviewPromptDraft;
+		} catch (e) {
+			featuresMessage = e instanceof Error ? e.message : 'discovery failed';
+			featuresMessageErr = true;
+		}
+		domainsDiscovering = false;
 	}
 
 	async function handleSaveFeatures() {
@@ -1675,16 +1694,37 @@
 				<div class="mt-4 border-t pt-3">
 					<div class="flex items-center justify-between mb-1">
 						<h5 class="text-xs uppercase text-muted-foreground font-semibold">Review domains</h5>
-						<button type="button" class="text-xs text-primary hover:underline" onclick={addDomain}>
-							+ add
-						</button>
+						<div class="flex items-center gap-2">
+							<button
+								type="button"
+								class="text-xs text-primary hover:underline disabled:opacity-50"
+								onclick={handleDiscoverDomains}
+								disabled={domainsDiscovering}
+							>
+								{domainsDiscovering ? 'discovering…' : 'discover'}
+							</button>
+							<button type="button" class="text-xs text-primary hover:underline" onclick={validateAllDomains}>
+								validate all
+							</button>
+							<button type="button" class="text-xs text-primary hover:underline" onclick={addDomain}>
+								+ add
+							</button>
+						</div>
 					</div>
 					<p class="text-[0.7rem] text-muted-foreground mb-2">
-						Broad areas the AI review tags each PR/issue with (codex, bun, c#…). Multi-valued and
-						filterable in the PR network graph.
+						Broad areas the AI review tags each PR/issue with (codex, bun, c#…). <strong>Discover</strong>
+						infers them from the repo; only <strong>validated</strong> (✓) domains are applied as
+						<code>domain:*</code> labels — proposed ones wait for your review. Filterable in the PR graph.
 					</p>
 					{#each domainsDraft as d, i}
-						<div class="flex gap-1 mb-1">
+						<div class="flex items-center gap-1 mb-1">
+							<input
+								type="checkbox"
+								class="h-4 w-4 shrink-0"
+								checked={d.validated ?? false}
+								onchange={(e) => (d.validated = (e.currentTarget as HTMLInputElement).checked)}
+								title="validated → applied as a GitHub label"
+							/>
 							<Input class="h-8 w-1/3" placeholder="name" bind:value={d.name} />
 							<Input
 								class="h-8 flex-1"
@@ -1702,7 +1742,9 @@
 							</button>
 						</div>
 					{:else}
-						<p class="text-[0.7rem] text-muted-foreground">No domains configured yet.</p>
+						<p class="text-[0.7rem] text-muted-foreground">
+							No domains yet — click <strong>discover</strong> to infer them from the repo.
+						</p>
 					{/each}
 					<Label class="text-xs mb-1 mt-3">Custom review prompt (optional)</Label>
 					<textarea

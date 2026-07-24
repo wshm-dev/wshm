@@ -64,6 +64,22 @@ pub struct ReviewChecklist {
     pub docs_updated: bool,
 }
 
+/// One AI-discovered grand domain for a repo (name + short description).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveredDomain {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Output of the domain-discovery pass: the grand domains inferred from a
+/// repo's languages / structure / recent PR & issue titles.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DomainDiscovery {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub domains: Vec<DiscoveredDomain>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InlineReviewResult {
     #[serde(default)]

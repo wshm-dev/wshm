@@ -73,6 +73,10 @@ export interface Issue {
 	pr_status: string | null;
 	created_at: string;
 	updated_at: string;
+	/** GitHub 👍 (+1) reaction count. Sizes the issue node in the label graph. */
+	reactions_plus1?: number | null;
+	/** "Grand domains" the AI triage tagged this issue with. */
+	domains?: string[] | null;
 }
 
 export interface PullRequest {
@@ -527,6 +531,8 @@ export async function updateRepoFeatures(
 export interface ReviewDomain {
 	name: string;
 	description?: string | null;
+	/** Human-approved. Only validated domains are applied as `domain:*` labels. */
+	validated?: boolean;
 }
 /** Per-repo review-domains config, stored in the DB (works on stateless pods). */
 export interface RepoDomains {
@@ -551,6 +557,19 @@ export async function updateRepoDomains(
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json', ...CSRF_HEADERS },
 		body: JSON.stringify(patch)
+	});
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.error ?? `HTTP ${res.status}`);
+	}
+	return res.json();
+}
+
+/** Infer the repo's grand domains (AI) and merge them in as proposed. */
+export async function discoverRepoDomains(slug: string): Promise<RepoDomains> {
+	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/domains/discover`, {
+		method: 'POST',
+		headers: CSRF_HEADERS
 	});
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));

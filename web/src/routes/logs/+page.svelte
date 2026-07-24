@@ -63,7 +63,12 @@
 			if (error) error = null;
 			if (r.entries.length > 0 || reset) await scheduleScroll();
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'load failed';
+			const msg = e instanceof Error ? e.message : 'load failed';
+			// The logs endpoint is gated at the Operator role — surface that
+			// clearly instead of a raw "API error: 403" that looks like a bug.
+			error = /\b40[13]\b/.test(msg)
+				? 'Access to the daemon logs is restricted to Operator and Admin roles. Ask an admin to raise your role.'
+				: msg;
 		} finally {
 			inFlight = false;
 			if (reset) loading = false;

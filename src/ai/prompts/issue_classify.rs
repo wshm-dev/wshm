@@ -42,9 +42,10 @@ Response format (JSON only, no markdown):
   "domains": ["domain1", "domain2"]
 }
 
-The "domains" array tags the issue with the grand domains it touches. Use ONLY
-the domains listed in the Grand domains section below (if that section is absent,
-return an empty array). An issue may belong to several domains.
+The "domains" array tags the issue with the grand domains it touches (broad product
+areas). Reuse the known domains listed in the Grand domains section below when they
+fit; you may add a NEW domain slug if none fits. If that section is absent, return an
+empty array. An issue may belong to several domains.
 
 Be precise and varied in your confidence scores. Use the full range:
 - 0.95+ only for obvious, clear-cut cases

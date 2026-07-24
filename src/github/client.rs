@@ -191,4 +191,61 @@ impl Client {
 
         Ok(number)
     }
+
+    /// Repo languages (GitHub `/languages`), e.g. `["Rust", "TypeScript"]`.
+    /// A signal for domain discovery. Best-effort: empty on error.
+    pub async fn fetch_languages(&self) -> Result<Vec<String>> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/languages",
+            self.owner, self.repo
+        );
+        let resp = self._get_json(&url, "github: languages").await?;
+        Ok(resp
+            .as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    /// Top-level entries of the repo (dirs suffixed with `/`, plus root files
+    /// like `package.json`, `Cargo.toml`). A structural signal for domain
+    /// discovery. Best-effort.
+    pub async fn fetch_root_entries(&self) -> Result<Vec<String>> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/contents",
+            self.owner, self.repo
+        );
+        let json = self._get_json(&url, "github: root contents").await?;
+        let mut out = Vec::new();
+        if let Some(arr) = json.as_array() {
+            for e in arr {
+                let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if name.is_empty() {
+                    continue;
+                }
+                if e.get("type").and_then(|v| v.as_str()) == Some("dir") {
+                    out.push(format!("{name}/"));
+                } else {
+                    out.push(name.to_string());
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Small helper: GET a URL and parse the JSON body.
+    async fn _get_json(&self, url: &str, what: &'static str) -> Result<serde_json::Value> {
+        let body = crate::retry::with_retry(what, || async {
+            let resp = self
+                .octocrab
+                ._get(url)
+                .await
+                .with_context(|| format!("{what}: request failed"))?;
+            self.octocrab
+                .body_to_string(resp)
+                .await
+                .with_context(|| format!("{what}: read body"))
+        })
+        .await?;
+        Ok(serde_json::from_str(&body).unwrap_or(serde_json::Value::Null))
+    }
 }

@@ -1,4 +1,5 @@
 pub mod conflict_resolve;
+pub mod discover_domains;
 pub mod inline_review;
 pub mod issue_classify;
 pub mod issue_fix;

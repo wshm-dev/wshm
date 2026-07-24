@@ -78,11 +78,11 @@
 		{ href: '/search', label: 'Search', icon: 'search', section: 'Work', feature: 'search' },
 		{ href: '/issues', label: 'Issues', icon: 'issues', section: 'Work' },
 		{ href: '/prs', label: 'Pull Requests', icon: 'prs', section: 'Work' },
-		{ href: '/prs/graph', label: 'PR Graph', icon: 'prGraph', section: 'Work' },
 		{ href: '/review', label: 'To Validate', icon: 'review', section: 'Work' },
 		{ href: '/triage', label: 'Triage', icon: 'triage', section: 'Work' },
 		{ href: '/queue', label: 'Merge Queue', icon: 'queue', section: 'Work' },
 		{ href: '/actions', label: 'Actions', icon: 'actions', section: 'Work' },
+		{ href: '/graphs', label: 'Graphs', icon: 'prGraph', section: 'Insights' },
 		{
 			href: '/pr-insights',
 			label: 'PR Insights',

@@ -2427,6 +2427,55 @@ async fn api_repo_domains_patch(
     Json(json!({ "domains": domains, "review_prompt": prompt })).into_response()
 }
 
+/// POST /api/v1/repos/{slug}/domains/discover -- infer the repo's grand domains
+/// (from languages / structure / recent PR & issue titles) and merge them into
+/// the DB set as PROPOSED. Returns the full merged domain list.
+async fn api_repo_domains_discover(
+    State(state): State<Arc<WebState>>,
+    user: axum::Extension<Option<crate::auth::User>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> Response {
+    if state.users.is_some() {
+        if let Err(e) = require_admin(&user) {
+            return e;
+        }
+    }
+
+    let repos = state.multi.repos.read().await;
+    let ds = match repos.get(&slug) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("repo '{slug}' not configured")})),
+            )
+                .into_response();
+        }
+    };
+    drop(repos);
+
+    let model = ds.config.model_for("pr");
+    let ai = match crate::ai::backend::AiBackend::from_config(&ds.config, model) {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("AI backend: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    let gh = ds.gh();
+    match crate::pipelines::discover_domains::discover(&ds.config, ds.db.as_ref(), &gh, &ai).await {
+        Ok(domains) => Json(json!({ "domains": domains })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("discovery failed: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
 /// GET /api/v1/config/retry -- read the live HTTP retry policy.
 async fn api_retry_get() -> Response {
     Json(crate::retry::global()).into_response()
@@ -3459,6 +3508,10 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         .route(
             "/api/v1/repos/{slug}/domains",
             get(api_repo_domains_get).patch(api_repo_domains_patch),
+        )
+        .route(
+            "/api/v1/repos/{slug}/domains/discover",
+            post(api_repo_domains_discover),
         )
         .route("/api/v1/auth/status", get(api_auth_status))
         .route(
