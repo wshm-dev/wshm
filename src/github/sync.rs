@@ -196,6 +196,18 @@ async fn sync_pulls_finalize(
         Err(e) => tracing::warn!("Failed to fetch review decisions: {e}"),
     }
 
+    // 👍 (+1) reaction counts size the PR nodes in the label graph. Same
+    // best-effort contract as review decisions: a Search API failure leaves
+    // the previous counts untouched.
+    match gh.fetch_pull_reactions().await {
+        Ok(reactions) => match db.set_pull_reactions(&reactions) {
+            Ok(0) => {}
+            Ok(n) => info!("PR reactions updated for {n} PR(s)"),
+            Err(e) => tracing::warn!("Failed to store PR reactions: {e}"),
+        },
+        Err(e) => tracing::warn!("Failed to fetch PR reactions: {e}"),
+    }
+
     let now = Utc::now().to_rfc3339();
     db.update_sync_entry("pulls", &now, None)?;
 

@@ -29,6 +29,12 @@ pub struct PullRequest {
     /// (updated_at > review_decision_at) without per-review API calls.
     #[serde(default)]
     pub review_decision_at: Option<String>,
+    /// GitHub 👍 (+1) reaction count on the PR. Like `review_decision`, this is
+    /// NOT set by the regular upsert (GitHub's `/pulls` list endpoint carries no
+    /// reactions) — a dedicated sync pass (`set_pull_reactions`) fills it from
+    /// the Search API. Defaults to 0. Sizes the PR node in the label graph.
+    #[serde(default)]
+    pub reactions_plus1: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +173,31 @@ impl Database {
         self.with_conn(|conn| get_pull(conn, number))
     }
 
+    /// Apply freshly-synced 👍 (+1) reaction counts to open PRs. Mirrors
+    /// `set_review_decisions`: maintained by a dedicated sync pass, NOT the
+    /// upsert (GitHub's `/pulls` list carries no reactions). `reactions` maps
+    /// PR number → +1 count. Returns the number of PRs whose count changed.
+    pub fn set_pull_reactions(
+        &self,
+        reactions: &std::collections::HashMap<u64, u32>,
+    ) -> Result<u64> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let mut changed = 0u64;
+            {
+                let mut update = tx.prepare(
+                    "UPDATE pull_requests SET reactions_plus1 = ?1
+                     WHERE number = ?2 AND reactions_plus1 != ?1",
+                )?;
+                for (number, plus1) in reactions {
+                    changed += update.execute(params![plus1, number])? as u64;
+                }
+            }
+            tx.commit()?;
+            Ok(changed)
+        })
+    }
+
     pub fn get_open_pulls(&self) -> Result<Vec<PullRequest>> {
         self.with_conn(get_open_pulls)
     }
@@ -182,7 +213,7 @@ impl Database {
     pub fn get_closed_pulls(&self, limit: usize) -> Result<Vec<PullRequest>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT number, title, body, state, labels, author, head_sha, base_sha, head_ref, base_ref, mergeable, ci_status, created_at, updated_at, review_decision, review_decision_at
+                "SELECT number, title, body, state, labels, author, head_sha, base_sha, head_ref, base_ref, mergeable, ci_status, created_at, updated_at, review_decision, review_decision_at, reactions_plus1
                  FROM pull_requests WHERE state = 'closed'
                  ORDER BY updated_at DESC LIMIT ?1",
             )?;
@@ -283,12 +314,13 @@ fn row_to_pull(row: &rusqlite::Row) -> rusqlite::Result<PullRequest> {
         updated_at: row.get(13)?,
         review_decision: row.get(14)?,
         review_decision_at: row.get(15)?,
+        reactions_plus1: row.get(16)?,
     })
 }
 
 pub fn get_pull(conn: &Connection, number: u64) -> Result<Option<PullRequest>> {
     let mut stmt = conn.prepare(
-        "SELECT number, title, body, state, labels, author, head_sha, base_sha, head_ref, base_ref, mergeable, ci_status, created_at, updated_at, review_decision, review_decision_at
+        "SELECT number, title, body, state, labels, author, head_sha, base_sha, head_ref, base_ref, mergeable, ci_status, created_at, updated_at, review_decision, review_decision_at, reactions_plus1
          FROM pull_requests WHERE number = ?1",
     )?;
 
@@ -303,7 +335,7 @@ pub fn get_pull(conn: &Connection, number: u64) -> Result<Option<PullRequest>> {
 
 pub fn get_open_pulls(conn: &Connection) -> Result<Vec<PullRequest>> {
     let mut stmt = conn.prepare(
-        "SELECT number, title, body, state, labels, author, head_sha, base_sha, head_ref, base_ref, mergeable, ci_status, created_at, updated_at, review_decision, review_decision_at
+        "SELECT number, title, body, state, labels, author, head_sha, base_sha, head_ref, base_ref, mergeable, ci_status, created_at, updated_at, review_decision, review_decision_at, reactions_plus1
          FROM pull_requests WHERE state = 'open' ORDER BY number DESC",
     )?;
 
@@ -315,7 +347,7 @@ pub fn get_open_pulls(conn: &Connection) -> Result<Vec<PullRequest>> {
 
 pub fn get_unanalyzed_pulls(conn: &Connection) -> Result<Vec<PullRequest>> {
     let mut stmt = conn.prepare(
-        "SELECT p.number, p.title, p.body, p.state, p.labels, p.author, p.head_sha, p.base_sha, p.head_ref, p.base_ref, p.mergeable, p.ci_status, p.created_at, p.updated_at, p.review_decision, p.review_decision_at
+        "SELECT p.number, p.title, p.body, p.state, p.labels, p.author, p.head_sha, p.base_sha, p.head_ref, p.base_ref, p.mergeable, p.ci_status, p.created_at, p.updated_at, p.review_decision, p.review_decision_at, p.reactions_plus1
          FROM pull_requests p
          LEFT JOIN pr_analyses a ON p.number = a.pr_number
          WHERE p.state = 'open' AND a.pr_number IS NULL
@@ -336,7 +368,7 @@ pub fn get_pulls_needing_analysis(conn: &Connection) -> Result<Vec<PullRequest>>
     use crate::db::schema::compute_pr_hash;
 
     let mut stmt = conn.prepare(
-        "SELECT p.number, p.title, p.body, p.state, p.labels, p.author, p.head_sha, p.base_sha, p.head_ref, p.base_ref, p.mergeable, p.ci_status, p.created_at, p.updated_at, p.review_decision, p.review_decision_at,
+        "SELECT p.number, p.title, p.body, p.state, p.labels, p.author, p.head_sha, p.base_sha, p.head_ref, p.base_ref, p.mergeable, p.ci_status, p.created_at, p.updated_at, p.review_decision, p.review_decision_at, p.reactions_plus1,
                 a.content_hash
          FROM pull_requests p
          LEFT JOIN pr_analyses a ON p.number = a.pr_number
@@ -346,7 +378,7 @@ pub fn get_pulls_needing_analysis(conn: &Connection) -> Result<Vec<PullRequest>>
 
     let rows = stmt.query_map([], |row| {
         let pr = row_to_pull(row)?;
-        let stored_hash: Option<String> = row.get(16)?;
+        let stored_hash: Option<String> = row.get(17)?;
         Ok((pr, stored_hash))
     })?;
 
@@ -390,6 +422,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             review_decision: None,
             review_decision_at: None,
+            reactions_plus1: 0,
         }
     }
 
@@ -430,6 +463,32 @@ mod tests {
         db.upsert_pull(&test_pull(2, "b updated")).unwrap();
         let p2 = db.get_pull(2).unwrap().unwrap();
         assert_eq!(p2.review_decision.as_deref(), Some("approved"));
+    }
+
+    #[test]
+    fn pull_reactions_set_and_survive_upsert() {
+        use std::collections::HashMap;
+        let db = Database::open_memory().unwrap();
+        db.upsert_pull(&test_pull(1, "a")).unwrap();
+        db.upsert_pull(&test_pull(2, "b")).unwrap();
+
+        // Fresh PRs default to 0 reactions.
+        assert_eq!(db.get_pull(1).unwrap().unwrap().reactions_plus1, 0);
+
+        // Apply counts: PR 1 → 7, PR 2 → 3.
+        let mut r: HashMap<u64, u32> = HashMap::new();
+        r.insert(1, 7);
+        r.insert(2, 3);
+        assert_eq!(db.set_pull_reactions(&r).unwrap(), 2);
+        assert_eq!(db.get_pull(1).unwrap().unwrap().reactions_plus1, 7);
+
+        // Same counts again: no change reported.
+        assert_eq!(db.set_pull_reactions(&r).unwrap(), 0);
+
+        // A regular PR sync (upsert) must NOT wipe the reaction count — it is
+        // maintained solely by set_pull_reactions, like review_decision.
+        db.upsert_pull(&test_pull(1, "a updated")).unwrap();
+        assert_eq!(db.get_pull(1).unwrap().unwrap().reactions_plus1, 7);
     }
 
     /// Insert a pr_analyses row with the given content hash (mirrors the

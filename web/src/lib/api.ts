@@ -99,6 +99,9 @@ export interface PullRequest {
 	review_decision?: string | null;
 	/** When the current review decision was first observed (RFC3339). */
 	review_decision_at?: string | null;
+	/** GitHub 👍 (+1) reaction count on the PR. Optional — filled by the
+	 *  pulls-reactions sync pass; sizes the PR node in the label graph. */
+	reactions_plus1?: number | null;
 }
 
 export interface TriageResult {

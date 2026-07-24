@@ -320,6 +320,7 @@ impl GitProvider for GitLabProvider {
                 // Populated by the dedicated review-decision sync pass, not here.
                 review_decision: None,
                 review_decision_at: None,
+                reactions_plus1: 0,
             })
             .collect())
     }

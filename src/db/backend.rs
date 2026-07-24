@@ -117,6 +117,14 @@ pub trait DatabaseBackend: Send + Sync {
         Ok(0)
     }
 
+    /// Apply 👍 (+1) reaction counts to open PRs (number → count). Sizes the
+    /// PR node in the label graph. Default no-op returning 0 so backends
+    /// without the column keep compiling — real backends override it.
+    fn set_pull_reactions(&self, reactions: &std::collections::HashMap<u64, u32>) -> Result<u64> {
+        let _ = reactions;
+        Ok(0)
+    }
+
     // ── Admin / maintenance ─────────────────────────────────────
 
     /// Wipe every triage result and PR analysis. Used by the `revert` flow
@@ -377,6 +385,10 @@ impl DatabaseBackend for super::Database {
         decisions: &std::collections::HashMap<u64, Option<String>>,
     ) -> Result<u64> {
         self.set_review_decisions(decisions)
+    }
+
+    fn set_pull_reactions(&self, reactions: &std::collections::HashMap<u64, u32>) -> Result<u64> {
+        self.set_pull_reactions(reactions)
     }
 
     fn clear_triage_and_analyses(&self) -> Result<()> {

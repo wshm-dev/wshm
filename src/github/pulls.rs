@@ -53,6 +53,9 @@ fn parse_pull(pr: &serde_json::Value) -> PullRequest {
         // Populated by the dedicated review-decision sync pass, not here.
         review_decision: None,
         review_decision_at: None,
+        // GitHub's /pulls list carries no reactions — filled by the dedicated
+        // fetch_pull_reactions / set_pull_reactions pass.
+        reactions_plus1: 0,
     }
 }
 
@@ -167,6 +170,56 @@ impl Client {
                 }
                 page += 1;
             }
+        }
+        Ok(map)
+    }
+
+    /// Fetch 👍 (+1) reaction counts for every open PR, number → count.
+    ///
+    /// GitHub's `/pulls` list endpoint carries no reactions, but the Search
+    /// API returns a `reactions` object per item — so this mirrors
+    /// `fetch_review_decisions` (same endpoint, retry, and 1000-result cap).
+    /// Best-effort: callers treat a failure as "keep previous counts".
+    pub async fn fetch_pull_reactions(&self) -> Result<std::collections::HashMap<u64, u32>> {
+        let mut map = std::collections::HashMap::new();
+        let query = format!("repo:{}/{} is:pr is:open", self.owner, self.repo);
+        let mut page = 1u32;
+        loop {
+            let url = format!(
+                "https://api.github.com/search/issues?q={}&per_page=100&page={page}",
+                urlencoding::encode(&query)
+            );
+            let body = crate::retry::with_retry("github: search pr reactions", || async {
+                let resp = self
+                    .octocrab
+                    ._get(&url)
+                    .await
+                    .context("Failed to search PR reactions")?;
+                self.octocrab
+                    .body_to_string(resp)
+                    .await
+                    .context("Failed to read search response body")
+            })
+            .await?;
+            let json: serde_json::Value = serde_json::from_str(&body)
+                .context("Failed to parse pr-reactions search response")?;
+            let items = json["items"].as_array().cloned().unwrap_or_default();
+            let n = items.len();
+            for item in &items {
+                if let Some(number) = item["number"].as_u64() {
+                    let plus1 = item
+                        .get("reactions")
+                        .and_then(|r| r.get("+1"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    map.insert(number, plus1);
+                }
+            }
+            // The Search API caps results at 1000 (10 pages of 100).
+            if n < 100 || page >= 10 {
+                break;
+            }
+            page += 1;
         }
         Ok(map)
     }

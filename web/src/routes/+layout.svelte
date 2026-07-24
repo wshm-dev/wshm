@@ -56,7 +56,7 @@
 	}
 
 	type IconName =
-		| 'dashboard' | 'summary' | 'issues' | 'prs' | 'review' | 'triage' | 'queue'
+		| 'dashboard' | 'summary' | 'issues' | 'prs' | 'prGraph' | 'review' | 'triage' | 'queue'
 		| 'changelog' | 'revert' | 'backups' | 'activity' | 'actions' | 'logs'
 		| 'search' | 'settings' | 'insights' | 'issueInsights';
 
@@ -78,6 +78,7 @@
 		{ href: '/search', label: 'Search', icon: 'search', section: 'Work', feature: 'search' },
 		{ href: '/issues', label: 'Issues', icon: 'issues', section: 'Work' },
 		{ href: '/prs', label: 'Pull Requests', icon: 'prs', section: 'Work' },
+		{ href: '/prs/graph', label: 'PR Graph', icon: 'prGraph', section: 'Work' },
 		{ href: '/review', label: 'To Validate', icon: 'review', section: 'Work' },
 		{ href: '/triage', label: 'Triage', icon: 'triage', section: 'Work' },
 		{ href: '/queue', label: 'Merge Queue', icon: 'queue', section: 'Work' },
@@ -266,6 +267,11 @@
 			<path d="M4 4h16v4H4z" />
 			<path d="M4 12h16v4H4z" />
 			<path d="M4 20h10" />
+		{:else if icon === 'prGraph'}
+			<circle cx="5" cy="6" r="2.5" />
+			<circle cx="19" cy="7" r="2.5" />
+			<circle cx="12" cy="18" r="2.5" />
+			<path d="M7.2 7.2 10 16M16.9 8.4 13.4 16.4M7.3 6.4h9.4" />
 		{:else if icon === 'insights'}
 			<circle cx="12" cy="12" r="9" />
 			<path d="M12 3v9l6.5 6.5" />

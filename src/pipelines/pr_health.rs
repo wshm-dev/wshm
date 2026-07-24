@@ -604,6 +604,7 @@ mod tests {
             updated_at: iso_days_ago(0),
             review_decision: None,
             review_decision_at: None,
+            reactions_plus1: 0,
         }
     }
 

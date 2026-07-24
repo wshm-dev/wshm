@@ -129,6 +129,17 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Migration: add 👍 (+1) reaction count to pull_requests (sizes the PR
+    // node in the label graph). Filled by the set_pull_reactions sync pass.
+    let has_pull_reactions: bool = conn
+        .prepare("SELECT reactions_plus1 FROM pull_requests LIMIT 0")
+        .is_ok();
+    if !has_pull_reactions {
+        conn.execute_batch(
+            "ALTER TABLE pull_requests ADD COLUMN reactions_plus1 INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+
     // Migration: add content_hash to triage_results and pr_analyses (for LLM call deduplication)
     let has_triage_hash: bool = conn
         .prepare("SELECT content_hash FROM triage_results LIMIT 0")
