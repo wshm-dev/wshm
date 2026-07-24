@@ -265,23 +265,58 @@
 	let featuresMessageErr: boolean = $state(false);
 
 	// Review "grand domains" (codex, bun, …) + prompt. DB-backed (works on
-	// stateless pods), edited alongside the per-repo features in the same modal.
+	// stateless pods). Managed in the dedicated "Domains" tab, per repo.
+	let domainsRepo: string = $state('');
 	let domainsDraft: ReviewDomain[] = $state([]);
 	let reviewPromptDraft: string = $state('');
+	let domainsLoading: boolean = $state(false);
+	let domainsSaving: boolean = $state(false);
+	let domainsMessage: string | null = $state(null);
+	let domainsMessageErr: boolean = $state(false);
+
+	async function loadDomainsFor(slug: string) {
+		domainsRepo = slug;
+		domainsDraft = [];
+		reviewPromptDraft = '';
+		domainsMessage = null;
+		if (!slug) return;
+		domainsLoading = true;
+		try {
+			const d = await fetchRepoDomains(slug);
+			domainsDraft = d.domains ?? [];
+			reviewPromptDraft = d.review_prompt ?? '';
+		} catch (e) {
+			domainsMessage = e instanceof Error ? e.message : 'Failed to load domains';
+			domainsMessageErr = true;
+		}
+		domainsLoading = false;
+	}
+	async function saveDomains() {
+		if (!domainsRepo) return;
+		domainsSaving = true;
+		domainsMessage = null;
+		try {
+			await updateRepoDomains(domainsRepo, {
+				domains: domainsDraft.filter((d) => d.name.trim() !== ''),
+				review_prompt: reviewPromptDraft
+			});
+			domainsMessage = 'Saved.';
+			domainsMessageErr = false;
+		} catch (e) {
+			domainsMessage = e instanceof Error ? e.message : 'save failed';
+			domainsMessageErr = true;
+		}
+		domainsSaving = false;
+	}
 
 	async function openFeaturesModal(slug: string) {
 		featuresSlug = slug;
 		featuresDraft = null;
-		domainsDraft = [];
-		reviewPromptDraft = '';
 		featuresMessage = null;
 		featuresMessageErr = false;
 		featuresModalOpen = true;
 		try {
 			featuresDraft = await fetchRepoFeatures(slug);
-			const d = await fetchRepoDomains(slug);
-			domainsDraft = d.domains ?? [];
-			reviewPromptDraft = d.review_prompt ?? '';
 		} catch (e) {
 			featuresMessage = e instanceof Error ? e.message : 'Failed to load features';
 			featuresMessageErr = true;
@@ -299,16 +334,16 @@
 		domainsDraft = domainsDraft.map((d) => ({ ...d, validated: true }));
 	}
 	async function handleDiscoverDomains() {
-		if (!featuresSlug) return;
+		if (!domainsRepo) return;
 		domainsDiscovering = true;
-		featuresMessage = null;
+		domainsMessage = null;
 		try {
-			const d = await discoverRepoDomains(featuresSlug);
+			const d = await discoverRepoDomains(domainsRepo);
 			domainsDraft = d.domains ?? [];
 			reviewPromptDraft = d.review_prompt ?? reviewPromptDraft;
 		} catch (e) {
-			featuresMessage = e instanceof Error ? e.message : 'discovery failed';
-			featuresMessageErr = true;
+			domainsMessage = e instanceof Error ? e.message : 'discovery failed';
+			domainsMessageErr = true;
 		}
 		domainsDiscovering = false;
 	}
@@ -318,11 +353,6 @@
 		featuresSaving = true;
 		try {
 			await updateRepoFeatures(featuresSlug, featuresDraft);
-			// Persist the review domains + prompt (DB) — drop blank-name rows.
-			await updateRepoDomains(featuresSlug, {
-				domains: domainsDraft.filter((d) => d.name.trim() !== ''),
-				review_prompt: reviewPromptDraft
-			});
 			featuresMessage = tr('settings.features.saved');
 			featuresMessageErr = false;
 			featuresModalOpen = false;
@@ -574,6 +604,7 @@
 		<Tabs.Trigger value="reliability">{$t('settings.tabs.reliability')}</Tabs.Trigger>
 		<Tabs.Trigger value="secrets">{$t('settings.tabs.secrets')}</Tabs.Trigger>
 		<Tabs.Trigger value="users">{$t('settings.tabs.users')}</Tabs.Trigger>
+		<Tabs.Trigger value="domains">Domains</Tabs.Trigger>
 	</Tabs.List>
 
 	<!-- ========================= REPOSITORIES ========================= -->
@@ -638,6 +669,116 @@
 						</div>
 					{:else}
 						<p class="text-sm text-muted-foreground">{$t('common.loading')}</p>
+					{/if}
+				</Card.Content>
+			</Card.Root>
+		</div>
+	</Tabs.Content>
+
+	<!-- ========================= DOMAINS ========================= -->
+	<!-- Review "grand domains" — DB-backed (app_settings), so they survive on
+	     stateless pods and are shared across replicas. Discovered per repo, then
+	     validated → applied as `domain:*` GitHub labels by the review pipeline. -->
+	<Tabs.Content value="domains" class="mt-2">
+		<div class="w-full">
+			<Card.Root>
+				<Card.Header>
+					<Card.Title>Review domains</Card.Title>
+					<Card.Description class="text-xs">
+						Broad areas the AI review tags each PR/issue with (codex, bun, c#…).
+						<strong>Discover</strong> infers them from the repo; only <strong>validated</strong> (✓)
+						domains are applied as <code>domain:*</code> labels — proposed ones wait for your review.
+						Filterable in the Graphs page.
+					</Card.Description>
+				</Card.Header>
+				<Card.Content class="space-y-3">
+					<div>
+						<Label class="text-xs mb-1">Repository</Label>
+						<select
+							class="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+							value={domainsRepo}
+							onchange={(e) => loadDomainsFor((e.currentTarget as HTMLSelectElement).value)}
+						>
+							<option value="" disabled>Select a repository…</option>
+							{#each reposList?.repos ?? [] as r}
+								<option value={r.slug}>{r.slug}</option>
+							{/each}
+						</select>
+					</div>
+
+					{#if domainsMessage}
+						{@render statusAlert(domainsMessage, domainsMessageErr)}
+					{/if}
+
+					{#if domainsRepo}
+						{#if domainsLoading}
+							<p class="text-xs text-muted-foreground">{$t('common.loading')}</p>
+						{:else}
+							<div class="flex items-center justify-between">
+								<h5 class="text-xs uppercase text-muted-foreground font-semibold">Domains</h5>
+								<div class="flex items-center gap-2">
+									<button
+										type="button"
+										class="text-xs text-primary hover:underline disabled:opacity-50"
+										onclick={handleDiscoverDomains}
+										disabled={domainsDiscovering}
+									>
+										{domainsDiscovering ? 'discovering…' : 'discover'}
+									</button>
+									<button type="button" class="text-xs text-primary hover:underline" onclick={validateAllDomains}>
+										validate all
+									</button>
+									<button type="button" class="text-xs text-primary hover:underline" onclick={addDomain}>
+										+ add
+									</button>
+								</div>
+							</div>
+							{#each domainsDraft as d, i}
+								<div class="flex items-center gap-1">
+									<input
+										type="checkbox"
+										class="h-4 w-4 shrink-0"
+										checked={d.validated ?? false}
+										onchange={(e) => (d.validated = (e.currentTarget as HTMLInputElement).checked)}
+										title="validated → applied as a GitHub label"
+									/>
+									<Input class="h-8 w-1/3" placeholder="name" bind:value={d.name} />
+									<Input
+										class="h-8 flex-1"
+										placeholder="description (helps the AI decide)"
+										value={d.description ?? ''}
+										oninput={(e) => (d.description = (e.currentTarget as HTMLInputElement).value)}
+									/>
+									<button
+										type="button"
+										class="px-2 text-muted-foreground hover:text-destructive"
+										onclick={() => removeDomain(i)}
+										aria-label="remove domain"
+									>
+										✕
+									</button>
+								</div>
+							{:else}
+								<p class="text-[0.7rem] text-muted-foreground">
+									No domains yet — click <strong>discover</strong> to infer them from the repo.
+								</p>
+							{/each}
+
+							<div>
+								<Label class="text-xs mb-1 mt-2">Custom review prompt (optional)</Label>
+								<textarea
+									class="w-full rounded-md border bg-background px-2 py-1 text-xs min-h-[64px]"
+									placeholder="Overrides the default domain instruction sent to the AI. Leave empty to use the built-in one."
+									bind:value={reviewPromptDraft}
+								></textarea>
+							</div>
+
+							<Button size="sm" onclick={saveDomains} disabled={domainsSaving}>
+								{domainsSaving ? $t('common.loading') : $t('common.save')}
+							</Button>
+						{/if}
+					{:else}
+						<p class="text-xs text-muted-foreground">Select a repository to manage its review domains.</p>
 					{/if}
 				</Card.Content>
 			</Card.Root>
@@ -1688,71 +1829,6 @@
 						</div>
 					</div>
 				</details>
-
-				<!-- Review "grand domains" — stored in the DB (works on stateless
-				     pods, shared across replicas), not in the ConfigMap TOML. -->
-				<div class="mt-4 border-t pt-3">
-					<div class="flex items-center justify-between mb-1">
-						<h5 class="text-xs uppercase text-muted-foreground font-semibold">Review domains</h5>
-						<div class="flex items-center gap-2">
-							<button
-								type="button"
-								class="text-xs text-primary hover:underline disabled:opacity-50"
-								onclick={handleDiscoverDomains}
-								disabled={domainsDiscovering}
-							>
-								{domainsDiscovering ? 'discovering…' : 'discover'}
-							</button>
-							<button type="button" class="text-xs text-primary hover:underline" onclick={validateAllDomains}>
-								validate all
-							</button>
-							<button type="button" class="text-xs text-primary hover:underline" onclick={addDomain}>
-								+ add
-							</button>
-						</div>
-					</div>
-					<p class="text-[0.7rem] text-muted-foreground mb-2">
-						Broad areas the AI review tags each PR/issue with (codex, bun, c#…). <strong>Discover</strong>
-						infers them from the repo; only <strong>validated</strong> (✓) domains are applied as
-						<code>domain:*</code> labels — proposed ones wait for your review. Filterable in the PR graph.
-					</p>
-					{#each domainsDraft as d, i}
-						<div class="flex items-center gap-1 mb-1">
-							<input
-								type="checkbox"
-								class="h-4 w-4 shrink-0"
-								checked={d.validated ?? false}
-								onchange={(e) => (d.validated = (e.currentTarget as HTMLInputElement).checked)}
-								title="validated → applied as a GitHub label"
-							/>
-							<Input class="h-8 w-1/3" placeholder="name" bind:value={d.name} />
-							<Input
-								class="h-8 flex-1"
-								placeholder="description (helps the AI decide)"
-								value={d.description ?? ''}
-								oninput={(e) => (d.description = (e.currentTarget as HTMLInputElement).value)}
-							/>
-							<button
-								type="button"
-								class="px-2 text-muted-foreground hover:text-destructive"
-								onclick={() => removeDomain(i)}
-								aria-label="remove domain"
-							>
-								✕
-							</button>
-						</div>
-					{:else}
-						<p class="text-[0.7rem] text-muted-foreground">
-							No domains yet — click <strong>discover</strong> to infer them from the repo.
-						</p>
-					{/each}
-					<Label class="text-xs mb-1 mt-3">Custom review prompt (optional)</Label>
-					<textarea
-						class="w-full rounded-md border bg-background px-2 py-1 text-xs min-h-[64px]"
-						placeholder="Overrides the default domain instruction sent to the AI. Leave empty to use the built-in one."
-						bind:value={reviewPromptDraft}
-					></textarea>
-				</div>
 
 				<div class="flex gap-2 pt-2">
 					<Button variant="outline" size="sm" class="flex-1"
