@@ -141,6 +141,7 @@ async fn analyze_pr(
                 linked_issues: Vec::new(),
                 review_checklist,
                 suggested_labels: Vec::new(),
+                domains: existing.domains,
             });
         }
     }
@@ -168,6 +169,23 @@ async fn analyze_pr(
         user_prompt.push_str(&labels_prompt);
     }
 
+    // Inject the configured "grand domains" so the AI can tag the PR with them.
+    // Source is the DB (stateless pods — see db::settings), not TOML config.
+    let review_domains: Vec<crate::config::DomainDef> = db
+        .get_app_setting(crate::db::settings::REVIEW_DOMAINS_KEY)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let review_prompt = db
+        .get_app_setting(crate::db::settings::REVIEW_PROMPT_KEY)
+        .ok()
+        .flatten();
+    let domains_prompt = crate::config::domains_prompt(&review_domains, review_prompt.as_deref());
+    if !domains_prompt.is_empty() {
+        user_prompt.push_str(&domains_prompt);
+    }
+
     if !icm_context.is_empty() {
         user_prompt.push_str(&format!(
             "\n\n## Past PR analysis context (from memory)\n{icm_context}"
@@ -193,6 +211,7 @@ async fn analyze_pr(
         risk_level: analysis.risk_level.clone(),
         pr_type: analysis.pr_type.clone(),
         review_notes: Some(serde_json::to_string(&analysis.review_checklist)?),
+        domains: analysis.domains.clone(),
         analyzed_at: now,
         content_hash: Some(content_hash),
     })?;

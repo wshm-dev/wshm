@@ -102,6 +102,10 @@ export interface PullRequest {
 	/** GitHub 👍 (+1) reaction count on the PR. Optional — filled by the
 	 *  pulls-reactions sync pass; sizes the PR node in the label graph. */
 	reactions_plus1?: number | null;
+	/** "Grand domains" the AI review tagged this PR with (codex, bun, …).
+	 *  Optional — present once the PR has been analyzed. Drives the domain
+	 *  filters in the PR network graph. */
+	domains?: string[] | null;
 }
 
 export interface TriageResult {
@@ -508,6 +512,42 @@ export async function updateRepoFeatures(
 	patch: Partial<RepoFeatures>
 ): Promise<RepoFeatures> {
 	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/features`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json', ...CSRF_HEADERS },
+		body: JSON.stringify(patch)
+	});
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.error ?? `HTTP ${res.status}`);
+	}
+	return res.json();
+}
+
+/** A configured review "grand domain" (codex, bun, c#…). */
+export interface ReviewDomain {
+	name: string;
+	description?: string | null;
+}
+/** Per-repo review-domains config, stored in the DB (works on stateless pods). */
+export interface RepoDomains {
+	domains: ReviewDomain[];
+	review_prompt: string | null;
+}
+
+export async function fetchRepoDomains(slug: string): Promise<RepoDomains> {
+	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/domains`);
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.error ?? `HTTP ${res.status}`);
+	}
+	return res.json();
+}
+
+export async function updateRepoDomains(
+	slug: string,
+	patch: { domains?: ReviewDomain[]; review_prompt?: string }
+): Promise<RepoDomains> {
+	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/domains`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json', ...CSRF_HEADERS },
 		body: JSON.stringify(patch)

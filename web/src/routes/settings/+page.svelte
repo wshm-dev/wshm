@@ -38,8 +38,11 @@
 		deleteUser,
 		fetchRepoFeatures,
 		updateRepoFeatures,
+		fetchRepoDomains,
+		updateRepoDomains,
 		fetchRetrySettings,
 		updateRetrySettings,
+		type ReviewDomain,
 		type RepoFeatures,
 		type RetrySettings,
 		type LicenseInfo,
@@ -260,18 +263,35 @@
 	let featuresMessage: string | null = $state(null);
 	let featuresMessageErr: boolean = $state(false);
 
+	// Review "grand domains" (codex, bun, …) + prompt. DB-backed (works on
+	// stateless pods), edited alongside the per-repo features in the same modal.
+	let domainsDraft: ReviewDomain[] = $state([]);
+	let reviewPromptDraft: string = $state('');
+
 	async function openFeaturesModal(slug: string) {
 		featuresSlug = slug;
 		featuresDraft = null;
+		domainsDraft = [];
+		reviewPromptDraft = '';
 		featuresMessage = null;
 		featuresMessageErr = false;
 		featuresModalOpen = true;
 		try {
 			featuresDraft = await fetchRepoFeatures(slug);
+			const d = await fetchRepoDomains(slug);
+			domainsDraft = d.domains ?? [];
+			reviewPromptDraft = d.review_prompt ?? '';
 		} catch (e) {
 			featuresMessage = e instanceof Error ? e.message : 'Failed to load features';
 			featuresMessageErr = true;
 		}
+	}
+
+	function addDomain() {
+		domainsDraft = [...domainsDraft, { name: '', description: '' }];
+	}
+	function removeDomain(i: number) {
+		domainsDraft = domainsDraft.filter((_, idx) => idx !== i);
 	}
 
 	async function handleSaveFeatures() {
@@ -279,6 +299,11 @@
 		featuresSaving = true;
 		try {
 			await updateRepoFeatures(featuresSlug, featuresDraft);
+			// Persist the review domains + prompt (DB) — drop blank-name rows.
+			await updateRepoDomains(featuresSlug, {
+				domains: domainsDraft.filter((d) => d.name.trim() !== ''),
+				review_prompt: reviewPromptDraft
+			});
 			featuresMessage = tr('settings.features.saved');
 			featuresMessageErr = false;
 			featuresModalOpen = false;
@@ -1644,6 +1669,48 @@
 						</div>
 					</div>
 				</details>
+
+				<!-- Review "grand domains" — stored in the DB (works on stateless
+				     pods, shared across replicas), not in the ConfigMap TOML. -->
+				<div class="mt-4 border-t pt-3">
+					<div class="flex items-center justify-between mb-1">
+						<h5 class="text-xs uppercase text-muted-foreground font-semibold">Review domains</h5>
+						<button type="button" class="text-xs text-primary hover:underline" onclick={addDomain}>
+							+ add
+						</button>
+					</div>
+					<p class="text-[0.7rem] text-muted-foreground mb-2">
+						Broad areas the AI review tags each PR/issue with (codex, bun, c#…). Multi-valued and
+						filterable in the PR network graph.
+					</p>
+					{#each domainsDraft as d, i}
+						<div class="flex gap-1 mb-1">
+							<Input class="h-8 w-1/3" placeholder="name" bind:value={d.name} />
+							<Input
+								class="h-8 flex-1"
+								placeholder="description (helps the AI decide)"
+								value={d.description ?? ''}
+								oninput={(e) => (d.description = (e.currentTarget as HTMLInputElement).value)}
+							/>
+							<button
+								type="button"
+								class="px-2 text-muted-foreground hover:text-destructive"
+								onclick={() => removeDomain(i)}
+								aria-label="remove domain"
+							>
+								✕
+							</button>
+						</div>
+					{:else}
+						<p class="text-[0.7rem] text-muted-foreground">No domains configured yet.</p>
+					{/each}
+					<Label class="text-xs mb-1 mt-3">Custom review prompt (optional)</Label>
+					<textarea
+						class="w-full rounded-md border bg-background px-2 py-1 text-xs min-h-[64px]"
+						placeholder="Overrides the default domain instruction sent to the AI. Leave empty to use the built-in one."
+						bind:value={reviewPromptDraft}
+					></textarea>
+				</div>
 
 				<div class="flex gap-2 pt-2">
 					<Button variant="outline" size="sm" class="flex-1"

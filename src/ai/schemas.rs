@@ -31,6 +31,10 @@ pub struct IssueClassification {
     pub is_simple_fix: bool,
     #[serde(default, deserialize_with = "null_as_default")]
     pub relevant_files: Vec<String>,
+    /// "Grand domains" this issue touches (e.g. codex, bun, c#). Chosen from the
+    /// per-repo configured domain list; multi-valued. Empty when none configured.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub domains: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +48,10 @@ pub struct PrAnalysis {
     pub review_checklist: ReviewChecklist,
     #[serde(default)]
     pub suggested_labels: Vec<String>,
+    /// "Grand domains" this PR touches (e.g. codex, bun, c#). Chosen from the
+    /// per-repo configured domain list; multi-valued. Empty when none configured.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub domains: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -38,8 +38,13 @@ Response format (JSON only, no markdown):
   "suggested_labels": ["enhancement", "priority:medium", "area:cli"],
   "is_duplicate_of": null or issue_number,
   "is_simple_fix": true/false,
-  "relevant_files": ["path/to/file.rs"]
+  "relevant_files": ["path/to/file.rs"],
+  "domains": ["domain1", "domain2"]
 }
+
+The "domains" array tags the issue with the grand domains it touches. Use ONLY
+the domains listed in the Grand domains section below (if that section is absent,
+return an empty array). An issue may belong to several domains.
 
 Be precise and varied in your confidence scores. Use the full range:
 - 0.95+ only for obvious, clear-cut cases

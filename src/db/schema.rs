@@ -86,6 +86,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             processed_at TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(state);
         CREATE INDEX IF NOT EXISTS idx_pulls_state ON pull_requests(state);
         CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_number);
@@ -153,6 +158,25 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         .is_ok();
     if !has_pr_hash {
         conn.execute_batch("ALTER TABLE pr_analyses ADD COLUMN content_hash TEXT;")?;
+    }
+
+    // Migration: add `domains` (JSON array) to pr_analyses + triage_results —
+    // the "grand domains" the AI review tags each PR/issue with (codex, bun…).
+    let has_pr_domains: bool = conn
+        .prepare("SELECT domains FROM pr_analyses LIMIT 0")
+        .is_ok();
+    if !has_pr_domains {
+        conn.execute_batch(
+            "ALTER TABLE pr_analyses ADD COLUMN domains TEXT NOT NULL DEFAULT '[]';",
+        )?;
+    }
+    let has_triage_domains: bool = conn
+        .prepare("SELECT domains FROM triage_results LIMIT 0")
+        .is_ok();
+    if !has_triage_domains {
+        conn.execute_batch(
+            "ALTER TABLE triage_results ADD COLUMN domains TEXT NOT NULL DEFAULT '[]';",
+        )?;
     }
 
     // One-shot migration: recompute every existing triage_results.content_hash

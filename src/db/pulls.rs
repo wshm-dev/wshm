@@ -44,6 +44,9 @@ pub struct PrAnalysisRow {
     pub risk_level: String,
     pub pr_type: String,
     pub review_notes: Option<String>,
+    /// "Grand domains" the AI review tagged this PR with (codex, bun, …).
+    #[serde(default)]
+    pub domains: Vec<String>,
     pub analyzed_at: String,
     #[serde(default)]
     pub content_hash: Option<String>,
@@ -55,7 +58,7 @@ impl Database {
     pub fn get_pr_analysis(&self, pr_number: u64) -> Result<Option<PrAnalysisRow>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT pr_number, summary, risk_level, pr_type, review_notes, analyzed_at, content_hash
+                "SELECT pr_number, summary, risk_level, pr_type, review_notes, analyzed_at, content_hash, domains
                  FROM pr_analyses WHERE pr_number = ?1",
             )?;
 
@@ -68,6 +71,7 @@ impl Database {
                     review_notes: row.get(4)?,
                     analyzed_at: row.get(5)?,
                     content_hash: row.get(6)?,
+                    domains: super::parse_labels_json(&row.get::<_, String>(7)?),
                 })
             });
 
@@ -87,7 +91,7 @@ impl Database {
     pub fn get_all_pr_analyses(&self) -> Result<std::collections::HashMap<u64, PrAnalysisRow>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT pr_number, summary, risk_level, pr_type, review_notes, analyzed_at, content_hash
+                "SELECT pr_number, summary, risk_level, pr_type, review_notes, analyzed_at, content_hash, domains
                  FROM pr_analyses",
             )?;
             let rows = stmt
@@ -100,6 +104,7 @@ impl Database {
                         review_notes: row.get(4)?,
                         analyzed_at: row.get(5)?,
                         content_hash: row.get(6)?,
+                        domains: super::parse_labels_json(&row.get::<_, String>(7)?),
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -229,16 +234,18 @@ impl Database {
     /// than reaching into a SQLite-specific `with_conn`.
     pub fn upsert_pr_analysis(&self, row: &PrAnalysisRow) -> Result<()> {
         self.with_conn(|conn| {
+            let domains_json = serde_json::to_string(&row.domains).unwrap_or_else(|_| "[]".into());
             conn.execute(
-                "INSERT INTO pr_analyses (pr_number, summary, risk_level, pr_type, review_notes, analyzed_at, content_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO pr_analyses (pr_number, summary, risk_level, pr_type, review_notes, analyzed_at, content_hash, domains)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(pr_number) DO UPDATE SET
                     summary = excluded.summary,
                     risk_level = excluded.risk_level,
                     pr_type = excluded.pr_type,
                     review_notes = excluded.review_notes,
                     analyzed_at = excluded.analyzed_at,
-                    content_hash = excluded.content_hash",
+                    content_hash = excluded.content_hash,
+                    domains = excluded.domains",
                 params![
                     row.pr_number,
                     row.summary,
@@ -247,6 +254,7 @@ impl Database {
                     row.review_notes,
                     row.analyzed_at,
                     row.content_hash,
+                    domains_json,
                 ],
             )?;
             Ok(())

@@ -37,6 +37,7 @@ fn row_to_triage_result(row: &rusqlite::Row) -> rusqlite::Result<TriageResultRow
         is_simple_fix: row.get(5)?,
         acted_at: row.get(6)?,
         content_hash: row.get(7)?,
+        domains: super::parse_labels_json(&row.get::<_, String>(8)?),
     })
 }
 
@@ -51,6 +52,9 @@ pub struct TriageResultRow {
     pub acted_at: String,
     #[serde(default)]
     pub content_hash: Option<String>,
+    /// "Grand domains" the AI review tagged this issue with (codex, bun, …).
+    #[serde(default)]
+    pub domains: Vec<String>,
 }
 
 impl Database {
@@ -71,11 +75,12 @@ impl Database {
         self.with_conn(|conn| {
             let suggested_labels = serde_json::to_string(&result.suggested_labels)?;
             let relevant_files = serde_json::to_string(&result.relevant_files)?;
+            let domains = serde_json::to_string(&result.domains)?;
             let now = chrono::Utc::now().to_rfc3339();
 
             conn.execute(
-                "INSERT INTO triage_results (issue_number, category, confidence, priority, summary, suggested_labels, is_duplicate_of, is_simple_fix, relevant_files, acted_at, content_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                "INSERT INTO triage_results (issue_number, category, confidence, priority, summary, suggested_labels, is_duplicate_of, is_simple_fix, relevant_files, acted_at, content_hash, domains)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(issue_number) DO UPDATE SET
                     category = excluded.category,
                     confidence = excluded.confidence,
@@ -86,7 +91,8 @@ impl Database {
                     is_simple_fix = excluded.is_simple_fix,
                     relevant_files = excluded.relevant_files,
                     acted_at = excluded.acted_at,
-                    content_hash = excluded.content_hash",
+                    content_hash = excluded.content_hash,
+                    domains = excluded.domains",
                 params![
                     issue_number,
                     result.category,
@@ -99,6 +105,7 @@ impl Database {
                     relevant_files,
                     now,
                     content_hash,
+                    domains,
                 ],
             )?;
             Ok(())
@@ -108,7 +115,7 @@ impl Database {
     pub fn get_triage_result(&self, issue_number: u64) -> Result<Option<TriageResultRow>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT issue_number, category, confidence, priority, summary, is_simple_fix, acted_at, content_hash
+                "SELECT issue_number, category, confidence, priority, summary, is_simple_fix, acted_at, content_hash, domains
                  FROM triage_results WHERE issue_number = ?1",
             )?;
 
@@ -129,7 +136,7 @@ impl Database {
             let cutoff_str = cutoff.to_rfc3339();
 
             let mut stmt = conn.prepare(
-                "SELECT t.issue_number, t.category, t.confidence, t.priority, t.summary, t.is_simple_fix, t.acted_at, t.content_hash
+                "SELECT t.issue_number, t.category, t.confidence, t.priority, t.summary, t.is_simple_fix, t.acted_at, t.content_hash, t.domains
                  FROM triage_results t
                  JOIN issues i ON t.issue_number = i.number
                  WHERE i.state = 'open' AND t.acted_at < ?1
@@ -154,7 +161,7 @@ impl Database {
     ) -> Result<std::collections::HashMap<u64, TriageResultRow>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT issue_number, category, confidence, priority, summary, is_simple_fix, acted_at, content_hash
+                "SELECT issue_number, category, confidence, priority, summary, is_simple_fix, acted_at, content_hash, domains
                  FROM triage_results",
             )?;
             let rows = stmt
@@ -211,7 +218,7 @@ impl Database {
     pub fn recent_activity(&self, limit: usize) -> Result<Vec<TriageResultRow>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT t.issue_number, t.category, t.confidence, t.priority, t.summary, t.is_simple_fix, t.acted_at, t.content_hash
+                "SELECT t.issue_number, t.category, t.confidence, t.priority, t.summary, t.is_simple_fix, t.acted_at, t.content_hash, t.domains
                  FROM triage_results t
                  ORDER BY t.acted_at DESC
                  LIMIT ?1",

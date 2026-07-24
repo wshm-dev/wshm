@@ -1231,6 +1231,7 @@ async fn api_issues(
                     "priority": triage.as_ref().and_then(|t| t.priority.as_deref()),
                     "confidence": triage.as_ref().map(|t| t.confidence),
                     "category": triage.as_ref().map(|t| t.category.as_str()),
+                    "domains": triage.as_ref().map(|t| &t.domains),
                     "score": score,
                     "score_breakdown": score_breakdown,
                     "pr_status": pr_status,
@@ -1312,6 +1313,7 @@ async fn api_pulls(
                     "risk_level": analysis.map(|a| a.risk_level.as_str()),
                     "pr_type": analysis.map(|a| a.pr_type.as_str()),
                     "summary": analysis.map(|a| a.summary.as_str()),
+                    "domains": analysis.map(|a| &a.domains),
                     "url": crate::git_provider::web_url_for_pr(&ds.config, pr.number),
                 }));
             }
@@ -2309,6 +2311,120 @@ async fn api_repo_features_patch(
         obj.insert("apply".to_string(), json!(ds.apply()));
     }
     Json(resp).into_response()
+}
+
+/// GET /api/v1/repos/{slug}/domains -- read the review "grand domains" list +
+/// optional custom prompt. DB-backed (app_settings) so it survives on stateless
+/// pods and is shared across replicas — unlike the ConfigMap-seeded global.toml.
+async fn api_repo_domains_get(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> Response {
+    let repos = state.multi.repos.read().await;
+    match repos.get(&slug) {
+        Some(ds) => {
+            let domains: serde_json::Value = ds
+                .db
+                .get_app_setting(crate::db::settings::REVIEW_DOMAINS_KEY)
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_else(|| json!([]));
+            let prompt = ds
+                .db
+                .get_app_setting(crate::db::settings::REVIEW_PROMPT_KEY)
+                .ok()
+                .flatten();
+            Json(json!({ "domains": domains, "review_prompt": prompt })).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("repo '{slug}' not configured")})),
+        )
+            .into_response(),
+    }
+}
+
+/// PATCH /api/v1/repos/{slug}/domains -- set the review domains + prompt. Body:
+/// `{ "domains": [{ "name", "description" }], "review_prompt": "..." }` (either
+/// field optional). Persists to the DB (app_settings), effective on the next
+/// review pass across every pod.
+async fn api_repo_domains_patch(
+    State(state): State<Arc<WebState>>,
+    user: axum::Extension<Option<crate::auth::User>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if state.users.is_some() {
+        if let Err(e) = require_admin(&user) {
+            return e;
+        }
+    }
+
+    let repos = state.multi.repos.read().await;
+    let ds = match repos.get(&slug) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("repo '{slug}' not configured")})),
+            )
+                .into_response();
+        }
+    };
+    drop(repos);
+
+    if let Some(d) = body.get("domains") {
+        match serde_json::from_value::<Vec<crate::config::DomainDef>>(d.clone()) {
+            Ok(parsed) => {
+                let json_str = serde_json::to_string(&parsed).unwrap_or_else(|_| "[]".into());
+                if let Err(e) = ds
+                    .db
+                    .set_app_setting(crate::db::settings::REVIEW_DOMAINS_KEY, &json_str)
+                {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": e.to_string()})),
+                    )
+                        .into_response();
+                }
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid domains: {e}")})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    if let Some(p) = body.get("review_prompt") {
+        let val = p.as_str().unwrap_or("");
+        if let Err(e) = ds
+            .db
+            .set_app_setting(crate::db::settings::REVIEW_PROMPT_KEY, val)
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    }
+
+    let domains: serde_json::Value = ds
+        .db
+        .get_app_setting(crate::db::settings::REVIEW_DOMAINS_KEY)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!([]));
+    let prompt = ds
+        .db
+        .get_app_setting(crate::db::settings::REVIEW_PROMPT_KEY)
+        .ok()
+        .flatten();
+    Json(json!({ "domains": domains, "review_prompt": prompt })).into_response()
 }
 
 /// GET /api/v1/config/retry -- read the live HTTP retry policy.
@@ -3339,6 +3455,10 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         .route(
             "/api/v1/repos/{slug}/features",
             get(api_repo_features_get).patch(api_repo_features_patch),
+        )
+        .route(
+            "/api/v1/repos/{slug}/domains",
+            get(api_repo_domains_get).patch(api_repo_domains_patch),
         )
         .route("/api/v1/auth/status", get(api_auth_status))
         .route(

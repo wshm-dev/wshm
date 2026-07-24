@@ -639,6 +639,48 @@ impl Config {
     }
 }
 
+/// Build the AI-prompt fragment listing the configured "grand domains".
+///
+/// Source is the DB (K/V setting) — NOT the TOML config — because wshm-pro runs
+/// as stateless pods (see the `app_settings` table). The pipeline fetches the
+/// domain list + optional custom prompt from the DB and passes them here.
+/// Returns empty when no domains are configured (the review omits the step).
+pub fn domains_prompt(domains: &[DomainDef], custom: Option<&str>) -> String {
+    if domains.is_empty() {
+        return String::new();
+    }
+    if let Some(custom) = custom {
+        if !custom.trim().is_empty() {
+            return format!("\n{custom}\n");
+        }
+    }
+    let mut out = String::from(
+        "\n## Grand domains (tag the PR/issue with EVERY domain it touches, use ONLY these):\n",
+    );
+    for d in domains {
+        out.push_str(&format!("- **{}**", d.name));
+        if let Some(ref desc) = d.description {
+            out.push_str(&format!(": {desc}"));
+        }
+        out.push('\n');
+    }
+    out.push_str("\nReturn the matching domains in the `domains` array. Do NOT invent domains outside this list.\n");
+    out
+}
+
+/// A "grand domain" — a broad area of the codebase/product (e.g. codex, bun,
+/// c#). Multi-valued per PR/issue, assigned by the AI review, and surfaced as
+/// filters in the PR network graph. Mirrors [`LabelDef`] minus the color/when.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DomainDef {
+    /// Domain name (e.g. "codex", "bun", "c#").
+    pub name: String,
+
+    /// What this domain covers — helps the AI decide when it applies.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 // ── Assign config ─────────────────────────────────────────────
 
 #[derive(Debug, Default, Deserialize, Serialize)]

@@ -342,6 +342,7 @@ mod tests {
             is_duplicate_of: None,
             is_simple_fix: false,
             relevant_files: vec![],
+            domains: vec![],
         }
     }
 

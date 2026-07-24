@@ -18,8 +18,13 @@ Response format (JSON only, no markdown):
     "breaking_change": true/false,
     "docs_updated": true/false
   },
-  "suggested_labels": ["label1", "label2"]
+  "suggested_labels": ["label1", "label2"],
+  "domains": ["domain1", "domain2"]
 }
+
+The "domains" array tags the PR with the grand domains it touches. Use ONLY the
+domains listed in the Grand domains section below (if that section is absent, return
+an empty array). A PR may belong to several domains.
 
 Detect linked issues from patterns like "fixes #X", "closes #X", "resolves #X" in the PR body.
 

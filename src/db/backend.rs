@@ -125,6 +125,19 @@ pub trait DatabaseBackend: Send + Sync {
         Ok(0)
     }
 
+    /// Read a runtime K/V setting (DB-backed so it survives on stateless pods
+    /// and is shared across replicas). Default: unset. Real backends override.
+    fn get_app_setting(&self, key: &str) -> Result<Option<String>> {
+        let _ = key;
+        Ok(None)
+    }
+
+    /// Upsert a runtime K/V setting. Default no-op; real backends override.
+    fn set_app_setting(&self, key: &str, value: &str) -> Result<()> {
+        let _ = (key, value);
+        Ok(())
+    }
+
     // ── Admin / maintenance ─────────────────────────────────────
 
     /// Wipe every triage result and PR analysis. Used by the `revert` flow
@@ -389,6 +402,14 @@ impl DatabaseBackend for super::Database {
 
     fn set_pull_reactions(&self, reactions: &std::collections::HashMap<u64, u32>) -> Result<u64> {
         self.set_pull_reactions(reactions)
+    }
+
+    fn get_app_setting(&self, key: &str) -> Result<Option<String>> {
+        self.get_app_setting(key)
+    }
+
+    fn set_app_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.set_app_setting(key, value)
     }
 
     fn clear_triage_and_analyses(&self) -> Result<()> {

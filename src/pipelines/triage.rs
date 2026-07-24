@@ -344,6 +344,7 @@ async fn triage_issue(
                 is_duplicate_of: None,
                 is_simple_fix: existing.is_simple_fix,
                 relevant_files: Vec::new(),
+                domains: existing.domains,
             });
         }
     }
@@ -364,6 +365,23 @@ async fn triage_issue(
     let labels_prompt = config.labels_prompt();
     if !labels_prompt.is_empty() {
         user_prompt.push_str(&labels_prompt);
+    }
+
+    // Inject the configured "grand domains" so the AI can tag the issue.
+    // Source is the DB (stateless pods — see db::settings), not TOML config.
+    let review_domains: Vec<crate::config::DomainDef> = db
+        .get_app_setting(crate::db::settings::REVIEW_DOMAINS_KEY)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let review_prompt = db
+        .get_app_setting(crate::db::settings::REVIEW_PROMPT_KEY)
+        .ok()
+        .flatten();
+    let domains_prompt = crate::config::domains_prompt(&review_domains, review_prompt.as_deref());
+    if !domains_prompt.is_empty() {
+        user_prompt.push_str(&domains_prompt);
     }
 
     if !icm_context.is_empty() {

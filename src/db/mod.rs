@@ -5,6 +5,7 @@ pub mod licenses;
 pub mod pulls;
 pub mod schema;
 pub mod search;
+pub mod settings;
 pub mod sync;
 pub mod triage;
 pub mod usage;

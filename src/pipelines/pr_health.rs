@@ -719,6 +719,7 @@ mod tests {
             is_simple_fix: false,
             acted_at: chrono::Utc::now().to_rfc3339(),
             content_hash: None,
+            domains: vec![],
         }
     }
 
