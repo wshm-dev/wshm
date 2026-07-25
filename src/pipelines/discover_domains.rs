@@ -36,7 +36,14 @@ fn load_domains(db: &dyn DatabaseBackend) -> Vec<DomainDef> {
 /// words of length >= 4 that don't end in "ss" (keeps "class"/"css"). Leaves
 /// non-plural tech tokens ("codex", "grep", "c#") untouched.
 pub(crate) fn singular(w: &str) -> String {
-    if w.len() >= 4 && w.ends_with('s') && !w.ends_with("ss") {
+    // Strip a plural "s", but keep words that merely END in "s" without being
+    // plurals: "ss" (class), "us" (status, bonus), "is" (analysis, axis).
+    if w.len() >= 4
+        && w.ends_with('s')
+        && !w.ends_with("ss")
+        && !w.ends_with("us")
+        && !w.ends_with("is")
+    {
         w[..w.len() - 1].to_string()
     } else {
         w.to_string()
@@ -347,8 +354,21 @@ pub async fn ensure_discovered(config: &Config, db: &dyn DatabaseBackend) {
 
 #[cfg(test)]
 mod tests {
-    use super::top_terms;
+    use super::{singular, top_terms};
     use std::collections::HashSet;
+
+    #[test]
+    fn singular_strips_plurals_but_keeps_ss_us_is() {
+        assert_eq!(singular("commands"), "command");
+        assert_eq!(singular("hooks"), "hook");
+        assert_eq!(singular("filters"), "filter");
+        assert_eq!(singular("windows"), "window");
+        // not plurals — must be left intact
+        assert_eq!(singular("status"), "status");
+        assert_eq!(singular("analysis"), "analysis");
+        assert_eq!(singular("process"), "process");
+        assert_eq!(singular("class"), "class");
+    }
 
     #[test]
     fn ranks_domain_terms_and_drops_noise() {
