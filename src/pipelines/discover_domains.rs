@@ -1,21 +1,17 @@
-//! Domain discovery: infer a repo's "grand domains" from cheap signals so the
-//! user doesn't have to guess them. Merges the result into the DB-backed
-//! `review_domains` set as PROPOSED (validated = false) — a human validates
-//! them in Settings before they become `domain:*` GitHub labels.
+//! Domain discovery: infer a repo's "grand domains" from what its PRs and
+//! issues are actually about. Ranks the whole title corpus by subject frequency
+//! and merges the top subjects into the DB-backed `review_domains` set as
+//! PROPOSED (validated = false) — a human validates them in Settings before
+//! they become `domain:*` GitHub labels.
 //!
-//! Signals: repo languages + top-level structure + root manifests (GitHub API)
-//! and recent PR / issue titles (already synced in the DB). No clone needed —
-//! works on stateless pods.
+//! Titles only (already synced in the DB): deterministic, instant, no AI call,
+//! no clone — works on stateless pods.
 
 use anyhow::Result;
 
-use crate::ai::backend::AiBackend;
-use crate::ai::prompts::discover_domains;
-use crate::ai::schemas::DomainDiscovery;
 use crate::config::{Config, DomainDef};
 use crate::db::backend::DatabaseBackend;
 use crate::db::settings::REVIEW_DOMAINS_KEY;
-use crate::github::Client as GhClient;
 
 /// Marker so auto-discovery runs at most once per repo (the button forces a
 /// fresh run regardless). Stored alongside the domains in `app_settings`.
@@ -176,7 +172,12 @@ fn title_words(title: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// The whole title corpus (open + recent closed PRs + open issues) as titles.
+/// Effective "all PRs" cap for the corpus — high enough to cover every closed
+/// PR in practice (title-only, so even tens of thousands is cheap) while still
+/// bounding memory on pathological repos.
+const CORPUS_CLOSED_CAP: usize = 100_000;
+
+/// The whole title corpus (open + ALL closed PRs + open issues) as titles.
 fn corpus_titles(db: &dyn DatabaseBackend) -> Vec<String> {
     let mut titles: Vec<String> = db
         .get_open_pulls()
@@ -185,7 +186,7 @@ fn corpus_titles(db: &dyn DatabaseBackend) -> Vec<String> {
         .map(|p| p.title.clone())
         .collect();
     titles.extend(
-        db.get_closed_pulls(500)
+        db.get_closed_pulls(CORPUS_CLOSED_CAP)
             .unwrap_or_default()
             .iter()
             .map(|p| p.title.clone()),
@@ -229,70 +230,35 @@ pub fn domain_counts(
     out
 }
 
-/// Run discovery and merge newly-found domains (as proposed) into the DB set.
-/// Existing domains keep their `validated` flag. Returns the full merged set.
-pub async fn discover(
-    config: &Config,
-    db: &dyn DatabaseBackend,
-    gh: &GhClient,
-    ai: &AiBackend,
-) -> Result<Vec<DomainDef>> {
-    let languages = gh.fetch_languages().await.unwrap_or_default();
-    let entries = gh.fetch_root_entries().await.unwrap_or_default();
+/// How many domains discovery proposes: the top subjects by PR/issue volume.
+const MAX_DISCOVERED: usize = 12;
 
-    // Corpus for frequency + sampling: open PRs plus recent closed PRs, and open
-    // issues (closed issues aren't retained in the DB). Titles only — cheap,
-    // already synced, so this works on stateless pods with no clone.
-    let mut pr_titles: Vec<String> = db
-        .get_open_pulls()
-        .unwrap_or_default()
-        .iter()
-        .map(|p| p.title.clone())
-        .collect();
-    pr_titles.extend(
-        db.get_closed_pulls(500)
-            .unwrap_or_default()
-            .iter()
-            .map(|p| p.title.clone()),
-    );
-    let issue_titles: Vec<String> = db
-        .get_open_issues()
-        .unwrap_or_default()
-        .iter()
-        .map(|i| i.title.clone())
-        .collect();
+/// Discover a repo's grand domains from the *frequency of subjects across ALL
+/// its PRs and issues* — the terms the most pull requests are actually about
+/// (git, codex, windows…). Deterministic and instant: no AI call, no clone, no
+/// network — it ranks the whole title corpus, takes the top subjects, and
+/// merges them into the DB set as PROPOSED.
+///
+/// Being AI-free is deliberate: the old AI pass took ~40s and timed out behind
+/// the auth proxy (browser saw an HTML 504, not JSON). Human-validated domains
+/// are preserved; only proposals are regenerated, so re-running never piles up
+/// duplicates. Returns the full merged set.
+pub async fn discover(config: &Config, db: &dyn DatabaseBackend) -> Result<Vec<DomainDef>> {
+    // Whole corpus: open + ALL closed PRs + open issues (titles only).
+    let titles = corpus_titles(db);
+    let ranked = top_terms(&titles, &[], MAX_DISCOVERED);
 
-    // Rank the terms that actually recur across the whole corpus so the model
-    // grounds domains in what the repo is *most about*, not a lucky 40-title
-    // sample. Generic dev-process words are filtered out (see `top_terms`).
-    let top_terms = top_terms(&pr_titles, &issue_titles, 30);
-
-    let user = discover_domains::build_user_prompt(
-        &languages,
-        &entries,
-        &pr_titles,
-        &issue_titles,
-        &top_terms,
-    );
-    let out: DomainDiscovery = ai.complete(discover_domains::SYSTEM, &user).await?;
-
-    // Keep the human-validated domains, but REPLACE all proposed (unvalidated)
-    // ones with this fresh run. Merging instead piles up near-duplicates every
-    // time discover is clicked (hooks + hook-rewriting, search + command-filters…),
-    // which is exactly the mess this avoids.
+    // Keep human-validated domains; REPLACE the proposed set with this fresh run
+    // so re-discovering dedupes instead of accumulating near-duplicates.
     let mut existing: Vec<DomainDef> = load_domains(db)
         .into_iter()
         .filter(|d| d.validated)
         .collect();
-    for d in out.domains {
-        let name = d.name.trim().to_lowercase();
-        if name.is_empty() {
-            continue;
-        }
-        if !existing.iter().any(|e| e.name.eq_ignore_ascii_case(&name)) {
+    for (term, _count) in ranked {
+        if !existing.iter().any(|e| e.name.eq_ignore_ascii_case(&term)) {
             existing.push(DomainDef {
-                name,
-                description: d.description,
+                name: term,
+                description: None,
                 validated: false,
             });
         }
@@ -302,9 +268,10 @@ pub async fn discover(
     }
     let _ = db.set_app_setting(DOMAINS_DISCOVERED_KEY, "1");
     tracing::info!(
-        "Domain discovery for {}: {} domains total",
+        "Domain discovery for {}: {} domains total (from {} PR/issue titles)",
         config.repo_slug(),
-        existing.len()
+        existing.len(),
+        titles.len()
     );
     Ok(existing)
 }
@@ -312,12 +279,7 @@ pub async fn discover(
 /// Run discovery only once per repo (auto path): if no domains are configured
 /// AND discovery hasn't been attempted yet. Best-effort — logs and swallows
 /// errors so it never blocks the review batch.
-pub async fn ensure_discovered(
-    config: &Config,
-    db: &dyn DatabaseBackend,
-    gh: &GhClient,
-    ai: &AiBackend,
-) {
+pub async fn ensure_discovered(config: &Config, db: &dyn DatabaseBackend) {
     let has_domains = !load_domains(db).is_empty();
     let attempted = db
         .get_app_setting(DOMAINS_DISCOVERED_KEY)
@@ -327,7 +289,7 @@ pub async fn ensure_discovered(
     if has_domains || attempted {
         return;
     }
-    if let Err(e) = discover(config, db, gh, ai).await {
+    if let Err(e) = discover(config, db).await {
         tracing::warn!("Auto domain discovery failed: {e}");
         // Mark attempted so we don't retry every batch on a persistent failure.
         let _ = db.set_app_setting(DOMAINS_DISCOVERED_KEY, "1");

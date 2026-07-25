@@ -33,7 +33,7 @@ pub async fn run(
 
     // Infer the repo's grand domains once if none are configured yet, so the
     // user never has to guess them. Best-effort — never blocks analysis.
-    crate::pipelines::discover_domains::ensure_discovered(config, db, gh, &ai).await;
+    crate::pipelines::discover_domains::ensure_discovered(config, db).await;
 
     let pulls = if let Some(number) = args.pr {
         match db.get_pull(number)? {

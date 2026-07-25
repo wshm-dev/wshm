@@ -2462,8 +2462,9 @@ async fn api_repo_domains_patch(
 }
 
 /// POST /api/v1/repos/{slug}/domains/discover -- infer the repo's grand domains
-/// (from languages / structure / recent PR & issue titles) and merge them into
-/// the DB set as PROPOSED. Returns the full merged domain list.
+/// from the frequency of subjects across ALL its PR & issue titles and merge
+/// the top ones into the DB set as PROPOSED. Deterministic and instant (no AI),
+/// so it never times out behind the auth proxy. Returns the full merged list.
 async fn api_repo_domains_discover(
     State(state): State<Arc<WebState>>,
     user: axum::Extension<Option<crate::auth::User>>,
@@ -2488,19 +2489,7 @@ async fn api_repo_domains_discover(
     };
     drop(repos);
 
-    let model = ds.config.model_for("pr");
-    let ai = match crate::ai::backend::AiBackend::from_config(&ds.config, model) {
-        Ok(a) => a,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("AI backend: {e}")})),
-            )
-                .into_response();
-        }
-    };
-    let gh = ds.gh();
-    match crate::pipelines::discover_domains::discover(&ds.config, ds.db.as_ref(), &gh, &ai).await {
+    match crate::pipelines::discover_domains::discover(&ds.config, ds.db.as_ref()).await {
         Ok(domains) => {
             let enriched = domains_with_counts(
                 ds.db.as_ref(),
