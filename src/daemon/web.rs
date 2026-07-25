@@ -2313,6 +2313,38 @@ async fn api_repo_features_patch(
     Json(resp).into_response()
 }
 
+/// Enrich the stored domains with their live PR/issue volume and sort by it
+/// descending, so the biggest subject-groupings (e.g. "codex" → 25) surface
+/// first. Each entry gains a `count` field. Counts are computed live from the
+/// title corpus, never persisted, so they stay fresh as PRs come and go.
+fn domains_with_counts(
+    db: &dyn crate::db::backend::DatabaseBackend,
+    raw: serde_json::Value,
+) -> serde_json::Value {
+    let domains: Vec<crate::config::DomainDef> = serde_json::from_value(raw).unwrap_or_default();
+    let counts = crate::pipelines::discover_domains::domain_counts(db, &domains);
+    let mut arr: Vec<(usize, serde_json::Value)> = domains
+        .iter()
+        .map(|d| {
+            let c = counts.get(&d.name).copied().unwrap_or(0);
+            (
+                c,
+                json!({
+                    "name": d.name,
+                    "description": d.description,
+                    "validated": d.validated,
+                    "count": c,
+                }),
+            )
+        })
+        .collect();
+    arr.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1["name"].as_str().cmp(&b.1["name"].as_str()))
+    });
+    json!(arr.into_iter().map(|(_, v)| v).collect::<Vec<_>>())
+}
+
 /// GET /api/v1/repos/{slug}/domains -- read the review "grand domains" list +
 /// optional custom prompt. DB-backed (app_settings) so it survives on stateless
 /// pods and is shared across replicas — unlike the ConfigMap-seeded global.toml.
@@ -2323,13 +2355,14 @@ async fn api_repo_domains_get(
     let repos = state.multi.repos.read().await;
     match repos.get(&slug) {
         Some(ds) => {
-            let domains: serde_json::Value = ds
+            let raw: serde_json::Value = ds
                 .db
                 .get_app_setting(crate::db::settings::REVIEW_DOMAINS_KEY)
                 .ok()
                 .flatten()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_else(|| json!([]));
+            let domains = domains_with_counts(ds.db.as_ref(), raw);
             let prompt = ds
                 .db
                 .get_app_setting(crate::db::settings::REVIEW_PROMPT_KEY)
@@ -2412,13 +2445,14 @@ async fn api_repo_domains_patch(
         }
     }
 
-    let domains: serde_json::Value = ds
+    let raw: serde_json::Value = ds
         .db
         .get_app_setting(crate::db::settings::REVIEW_DOMAINS_KEY)
         .ok()
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| json!([]));
+    let domains = domains_with_counts(ds.db.as_ref(), raw);
     let prompt = ds
         .db
         .get_app_setting(crate::db::settings::REVIEW_PROMPT_KEY)
@@ -2467,7 +2501,13 @@ async fn api_repo_domains_discover(
     };
     let gh = ds.gh();
     match crate::pipelines::discover_domains::discover(&ds.config, ds.db.as_ref(), &gh, &ai).await {
-        Ok(domains) => Json(json!({ "domains": domains })).into_response(),
+        Ok(domains) => {
+            let enriched = domains_with_counts(
+                ds.db.as_ref(),
+                serde_json::to_value(&domains).unwrap_or_else(|_| json!([])),
+            );
+            Json(json!({ "domains": enriched })).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("discovery failed: {e}")})),

@@ -743,6 +743,13 @@
 										title="validated → applied as a GitHub label"
 									/>
 									<Input class="h-8 w-1/3" placeholder="name" bind:value={d.name} />
+									<Badge
+										variant="secondary"
+										class="shrink-0 tabular-nums"
+										title="pull requests + issues grouped under this domain"
+									>
+										{d.count ?? 0} PR
+									</Badge>
 									<Input
 										class="h-8 flex-1"
 										placeholder="description (helps the AI decide)"

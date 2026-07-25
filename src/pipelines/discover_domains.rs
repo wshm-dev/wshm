@@ -165,6 +165,70 @@ fn top_terms(pr_titles: &[String], issue_titles: &[String], n: usize) -> Vec<(St
     ranked
 }
 
+/// Split a title into lowercased word tokens (keeping `#`/`+` so "c#"/"c++"
+/// survive). Shared by the ranker and the domain counter so both see terms the
+/// same way.
+fn title_words(title: &str) -> std::collections::HashSet<String> {
+    title
+        .split(|c: char| !c.is_alphanumeric() && c != '#' && c != '+')
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() >= 2)
+        .collect()
+}
+
+/// The whole title corpus (open + recent closed PRs + open issues) as titles.
+fn corpus_titles(db: &dyn DatabaseBackend) -> Vec<String> {
+    let mut titles: Vec<String> = db
+        .get_open_pulls()
+        .unwrap_or_default()
+        .iter()
+        .map(|p| p.title.clone())
+        .collect();
+    titles.extend(
+        db.get_closed_pulls(500)
+            .unwrap_or_default()
+            .iter()
+            .map(|p| p.title.clone()),
+    );
+    titles.extend(
+        db.get_open_issues()
+            .unwrap_or_default()
+            .iter()
+            .map(|i| i.title.clone()),
+    );
+    titles
+}
+
+/// How many PRs/issues each domain groups: the count of corpus titles that
+/// mention it — matching the domain's slug OR any of its hyphen/underscore
+/// parts as a whole word (so "web-ui" matches titles with "web" or "ui").
+/// This is the "25 PRs on codex" volume shown next to each domain; computed
+/// live (never persisted) so it stays fresh as PRs come and go.
+pub fn domain_counts(
+    db: &dyn DatabaseBackend,
+    domains: &[DomainDef],
+) -> std::collections::HashMap<String, usize> {
+    let title_sets: Vec<std::collections::HashSet<String>> =
+        corpus_titles(db).iter().map(|t| title_words(t)).collect();
+    let mut out = std::collections::HashMap::new();
+    for d in domains {
+        let name = d.name.to_lowercase();
+        // The slug itself plus its parts (drop 1-char fragments).
+        let mut toks: Vec<String> = name
+            .split(['-', '_', ' '])
+            .filter(|s| s.len() >= 2)
+            .map(|s| s.to_string())
+            .collect();
+        toks.push(name.clone());
+        let count = title_sets
+            .iter()
+            .filter(|set| toks.iter().any(|tk| set.contains(tk)))
+            .count();
+        out.insert(d.name.clone(), count);
+    }
+    out
+}
+
 /// Run discovery and merge newly-found domains (as proposed) into the DB set.
 /// Existing domains keep their `validated` flag. Returns the full merged set.
 pub async fn discover(

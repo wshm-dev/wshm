@@ -533,6 +533,8 @@ export interface ReviewDomain {
 	description?: string | null;
 	/** Human-approved. Only validated domains are applied as `domain:*` labels. */
 	validated?: boolean;
+	/** How many PRs/issues this domain groups (live title-corpus match, server-computed). */
+	count?: number;
 }
 /** Per-repo review-domains config, stored in the DB (works on stateless pods). */
 export interface RepoDomains {
