@@ -31,7 +31,24 @@ fn load_domains(db: &dyn DatabaseBackend) -> Vec<DomainDef> {
 /// `#`/`+` (so "c#", "c++" survive) but anything containing a digit or a `#`
 /// prefix (issue refs, versions) is dropped. Returns the top `n` terms seen at
 /// least twice, most frequent first.
-fn top_terms(pr_titles: &[String], issue_titles: &[String], n: usize) -> Vec<(String, usize)> {
+/// Naive singularization so "commands"/"command", "hooks"/"hook",
+/// "filters"/"filter" collapse into one domain. Strips a single trailing "s" on
+/// words of length >= 4 that don't end in "ss" (keeps "class"/"css"). Leaves
+/// non-plural tech tokens ("codex", "grep", "c#") untouched.
+fn singular(w: &str) -> String {
+    if w.len() >= 4 && w.ends_with('s') && !w.ends_with("ss") {
+        w[..w.len() - 1].to_string()
+    } else {
+        w.to_string()
+    }
+}
+
+fn top_terms(
+    pr_titles: &[String],
+    issue_titles: &[String],
+    extra_stop: &std::collections::HashSet<String>,
+    n: usize,
+) -> Vec<(String, usize)> {
     use std::collections::{HashMap, HashSet};
     const STOP: &[&str] = &[
         // articles / glue
@@ -149,10 +166,16 @@ fn top_terms(pr_titles: &[String], issue_titles: &[String], n: usize) -> Vec<(St
                 || w.starts_with('#')
                 || w.chars().any(|c| c.is_ascii_digit())
                 || stop.contains(w.as_str())
+                || extra_stop.contains(&w)
             {
                 continue;
             }
-            *counts.entry(w).or_default() += 1;
+            // Count under the singular form so plural/singular variants merge.
+            let key = singular(&w);
+            if extra_stop.contains(&key) {
+                continue;
+            }
+            *counts.entry(key).or_default() += 1;
         }
     }
     let mut ranked: Vec<(String, usize)> = counts.into_iter().filter(|(_, c)| *c >= 2).collect();
@@ -169,6 +192,7 @@ fn title_words(title: &str) -> std::collections::HashSet<String> {
         .split(|c: char| !c.is_alphanumeric() && c != '#' && c != '+')
         .map(|w| w.to_lowercase())
         .filter(|w| w.len() >= 2)
+        .map(|w| singular(&w))
         .collect()
 }
 
@@ -214,13 +238,14 @@ pub fn domain_counts(
     let mut out = std::collections::HashMap::new();
     for d in domains {
         let name = d.name.to_lowercase();
-        // The slug itself plus its parts (drop 1-char fragments).
+        // The slug itself plus its parts (drop 1-char fragments), singularized to
+        // match the singularized title tokens.
         let mut toks: Vec<String> = name
             .split(['-', '_', ' '])
             .filter(|s| s.len() >= 2)
-            .map(|s| s.to_string())
+            .map(singular)
             .collect();
-        toks.push(name.clone());
+        toks.push(singular(&name));
         let count = title_sets
             .iter()
             .filter(|set| toks.iter().any(|tk| set.contains(tk)))
@@ -246,7 +271,17 @@ const MAX_DISCOVERED: usize = 12;
 pub async fn discover(config: &Config, db: &dyn DatabaseBackend) -> Result<Vec<DomainDef>> {
     // Whole corpus: open + ALL closed PRs + open issues (titles only).
     let titles = corpus_titles(db);
-    let ranked = top_terms(&titles, &[], MAX_DISCOVERED);
+
+    // The repo's own name (and owner) appear in ~every title — self-referential
+    // noise, not a domain. Drop them dynamically from the ranking.
+    let mut extra_stop: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for part in config.repo_slug().to_lowercase().split('/') {
+        if part.len() >= 2 {
+            extra_stop.insert(part.to_string());
+            extra_stop.insert(singular(part));
+        }
+    }
+    let ranked = top_terms(&titles, &[], &extra_stop, MAX_DISCOVERED);
 
     // Keep human-validated domains; REPLACE the proposed set with this fresh run
     // so re-discovering dedupes instead of accumulating near-duplicates.
@@ -299,6 +334,7 @@ pub async fn ensure_discovered(config: &Config, db: &dyn DatabaseBackend) {
 #[cfg(test)]
 mod tests {
     use super::top_terms;
+    use std::collections::HashSet;
 
     #[test]
     fn ranks_domain_terms_and_drops_noise() {
@@ -315,7 +351,7 @@ mod tests {
             "codex times out".to_string(),
             "billing invoice wrong total".to_string(),
         ];
-        let terms = top_terms(&prs, &issues, 10);
+        let terms = top_terms(&prs, &issues, &HashSet::new(), 10);
         let map: std::collections::HashMap<_, _> = terms.iter().cloned().collect();
 
         // Recurrent domain words are counted…
@@ -336,7 +372,27 @@ mod tests {
     fn keeps_hashy_tech_tokens() {
         // "c#" recurs -> survives tokenization (digit-free, no '#' prefix).
         let prs = vec!["C# refactor".to_string(), "port to c# core".to_string()];
-        let terms = top_terms(&prs, &[], 10);
+        let terms = top_terms(&prs, &[], &HashSet::new(), 10);
         assert!(terms.iter().any(|(t, c)| t == "c#" && *c == 2));
+    }
+
+    #[test]
+    fn merges_plurals_and_honours_extra_stop() {
+        // "command"/"commands" collapse; the repo name "rtk" is excluded.
+        let prs = vec![
+            "add command parser".to_string(),
+            "fix commands list".to_string(),
+            "more commands here".to_string(),
+            "rtk init flow".to_string(),
+            "rtk config load".to_string(),
+        ];
+        let mut extra = HashSet::new();
+        extra.insert("rtk".to_string());
+        let terms = top_terms(&prs, &[], &extra, 10);
+        let map: std::collections::HashMap<_, _> = terms.iter().cloned().collect();
+
+        assert_eq!(map.get("command"), Some(&3)); // command + commands×2 merged
+        assert!(!map.contains_key("commands"));
+        assert!(!map.contains_key("rtk")); // excluded via extra_stop
     }
 }
