@@ -11,7 +11,7 @@ use anyhow::Result;
 
 use crate::config::{Config, DomainDef};
 use crate::db::backend::DatabaseBackend;
-use crate::db::settings::REVIEW_DOMAINS_KEY;
+use crate::db::settings::{REVIEW_DOMAINS_KEY, REVIEW_DOMAINS_LIMIT_KEY};
 
 /// Marker so auto-discovery runs at most once per repo (the button forces a
 /// fresh run regardless). Stored alongside the domains in `app_settings`.
@@ -255,8 +255,22 @@ pub fn domain_counts(
     out
 }
 
-/// How many domains discovery proposes: the top subjects by PR/issue volume.
-const MAX_DISCOVERED: usize = 12;
+/// Default number of domains discovery proposes when the repo has no override.
+pub const DEFAULT_DOMAINS_LIMIT: usize = 12;
+/// Slider bounds for the configurable "Top N" discovery limit.
+pub const MIN_DOMAINS_LIMIT: usize = 5;
+pub const MAX_DOMAINS_LIMIT: usize = 30;
+
+/// The repo's configured "Top N" discovery limit, clamped to the slider range,
+/// falling back to the default when unset or unparsable.
+pub fn resolve_limit(db: &dyn DatabaseBackend) -> usize {
+    db.get_app_setting(REVIEW_DOMAINS_LIMIT_KEY)
+        .ok()
+        .flatten()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_DOMAINS_LIMIT)
+        .clamp(MIN_DOMAINS_LIMIT, MAX_DOMAINS_LIMIT)
+}
 
 /// Discover a repo's grand domains from the *frequency of subjects across ALL
 /// its PRs and issues* — the terms the most pull requests are actually about
@@ -281,7 +295,7 @@ pub async fn discover(config: &Config, db: &dyn DatabaseBackend) -> Result<Vec<D
             extra_stop.insert(singular(part));
         }
     }
-    let ranked = top_terms(&titles, &[], &extra_stop, MAX_DISCOVERED);
+    let ranked = top_terms(&titles, &[], &extra_stop, resolve_limit(db));
 
     // Keep human-validated domains; REPLACE the proposed set with this fresh run
     // so re-discovering dedupes instead of accumulating near-duplicates.

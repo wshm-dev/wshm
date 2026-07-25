@@ -2368,7 +2368,9 @@ async fn api_repo_domains_get(
                 .get_app_setting(crate::db::settings::REVIEW_PROMPT_KEY)
                 .ok()
                 .flatten();
-            Json(json!({ "domains": domains, "review_prompt": prompt })).into_response()
+            let limit = crate::pipelines::discover_domains::resolve_limit(ds.db.as_ref());
+            Json(json!({ "domains": domains, "review_prompt": prompt, "limit": limit }))
+                .into_response()
         }
         None => (
             StatusCode::NOT_FOUND,
@@ -2444,6 +2446,17 @@ async fn api_repo_domains_patch(
                 .into_response();
         }
     }
+    // "Top N" discovery limit — clamped to the slider range before persisting.
+    if let Some(l) = body.get("limit").and_then(|v| v.as_u64()) {
+        let clamped = (l as usize).clamp(
+            crate::pipelines::discover_domains::MIN_DOMAINS_LIMIT,
+            crate::pipelines::discover_domains::MAX_DOMAINS_LIMIT,
+        );
+        let _ = ds.db.set_app_setting(
+            crate::db::settings::REVIEW_DOMAINS_LIMIT_KEY,
+            &clamped.to_string(),
+        );
+    }
 
     let raw: serde_json::Value = ds
         .db
@@ -2458,7 +2471,8 @@ async fn api_repo_domains_patch(
         .get_app_setting(crate::db::settings::REVIEW_PROMPT_KEY)
         .ok()
         .flatten();
-    Json(json!({ "domains": domains, "review_prompt": prompt })).into_response()
+    let limit = crate::pipelines::discover_domains::resolve_limit(ds.db.as_ref());
+    Json(json!({ "domains": domains, "review_prompt": prompt, "limit": limit })).into_response()
 }
 
 /// POST /api/v1/repos/{slug}/domains/discover -- infer the repo's grand domains
@@ -2469,6 +2483,7 @@ async fn api_repo_domains_discover(
     State(state): State<Arc<WebState>>,
     user: axum::Extension<Option<crate::auth::User>>,
     axum::extract::Path(slug): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     if state.users.is_some() {
         if let Err(e) = require_admin(&user) {
@@ -2489,13 +2504,27 @@ async fn api_repo_domains_discover(
     };
     drop(repos);
 
+    // Optional `?limit=N` slider value — persist it (clamped) so this and future
+    // discovers use it.
+    if let Some(n) = params.get("limit").and_then(|s| s.parse::<usize>().ok()) {
+        let clamped = n.clamp(
+            crate::pipelines::discover_domains::MIN_DOMAINS_LIMIT,
+            crate::pipelines::discover_domains::MAX_DOMAINS_LIMIT,
+        );
+        let _ = ds.db.set_app_setting(
+            crate::db::settings::REVIEW_DOMAINS_LIMIT_KEY,
+            &clamped.to_string(),
+        );
+    }
+
     match crate::pipelines::discover_domains::discover(&ds.config, ds.db.as_ref()).await {
         Ok(domains) => {
             let enriched = domains_with_counts(
                 ds.db.as_ref(),
                 serde_json::to_value(&domains).unwrap_or_else(|_| json!([])),
             );
-            Json(json!({ "domains": enriched })).into_response()
+            let limit = crate::pipelines::discover_domains::resolve_limit(ds.db.as_ref());
+            Json(json!({ "domains": enriched, "limit": limit })).into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -269,6 +269,7 @@
 	let domainsRepo: string = $state('');
 	let domainsDraft: ReviewDomain[] = $state([]);
 	let reviewPromptDraft: string = $state('');
+	let domainsLimit: number = $state(12);
 	let domainsLoading: boolean = $state(false);
 	let domainsSaving: boolean = $state(false);
 	let domainsMessage: string | null = $state(null);
@@ -285,6 +286,7 @@
 			const d = await fetchRepoDomains(slug);
 			domainsDraft = d.domains ?? [];
 			reviewPromptDraft = d.review_prompt ?? '';
+			domainsLimit = d.limit ?? 12;
 		} catch (e) {
 			domainsMessage = e instanceof Error ? e.message : 'Failed to load domains';
 			domainsMessageErr = true;
@@ -298,7 +300,8 @@
 		try {
 			await updateRepoDomains(domainsRepo, {
 				domains: domainsDraft.filter((d) => d.name.trim() !== ''),
-				review_prompt: reviewPromptDraft
+				review_prompt: reviewPromptDraft,
+				limit: domainsLimit
 			});
 			domainsMessage = 'Saved.';
 			domainsMessageErr = false;
@@ -338,9 +341,10 @@
 		domainsDiscovering = true;
 		domainsMessage = null;
 		try {
-			const d = await discoverRepoDomains(domainsRepo);
+			const d = await discoverRepoDomains(domainsRepo, domainsLimit);
 			domainsDraft = d.domains ?? [];
 			reviewPromptDraft = d.review_prompt ?? reviewPromptDraft;
+			domainsLimit = d.limit ?? domainsLimit;
 		} catch (e) {
 			domainsMessage = e instanceof Error ? e.message : 'discovery failed';
 			domainsMessageErr = true;
@@ -714,6 +718,24 @@
 						{#if domainsLoading}
 							<p class="text-xs text-muted-foreground">{$t('common.loading')}</p>
 						{:else}
+								<!-- "Top N" slider: how many top subjects discover proposes. -->
+								<div class="flex items-center gap-3 rounded-md border bg-muted/30 px-3 py-2">
+									<Label class="text-xs whitespace-nowrap">Top domains</Label>
+									<input
+										type="range"
+										min="5"
+										max="30"
+										step="1"
+										class="flex-1 accent-primary"
+										bind:value={domainsLimit}
+									/>
+									<Badge variant="secondary" class="tabular-nums shrink-0">{domainsLimit}</Badge>
+								</div>
+								<p class="text-[0.7rem] text-muted-foreground -mt-1">
+									How many top subjects <strong>discover</strong> proposes (by PR/issue volume). Applied on the
+									next discover; saved with the domains.
+								</p>
+
 							<div class="flex items-center justify-between">
 								<h5 class="text-xs uppercase text-muted-foreground font-semibold">Domains</h5>
 								<div class="flex items-center gap-2">

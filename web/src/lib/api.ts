@@ -540,6 +540,8 @@ export interface ReviewDomain {
 export interface RepoDomains {
 	domains: ReviewDomain[];
 	review_prompt: string | null;
+	/** How many top subjects `discover` proposes (the "Top N" slider). */
+	limit?: number;
 }
 
 export async function fetchRepoDomains(slug: string): Promise<RepoDomains> {
@@ -553,7 +555,7 @@ export async function fetchRepoDomains(slug: string): Promise<RepoDomains> {
 
 export async function updateRepoDomains(
 	slug: string,
-	patch: { domains?: ReviewDomain[]; review_prompt?: string }
+	patch: { domains?: ReviewDomain[]; review_prompt?: string; limit?: number }
 ): Promise<RepoDomains> {
 	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/domains`, {
 		method: 'PATCH',
@@ -567,9 +569,13 @@ export async function updateRepoDomains(
 	return res.json();
 }
 
-/** Infer the repo's grand domains (AI) and merge them in as proposed. */
-export async function discoverRepoDomains(slug: string): Promise<RepoDomains> {
-	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/domains/discover`, {
+/**
+ * Regenerate the repo's grand domains from PR/issue subject frequency and merge
+ * them in as proposed. `limit` overrides (and persists) the "Top N" slider.
+ */
+export async function discoverRepoDomains(slug: string, limit?: number): Promise<RepoDomains> {
+	const qs = limit != null ? `?limit=${encodeURIComponent(limit)}` : '';
+	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/domains/discover${qs}`, {
 		method: 'POST',
 		headers: CSRF_HEADERS
 	});

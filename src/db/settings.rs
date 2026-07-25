@@ -19,6 +19,8 @@ use crate::db::Database;
 pub const REVIEW_DOMAINS_KEY: &str = "review_domains";
 /// Setting key: an optional custom review prompt fragment (plain string).
 pub const REVIEW_PROMPT_KEY: &str = "review_prompt";
+/// Setting key: how many top subjects `discover` proposes (stringified usize).
+pub const REVIEW_DOMAINS_LIMIT_KEY: &str = "review_domains_limit";
 
 impl Database {
     /// Read a setting value, or `None` if unset.
