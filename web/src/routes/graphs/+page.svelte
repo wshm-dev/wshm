@@ -1,17 +1,47 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { selectedRepo } from '$lib/stores';
-	import { fetchPulls, fetchIssues, type PullRequest, type Issue } from '$lib/api';
+	import { fetchIssues, type Issue } from '$lib/api';
 	import * as Tabs from '$lib/components/ui/tabs';
 	import * as Dialog from '$lib/components/ui/dialog';
-	import PrDetail from '$lib/components/PrDetail.svelte';
 	import IssueDetail from '$lib/components/IssueDetail.svelte';
 	import LabelGraphPanel from '$lib/components/LabelGraphPanel.svelte';
+	import PrGroupGraph from '$lib/components/PrGroupGraph.svelte';
+	import { fetchPrGroups, type PrGroup, type PrSubGroup } from '$lib/api';
 
-	let prs = $state<PullRequest[]>([]);
 	let issues = $state<Issue[]>([]);
-	let prLoading = $state(true);
 	let issueLoading = $state(true);
+
+	// Server-side PR subject hierarchy (grand groupes → sous-groupes) over the
+	// WHOLE DB — powers the PR network graph. Independent of the client PR sample.
+	let prGroups = $state<PrGroup[]>([]);
+	let groupsLoading = $state(true);
+	let groupsCount = $state(12);
+	let groupsError = $state<string | null>(null);
+	let selectedSub = $state<{ group: PrGroup; sub: PrSubGroup; id: string } | null>(null);
+
+	let groupToken = 0;
+	async function loadGroups(slug: string | null) {
+		if (!slug) {
+			prGroups = [];
+			groupsLoading = false;
+			return;
+		}
+		const mine = ++groupToken;
+		groupsLoading = true;
+		groupsError = null;
+		try {
+			const r = await fetchPrGroups(slug, { groups: groupsCount });
+			if (mine !== groupToken) return;
+			prGroups = r.groups;
+			groupsCount = r.groups_limit;
+			selectedSub = null;
+		} catch (e) {
+			if (mine === groupToken) groupsError = e instanceof Error ? e.message : 'failed to load groups';
+		} finally {
+			if (mine === groupToken) groupsLoading = false;
+		}
+	}
 
 	// Aggregate history — daily snapshots. The trend endpoints are a Pro
 	// feature; in OSS they 404, so we swallow errors and show "no history".
@@ -22,26 +52,8 @@
 	let token = 0;
 	async function loadAll() {
 		const mine = ++token;
-		prLoading = true;
 		issueLoading = true;
-		// PRs
-		try {
-			const all: PullRequest[] = [];
-			let offset = 0;
-			for (;;) {
-				const page = await fetchPulls({ limit: 250, offset });
-				if (mine !== token) return;
-				all.push(...page.items);
-				if (all.length >= page.total || page.items.length === 0 || all.length >= 2000) break;
-				offset += page.items.length;
-			}
-			prs = all;
-		} catch {
-			/* ignore */
-		} finally {
-			if (mine === token) prLoading = false;
-		}
-		// Issues
+		// Issues (the issue-graph tab still groups a client sample by label)
 		try {
 			const all: Issue[] = [];
 			let offset = 0;
@@ -74,13 +86,13 @@
 	}
 
 	onMount(() => {
-		loadAll();
-		const unsub = selectedRepo.subscribe(() => loadAll());
+		const unsub = selectedRepo.subscribe((slug) => {
+			loadAll();
+			loadGroups(slug);
+		});
 		return unsub;
 	});
 
-	let prModal = $state(false);
-	let activePr = $state<PullRequest | null>(null);
 	let issueModal = $state(false);
 	let activeIssue = $state<Issue | null>(null);
 
@@ -119,15 +131,74 @@
 	</Tabs.List>
 
 	<Tabs.Content value="pr">
-		<LabelGraphPanel
-			items={prs}
-			loading={prLoading}
-			emptyLabel="pull requests"
-			onSelect={(p) => {
-				activePr = p as unknown as PullRequest;
-				prModal = true;
-			}}
-		/>
+		<div class="mb-3 flex flex-wrap items-center gap-3">
+			<span class="text-xs font-medium text-muted-foreground">Grands groupes</span>
+			<input
+				type="range"
+				min="5"
+				max="30"
+				step="1"
+				bind:value={groupsCount}
+				onchange={() => loadGroups($selectedRepo)}
+				class="w-44 accent-primary"
+			/>
+			<span class="tabular-nums text-xs">{groupsCount}</span>
+			{#if groupsLoading}
+				<span class="text-xs text-muted-foreground">chargement…</span>
+			{/if}
+			<span class="text-xs text-muted-foreground"
+				>· sujets des PRs sur toute la base — clique un sous-groupe pour ses PRs</span
+			>
+		</div>
+		{#if groupsError}
+			<p class="text-sm text-destructive">{groupsError}</p>
+		{:else if !groupsLoading && prGroups.length === 0}
+			<p class="py-10 text-center text-sm text-muted-foreground">
+				Aucun groupe — pas encore de pull requests synchronisées pour ce dépôt.
+			</p>
+		{:else}
+			<div class="grid gap-4 lg:grid-cols-[1fr_320px]">
+				<PrGroupGraph
+					groups={prGroups}
+					selectedId={selectedSub?.id ?? null}
+					onSelect={(p) => (selectedSub = p)}
+				/>
+				<div class="rounded-lg border bg-card p-3">
+					{#if selectedSub}
+						<div class="mb-2">
+							<div class="text-sm font-semibold">
+								{selectedSub.group.name} → {selectedSub.sub.name}
+							</div>
+							<div class="text-xs text-muted-foreground">
+								{selectedSub.sub.count} PR{selectedSub.sub.count > 1 ? 's' : ''} dans « {selectedSub
+									.group.name} »
+							</div>
+						</div>
+						<div class="max-h-[560px] space-y-0.5 overflow-y-auto">
+							{#each selectedSub.sub.prs as pr}
+								<a
+									href="/prs/{pr.number}"
+									class="block rounded px-2 py-1 text-xs hover:bg-muted"
+								>
+									<span class="mono text-muted-foreground">#{pr.number}</span>
+									{pr.title}
+								</a>
+							{/each}
+							{#if selectedSub.sub.count > selectedSub.sub.prs.length}
+								<p class="px-2 pt-1 text-[0.7rem] text-muted-foreground">
+									+ {selectedSub.sub.count - selectedSub.sub.prs.length} de plus…
+								</p>
+							{/if}
+						</div>
+					{:else}
+						<p class="text-xs text-muted-foreground">
+							Clique un <strong>sous-groupe</strong> (petite bulle) dans le graphe pour lister ses pull
+							requests ici.
+						</p>
+					{/if}
+				</div>
+			</div>
+		{/if}
 	</Tabs.Content>
 
 	<Tabs.Content value="issue">
@@ -171,23 +242,6 @@
 		</div>
 	</Tabs.Content>
 </Tabs.Root>
-
-<Dialog.Root bind:open={prModal}>
-	<Dialog.Content class="sm:max-w-[80vw] max-h-[85vh] overflow-y-auto">
-		<Dialog.Header>
-			<Dialog.Title class="flex w-full items-center gap-3 pr-2 text-base font-semibold">
-				<span class="mono text-muted-foreground text-sm font-normal">#{activePr?.number}</span>
-				<span class="truncate">{activePr?.title}</span>
-			</Dialog.Title>
-		</Dialog.Header>
-		{#if activePr}
-			<PrDetail pr={activePr} />
-			<div class="text-right pt-2">
-				<a href="/prs/{activePr.number}" class="text-xs text-primary hover:underline">Open full page →</a>
-			</div>
-		{/if}
-	</Dialog.Content>
-</Dialog.Root>
 
 <Dialog.Root bind:open={issueModal}>
 	<Dialog.Content class="sm:max-w-[80vw] max-h-[85vh] overflow-y-auto">

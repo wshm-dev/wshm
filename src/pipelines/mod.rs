@@ -2,6 +2,7 @@ pub mod backup;
 pub mod context;
 pub mod discover_domains;
 pub mod migrate;
+pub mod pr_groups;
 pub mod revert;
 
 /// Truncate a string to `max` chars, appending "…" if truncated.

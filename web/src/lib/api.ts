@@ -586,6 +586,50 @@ export async function discoverRepoDomains(slug: string, limit?: number): Promise
 	return res.json();
 }
 
+/** A pull request referenced by a subgroup in the PR network graph. */
+export interface PrGroupPr {
+	number: number;
+	title: string;
+}
+/** A secondary subject inside a grand groupe. */
+export interface PrSubGroup {
+	name: string;
+	count: number;
+	prs: PrGroupPr[];
+}
+/** A grand groupe (top-level subject) and its subgroups. */
+export interface PrGroup {
+	name: string;
+	count: number;
+	subgroups: PrSubGroup[];
+}
+export interface PrGroupsResponse {
+	groups: PrGroup[];
+	groups_limit: number;
+	subs_limit: number;
+}
+
+/**
+ * PR subject hierarchy for the network graph, computed server-side across ALL
+ * PRs in the DB. `groups` overrides the number of grand groupes, `subs` the
+ * subgroups per group.
+ */
+export async function fetchPrGroups(
+	slug: string,
+	opts: { groups?: number; subs?: number } = {}
+): Promise<PrGroupsResponse> {
+	const qs = new URLSearchParams();
+	if (opts.groups != null) qs.set('groups', String(opts.groups));
+	if (opts.subs != null) qs.set('subs', String(opts.subs));
+	const q = qs.toString();
+	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/pr-groups${q ? `?${q}` : ''}`);
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.error ?? `HTTP ${res.status}`);
+	}
+	return res.json();
+}
+
 /// HTTP retry policy, shared by every outbound call (poller, git
 /// providers, AI, self-update). Editable from Settings -> Reliability;
 /// changes apply live without a daemon restart.

@@ -2534,6 +2534,51 @@ async fn api_repo_domains_discover(
     }
 }
 
+/// GET /api/v1/repos/{slug}/pr-groups -- the PR subject hierarchy for the
+/// network graph: grand groupes (top subjects across ALL PRs) → sous-groupes
+/// (frequent secondary terms) → the PRs each groups. `?groups=N` overrides the
+/// number of grand groupes (defaults to the repo's Top-N discovery limit),
+/// `?subs=M` the subgroups per group (default 6). Deterministic and instant.
+async fn api_repo_pr_groups_get(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let repos = state.multi.repos.read().await;
+    let ds = match repos.get(&slug) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("repo '{slug}' not configured")})),
+            )
+                .into_response();
+        }
+    };
+    drop(repos);
+
+    let group_limit = params
+        .get("groups")
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|n| {
+            n.clamp(
+                crate::pipelines::discover_domains::MIN_DOMAINS_LIMIT,
+                crate::pipelines::discover_domains::MAX_DOMAINS_LIMIT,
+            )
+        })
+        .unwrap_or_else(|| crate::pipelines::discover_domains::resolve_limit(ds.db.as_ref()));
+    let sub_limit = params
+        .get("subs")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(6)
+        .clamp(1, 12);
+
+    let groups =
+        crate::pipelines::pr_groups::build(&ds.config, ds.db.as_ref(), group_limit, sub_limit);
+    Json(json!({ "groups": groups, "groups_limit": group_limit, "subs_limit": sub_limit }))
+        .into_response()
+}
+
 /// GET /api/v1/config/retry -- read the live HTTP retry policy.
 async fn api_retry_get() -> Response {
     Json(crate::retry::global()).into_response()
@@ -3570,6 +3615,10 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         .route(
             "/api/v1/repos/{slug}/domains/discover",
             post(api_repo_domains_discover),
+        )
+        .route(
+            "/api/v1/repos/{slug}/pr-groups",
+            get(api_repo_pr_groups_get),
         )
         .route("/api/v1/auth/status", get(api_auth_status))
         .route(

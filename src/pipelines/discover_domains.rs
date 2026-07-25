@@ -35,7 +35,7 @@ fn load_domains(db: &dyn DatabaseBackend) -> Vec<DomainDef> {
 /// "filters"/"filter" collapse into one domain. Strips a single trailing "s" on
 /// words of length >= 4 that don't end in "ss" (keeps "class"/"css"). Leaves
 /// non-plural tech tokens ("codex", "grep", "c#") untouched.
-fn singular(w: &str) -> String {
+pub(crate) fn singular(w: &str) -> String {
     if w.len() >= 4 && w.ends_with('s') && !w.ends_with("ss") {
         w[..w.len() - 1].to_string()
     } else {
@@ -43,7 +43,7 @@ fn singular(w: &str) -> String {
     }
 }
 
-fn top_terms(
+pub(crate) fn top_terms(
     pr_titles: &[String],
     issue_titles: &[String],
     extra_stop: &std::collections::HashSet<String>,
@@ -187,7 +187,7 @@ fn top_terms(
 /// Split a title into lowercased word tokens (keeping `#`/`+` so "c#"/"c++"
 /// survive). Shared by the ranker and the domain counter so both see terms the
 /// same way.
-fn title_words(title: &str) -> std::collections::HashSet<String> {
+pub(crate) fn title_words(title: &str) -> std::collections::HashSet<String> {
     title
         .split(|c: char| !c.is_alphanumeric() && c != '#' && c != '+')
         .map(|w| w.to_lowercase())
