@@ -212,7 +212,14 @@ pub async fn discover(
     );
     let out: DomainDiscovery = ai.complete(discover_domains::SYSTEM, &user).await?;
 
-    let mut existing = load_domains(db);
+    // Keep the human-validated domains, but REPLACE all proposed (unvalidated)
+    // ones with this fresh run. Merging instead piles up near-duplicates every
+    // time discover is clicked (hooks + hook-rewriting, search + command-filters…),
+    // which is exactly the mess this avoids.
+    let mut existing: Vec<DomainDef> = load_domains(db)
+        .into_iter()
+        .filter(|d| d.validated)
+        .collect();
     for d in out.domains {
         let name = d.name.trim().to_lowercase();
         if name.is_empty() {

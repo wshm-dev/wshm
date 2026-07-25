@@ -6,13 +6,16 @@ pub const SYSTEM: &str = r#"You infer the "grand domains" of a software reposito
 
 You are given, for THIS repo: its languages, top-level structure, key manifest files, a ranked list of the terms that recur most across ALL of its PR and issue titles, and a sample of recent titles.
 
-The ranked recurrent terms are your PRIMARY signal — they show what the project is actually most about. Cluster related terms into broad domains (merge synonyms and spelling variants), and ground every domain in the evidence. Do NOT emit one domain per word, and do NOT invent generic domains the signals do not support. Generic process words (fix, add, update, refactor, release…) are already filtered out; ignore any that slip through.
+The ranked recurrent terms are your PRIMARY signal — they show what the project is actually most about. A term that recurs a lot and names a concrete thing — a tool, integration, subsystem, or technology (e.g. "codex", "bun", "windows", "git") — should become its OWN domain, kept under its own name. Do not bury such a term inside a broad umbrella like "integrations" or "filters": if "codex" is frequent, emit a "codex" domain, not just an "agent-integrations" one.
 
-Propose 5 to 15 grand domains that best partition the work in THIS repo.
+Only merge terms that are genuinely the same thing — plurals, obvious spelling variants, or exact synonyms (e.g. "hook"/"hooks"). Never emit two domains that overlap or nest (no "hooks" AND "hook-rewriting", no "windows" AND "windows-support", no "search" AND "command-filters"): pick the single clearest name and drop the rest. Ground every domain in the evidence; do NOT invent generic domains the signals do not support. Generic process words (fix, add, update, refactor, release…) are already filtered out; ignore any that slip through.
+
+Propose 6 to 12 grand domains that best partition the work in THIS repo — no more. Fewer, sharper, non-overlapping domains are far better than many fuzzy ones.
 
 Rules:
 - Short lowercase slugs, no spaces (use hyphens): "codex", "bun", "web-ui", "c-sharp".
-- Broad areas, not fine-grained labels. Prefer product/subsystem/tech axes.
+- Prefer the recurrent term's own name as the slug when it names a real thing.
+- Each domain must be clearly distinct from every other — no overlap, no nesting.
 - Give each a one-line description.
 
 Respond with JSON only, no markdown:
