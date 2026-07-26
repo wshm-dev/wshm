@@ -631,6 +631,23 @@ export async function fetchPrGroups(
 	return res.json();
 }
 
+/** Same subject hierarchy as fetchPrGroups, but over ISSUE titles (open issues). */
+export async function fetchIssueGroups(
+	opts: { repo?: string | null; groups?: number; subs?: number } = {}
+): Promise<PrGroupsResponse> {
+	const qs = new URLSearchParams();
+	if (opts.repo) qs.set('repo', opts.repo);
+	if (opts.groups != null) qs.set('groups', String(opts.groups));
+	if (opts.subs != null) qs.set('subs', String(opts.subs));
+	const q = qs.toString();
+	const res = await fetch(`/api/v1/issue-groups${q ? `?${q}` : ''}`);
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.error ?? `HTTP ${res.status}`);
+	}
+	return res.json();
+}
+
 /// HTTP retry policy, shared by every outbound call (poller, git
 /// providers, AI, self-update). Editable from Settings -> Reliability;
 /// changes apply live without a daemon restart.

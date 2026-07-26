@@ -2602,6 +2602,66 @@ async fn api_pr_groups_get(
         .into_response()
 }
 
+/// GET /api/v1/issue-groups -- same subject hierarchy as pr-groups, but over
+/// ISSUE titles (open issues; closed issues are not retained in the DB). Same
+/// `?repo=`/`?groups=`/`?subs=` semantics. Reuses `pr_groups::build_from`.
+async fn api_issue_groups_get(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let repo_filter = params.get("repo").filter(|s| !s.is_empty());
+
+    let snapshot: Vec<(String, Arc<super::DaemonState>)> = {
+        let g = state.multi.repos.read().await;
+        g.iter()
+            .filter(|(slug, _)| repo_filter.map(|r| r == *slug).unwrap_or(true))
+            .map(|(s, d)| (s.clone(), Arc::clone(d)))
+            .collect()
+    };
+
+    let mut issues: Vec<(u64, String)> = Vec::new();
+    let mut name_stop: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut default_limit: Option<usize> = None;
+    for (slug, ds) in &snapshot {
+        for part in slug.to_lowercase().split('/') {
+            if part.len() >= 2 {
+                name_stop.insert(part.to_string());
+                name_stop.insert(crate::pipelines::discover_domains::singular(part));
+            }
+        }
+        if default_limit.is_none() {
+            default_limit = Some(crate::pipelines::discover_domains::resolve_limit(
+                ds.db.as_ref(),
+            ));
+        }
+        for i in ds.db.get_open_issues().unwrap_or_default() {
+            issues.push((i.number, i.title));
+        }
+    }
+
+    let group_limit = params
+        .get("groups")
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|n| {
+            n.clamp(
+                crate::pipelines::discover_domains::MIN_DOMAINS_LIMIT,
+                crate::pipelines::discover_domains::MAX_DOMAINS_LIMIT,
+            )
+        })
+        .or(default_limit)
+        .unwrap_or(crate::pipelines::discover_domains::DEFAULT_DOMAINS_LIMIT);
+    let sub_limit = params
+        .get("subs")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(6)
+        .clamp(1, 12);
+
+    let groups =
+        crate::pipelines::pr_groups::build_from(&issues, &name_stop, group_limit, sub_limit);
+    Json(json!({ "groups": groups, "groups_limit": group_limit, "subs_limit": sub_limit }))
+        .into_response()
+}
+
 /// GET /api/v1/config/retry -- read the live HTTP retry policy.
 async fn api_retry_get() -> Response {
     Json(crate::retry::global()).into_response()
@@ -3640,6 +3700,7 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
             post(api_repo_domains_discover),
         )
         .route("/api/v1/pr-groups", get(api_pr_groups_get))
+        .route("/api/v1/issue-groups", get(api_issue_groups_get))
         .route("/api/v1/auth/status", get(api_auth_status))
         .route(
             "/api/v1/auth/github",
