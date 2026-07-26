@@ -22,16 +22,13 @@
 
 	let groupToken = 0;
 	async function loadGroups(slug: string | null) {
-		if (!slug) {
-			prGroups = [];
-			groupsLoading = false;
-			return;
-		}
 		const mine = ++groupToken;
 		groupsLoading = true;
 		groupsError = null;
 		try {
-			const r = await fetchPrGroups(slug, { groups: groupsCount });
+			// No repo selected → the endpoint aggregates across all repos, so the
+			// graph still works "de base" (same convention as the other lists).
+			const r = await fetchPrGroups({ repo: slug ?? undefined, groups: groupsCount });
 			if (mine !== groupToken) return;
 			prGroups = r.groups;
 			groupsCount = r.groups_limit;

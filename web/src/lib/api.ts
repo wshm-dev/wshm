@@ -615,14 +615,14 @@ export interface PrGroupsResponse {
  * subgroups per group.
  */
 export async function fetchPrGroups(
-	slug: string,
-	opts: { groups?: number; subs?: number } = {}
+	opts: { repo?: string | null; groups?: number; subs?: number } = {}
 ): Promise<PrGroupsResponse> {
 	const qs = new URLSearchParams();
+	if (opts.repo) qs.set('repo', opts.repo);
 	if (opts.groups != null) qs.set('groups', String(opts.groups));
 	if (opts.subs != null) qs.set('subs', String(opts.subs));
 	const q = qs.toString();
-	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/pr-groups${q ? `?${q}` : ''}`);
+	const res = await fetch(`/api/v1/pr-groups${q ? `?${q}` : ''}`);
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));
 		throw new Error(body.error ?? `HTTP ${res.status}`);

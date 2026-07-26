@@ -2534,28 +2534,51 @@ async fn api_repo_domains_discover(
     }
 }
 
-/// GET /api/v1/repos/{slug}/pr-groups -- the PR subject hierarchy for the
-/// network graph: grand groupes (top subjects across ALL PRs) → sous-groupes
-/// (frequent secondary terms) → the PRs each groups. `?groups=N` overrides the
-/// number of grand groupes (defaults to the repo's Top-N discovery limit),
-/// `?subs=M` the subgroups per group (default 6). Deterministic and instant.
-async fn api_repo_pr_groups_get(
+/// GET /api/v1/pr-groups -- the PR subject hierarchy for the network graph:
+/// grand groupes (top subjects across PRs) → sous-groupes (frequent secondary
+/// terms) → the PRs each groups. Follows the list-endpoint convention: `?repo=`
+/// scopes to one repo, and when absent it aggregates PRs across ALL configured
+/// repos (so the graph works with no repo selected). `?groups=N` overrides the
+/// number of grand groupes (defaults to the Top-N discovery limit), `?subs=M`
+/// the subgroups per group (default 6). Deterministic and instant.
+async fn api_pr_groups_get(
     State(state): State<Arc<WebState>>,
-    axum::extract::Path(slug): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    let repos = state.multi.repos.read().await;
-    let ds = match repos.get(&slug) {
-        Some(d) => d.clone(),
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("repo '{slug}' not configured")})),
-            )
-                .into_response();
-        }
+    let repo_filter = params.get("repo").filter(|s| !s.is_empty());
+
+    // Snapshot the matching repos, then gather (number, title) for their PRs and
+    // the owner/name tokens to exclude. One-repo when `?repo=` is set, else all.
+    let snapshot: Vec<(String, Arc<super::DaemonState>)> = {
+        let g = state.multi.repos.read().await;
+        g.iter()
+            .filter(|(slug, _)| repo_filter.map(|r| r == *slug).unwrap_or(true))
+            .map(|(s, d)| (s.clone(), Arc::clone(d)))
+            .collect()
     };
-    drop(repos);
+
+    let mut prs: Vec<(u64, String)> = Vec::new();
+    let mut name_stop: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut default_limit: Option<usize> = None;
+    for (slug, ds) in &snapshot {
+        for part in slug.to_lowercase().split('/') {
+            if part.len() >= 2 {
+                name_stop.insert(part.to_string());
+                name_stop.insert(crate::pipelines::discover_domains::singular(part));
+            }
+        }
+        if default_limit.is_none() {
+            default_limit = Some(crate::pipelines::discover_domains::resolve_limit(
+                ds.db.as_ref(),
+            ));
+        }
+        for p in ds.db.get_open_pulls().unwrap_or_default() {
+            prs.push((p.number, p.title));
+        }
+        for p in ds.db.get_closed_pulls(100_000).unwrap_or_default() {
+            prs.push((p.number, p.title));
+        }
+    }
 
     let group_limit = params
         .get("groups")
@@ -2566,15 +2589,15 @@ async fn api_repo_pr_groups_get(
                 crate::pipelines::discover_domains::MAX_DOMAINS_LIMIT,
             )
         })
-        .unwrap_or_else(|| crate::pipelines::discover_domains::resolve_limit(ds.db.as_ref()));
+        .or(default_limit)
+        .unwrap_or(crate::pipelines::discover_domains::DEFAULT_DOMAINS_LIMIT);
     let sub_limit = params
         .get("subs")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(6)
         .clamp(1, 12);
 
-    let groups =
-        crate::pipelines::pr_groups::build(&ds.config, ds.db.as_ref(), group_limit, sub_limit);
+    let groups = crate::pipelines::pr_groups::build_from(&prs, &name_stop, group_limit, sub_limit);
     Json(json!({ "groups": groups, "groups_limit": group_limit, "subs_limit": sub_limit }))
         .into_response()
 }
@@ -3616,10 +3639,7 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
             "/api/v1/repos/{slug}/domains/discover",
             post(api_repo_domains_discover),
         )
-        .route(
-            "/api/v1/repos/{slug}/pr-groups",
-            get(api_repo_pr_groups_get),
-        )
+        .route("/api/v1/pr-groups", get(api_pr_groups_get))
         .route("/api/v1/auth/status", get(api_auth_status))
         .route(
             "/api/v1/auth/github",
