@@ -356,7 +356,7 @@
 		<svg
 			bind:this={svgEl}
 			viewBox="0 0 {W} {H}"
-			class="h-[74vh] w-full touch-none select-none rounded-lg border bg-card"
+			class="h-[82vh] w-full touch-none select-none rounded-lg border bg-card"
 			role="application"
 			aria-label="PR groups network graph"
 			onwheel={onWheel}

@@ -91,7 +91,7 @@
 		<span class="text-xs text-muted-foreground">chargement…</span>
 	{/if}
 	<span class="text-xs text-muted-foreground">
-		· sujets des {noun}s sur toute la base — molette = zoom, glisser le fond = déplacer
+		· molette = zoom · glisser = déplacer
 	</span>
 </div>
 
@@ -102,18 +102,30 @@
 		Aucun groupe — pas encore de {noun}s synchronisées.
 	</p>
 {:else}
-	<div class="grid gap-4 lg:grid-cols-[1fr_300px]">
+	<!-- The side panel only appears once something is selected, so the graph
+	     gets the full width by default. Selecting a node splits to two columns. -->
+	<div class="grid gap-4 {selected ? 'lg:grid-cols-[1fr_300px]' : ''}">
 		<PrGroupGraph {groups} selectedId={selected?.id ?? null} onSelect={selectNode} {onInteract} />
-		<div class="rounded-lg border bg-card p-3">
-			{#if selected}
-				<div class="mb-2">
-					<div class="text-sm font-semibold">{selected.label}</div>
-					<div class="text-xs text-muted-foreground">
-						{selected.count}
-						{noun}{selected.count > 1 ? 's' : ''}
+		{#if selected}
+			<div class="rounded-lg border bg-card p-3">
+				<div class="mb-2 flex items-start justify-between gap-2">
+					<div>
+						<div class="text-sm font-semibold">{selected.label}</div>
+						<div class="text-xs text-muted-foreground">
+							{selected.count}
+							{noun}{selected.count > 1 ? 's' : ''}
+						</div>
 					</div>
+					<button
+						type="button"
+						class="shrink-0 text-muted-foreground hover:text-foreground"
+						aria-label="fermer"
+						onclick={() => (selected = null)}
+					>
+						✕
+					</button>
 				</div>
-				<div class="max-h-[600px] space-y-0.5 overflow-y-auto">
+				<div class="max-h-[70vh] space-y-0.5 overflow-y-auto">
 					{#each selected.prs as pr}
 						<a href="{linkBase}{pr.number}" class="block rounded px-2 py-1 text-xs hover:bg-muted">
 							<span class="mono text-muted-foreground">#{pr.number}</span>
@@ -126,12 +138,7 @@
 						</p>
 					{/if}
 				</div>
-			{:else}
-				<p class="text-xs text-muted-foreground">
-					Clique un <strong>groupe</strong> ou un <strong>sous-groupe</strong> pour lister ses {noun}s
-					ici.
-				</p>
-			{/if}
-		</div>
+			</div>
+		{/if}
 	</div>
 {/if}
