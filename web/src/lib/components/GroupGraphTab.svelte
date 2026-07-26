@@ -105,7 +105,13 @@
 	<!-- The side panel only appears once something is selected, so the graph
 	     gets the full width by default. Selecting a node splits to two columns. -->
 	<div class="grid gap-4 {selected ? 'lg:grid-cols-[1fr_300px]' : ''}">
-		<PrGroupGraph {groups} selectedId={selected?.id ?? null} onSelect={selectNode} {onInteract} />
+		<PrGroupGraph
+			{groups}
+			{noun}
+			selectedId={selected?.id ?? null}
+			onSelect={selectNode}
+			{onInteract}
+		/>
 		{#if selected}
 			<div class="rounded-lg border bg-card p-3">
 				<div class="mb-2 flex items-start justify-between gap-2">

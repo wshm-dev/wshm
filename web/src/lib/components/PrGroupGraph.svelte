@@ -19,14 +19,33 @@
 	let {
 		groups = [],
 		selectedId = null,
+		noun = 'PR',
 		onSelect,
 		onInteract
 	}: {
 		groups?: PrGroup[];
 		selectedId?: string | null;
+		/** Item label for the tooltip: "PR" or "issue". */
+		noun?: string;
 		onSelect?: (group: PrGroup, sub: PrSubGroup | null) => void;
 		onInteract?: () => void;
 	} = $props();
+
+	// Hover tooltip state (position is container-relative).
+	let hovered = $state<Node | null>(null);
+	let hoverX = $state(0);
+	let hoverY = $state(0);
+	let containerEl: HTMLDivElement | undefined = $state();
+
+	function onNodeHover(nd: Node, e: PointerEvent) {
+		if (dragNode || panning) return; // don't distract mid-drag
+		hovered = nd;
+		const rect = containerEl?.getBoundingClientRect();
+		if (rect) {
+			hoverX = e.clientX - rect.left;
+			hoverY = e.clientY - rect.top;
+		}
+	}
 
 	// World (viewBox) size — large so there is room to spread and zoom into.
 	const W = 1280;
@@ -323,7 +342,36 @@
 	}
 </script>
 
-<div class="relative">
+<div class="relative" bind:this={containerEl}>
+	<!-- hover tooltip -->
+	{#if hovered}
+		<div
+			class="pointer-events-none absolute z-20 max-w-[220px] rounded-md border bg-popover px-2.5 py-1.5 text-xs shadow-md"
+			style="left: {Math.min(hoverX + 14, (containerEl?.clientWidth ?? 9999) - 230)}px; top: {hoverY +
+				14}px;"
+		>
+			<div class="font-semibold">
+				{hovered.name} <span class="text-muted-foreground">· {hovered.count} {noun}{hovered.count > 1 ? 's' : ''}</span>
+			</div>
+			{#if hovered.kind === 'group'}
+				<div class="mt-0.5 text-[0.7rem] text-muted-foreground">
+					{hovered.group.subgroups.length} sous-groupe{hovered.group.subgroups.length > 1 ? 's' : ''}
+				</div>
+				<div class="mt-1 space-y-0.5">
+					{#each hovered.group.subgroups.slice(0, 6) as s}
+						<div class="flex justify-between gap-3">
+							<span>{s.name}</span><span class="tabular-nums text-muted-foreground">{s.count}</span>
+						</div>
+					{/each}
+					{#if hovered.group.subgroups.length > 6}
+						<div class="text-[0.65rem] text-muted-foreground">+ {hovered.group.subgroups.length - 6}…</div>
+					{/if}
+				</div>
+			{:else}
+				<div class="mt-0.5 text-[0.7rem] text-muted-foreground">dans « {hovered.group.name} »</div>
+			{/if}
+		</div>
+	{/if}
 	<!-- zoom controls -->
 	<div class="absolute right-2 top-2 z-10 flex flex-col gap-1">
 		<button
@@ -385,6 +433,9 @@
 						onpointerdown={(e) => onNodeDown(nd, e)}
 						onclick={() => onNodeClick(nd)}
 						onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && onNodeClick(nd)}
+						onpointerenter={(e) => onNodeHover(nd, e)}
+						onpointermove={(e) => onNodeHover(nd, e)}
+						onpointerleave={() => (hovered = null)}
 						role="button"
 						tabindex="-1"
 					>
