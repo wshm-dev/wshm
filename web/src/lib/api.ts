@@ -597,11 +597,12 @@ export interface PrSubGroup {
 	count: number;
 	prs: PrGroupPr[];
 }
-/** A grand groupe (top-level subject) and its subgroups. */
+/** A grand groupe (top-level subject), its subgroups, and a sample of its PRs. */
 export interface PrGroup {
 	name: string;
 	count: number;
 	subgroups: PrSubGroup[];
+	prs: PrGroupPr[];
 }
 export interface PrGroupsResponse {
 	groups: PrGroup[];

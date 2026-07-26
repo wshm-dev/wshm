@@ -1,14 +1,17 @@
 <script lang="ts">
 	/**
-	 * Group → subgroup network graph. Each grand groupe is a large hub node
-	 * (radius ∝ number of PRs); each sous-groupe is a medium satellite that hugs
-	 * its parent (radius ∝ its PR count), coloured by group. Clicking a subgroup
-	 * surfaces its PRs via `onSelect`. Data is computed server-side across the
-	 * whole DB, so this reflects every PR, not a client sample.
+	 * Group → subgroup network graph with pan / zoom.
 	 *
-	 * Dependency-free force sim: a STRONG spring pins each subgroup near its
-	 * parent, groups repel each other to spread out, and a collision pass keeps
-	 * bubbles from overlapping. Small node count → plain reactive SVG is ample.
+	 * Each grand groupe is a large hub node (radius ∝ number of PRs); each
+	 * sous-groupe is a medium satellite that hugs its parent, coloured by group.
+	 * Clicking a node fires `onSelect(group, sub|null)` — `sub` is null when a
+	 * grand groupe itself is clicked. The view supports wheel-zoom (toward the
+	 * cursor), background drag to pan, and node drag to reposition.
+	 *
+	 * Dependency-free force sim: a strong spring pins each subgroup near its
+	 * parent, groups repel only each other to spread out, and a collision pass
+	 * keeps bubbles from overlapping. Links reference the reactive $state nodes so
+	 * connectors track motion.
 	 */
 	import { onMount } from 'svelte';
 	import type { PrGroup, PrSubGroup } from '$lib/api';
@@ -16,15 +19,18 @@
 	let {
 		groups = [],
 		selectedId = null,
-		onSelect
+		onSelect,
+		onInteract
 	}: {
-		groups: PrGroup[];
+		groups?: PrGroup[];
 		selectedId?: string | null;
-		onSelect?: (group: PrGroup, sub: PrSubGroup) => void;
+		onSelect?: (group: PrGroup, sub: PrSubGroup | null) => void;
+		onInteract?: () => void;
 	} = $props();
 
-	const W = 960;
-	const H = 640;
+	// World (viewBox) size — large so there is room to spread and zoom into.
+	const W = 1280;
+	const H = 820;
 
 	type Node = {
 		id: string;
@@ -33,9 +39,9 @@
 		count: number;
 		r: number;
 		hue: number;
-		parent: string | null;
+		parent?: string;
 		group: PrGroup;
-		sub: PrSubGroup | null;
+		sub?: PrSubGroup;
 		x: number;
 		y: number;
 		vx: number;
@@ -45,10 +51,15 @@
 	};
 
 	let nodes = $state<Node[]>([]);
-	// Links are index pairs into `nodes`, resolved in the template so the lines
-	// track the reactive node positions as the sim moves them.
-	let links = $state<{ a: number; b: number }[]>([]);
+	let links = $state<{ a: Node; b: Node }[]>([]);
 	let raf = 0;
+
+	// View transform.
+	let zoom = $state(1);
+	let panX = $state(0);
+	let panY = $state(0);
+
+	let svgEl: SVGSVGElement | undefined = $state();
 
 	function hueFor(s: string): number {
 		let h = 0;
@@ -56,12 +67,9 @@
 		return h;
 	}
 
-	const groupR = (count: number) => 18 + Math.sqrt(count) * 1.7;
-	const subR = (count: number) => 8 + Math.sqrt(count) * 1.2;
-
 	// Rebuild whenever the incoming groups change.
 	let signature = $derived(
-		groups.map((g) => `${g.name}:${g.count}:${g.subgroups.map((s) => s.name).join(',')}`).join('|')
+		groups.map((g) => `${g.name}:${g.count}:${g.subgroups.length}`).join('|')
 	);
 	let builtFor = '';
 	$effect(() => {
@@ -73,29 +81,24 @@
 
 	function build() {
 		const ns: Node[] = [];
-		const idx = new Map<string, number>();
 		const cx = W / 2;
 		const cy = H / 2;
-		const gN = Math.max(1, groups.length);
-		const ringR = Math.min(W, H) * 0.32;
-
+		const ring = Math.min(W, H) * 0.34;
+		const n = Math.max(1, groups.length);
 		groups.forEach((g, gi) => {
 			const hue = hueFor(g.name);
-			const ang = (gi / gN) * Math.PI * 2 - Math.PI / 2;
-			const gx = cx + Math.cos(ang) * ringR;
-			const gy = cy + Math.sin(ang) * ringR;
+			const ang = (gi / n) * Math.PI * 2 - Math.PI / 2;
+			const gx = cx + Math.cos(ang) * ring;
+			const gy = cy + Math.sin(ang) * ring;
 			const gid = `g:${g.name}`;
-			idx.set(gid, ns.length);
 			ns.push({
 				id: gid,
 				kind: 'group',
 				name: g.name,
 				count: g.count,
-				r: groupR(g.count),
+				r: 20 + Math.sqrt(g.count) * 1.8,
 				hue,
-				parent: null,
 				group: g,
-				sub: null,
 				x: gx,
 				y: gy,
 				vx: 0,
@@ -105,21 +108,19 @@
 			});
 			const m = Math.max(1, g.subgroups.length);
 			g.subgroups.forEach((s, si) => {
-				const sa = ang + (si - (m - 1) / 2) * 0.7;
-				const gr = groupR(g.count);
-				idx.set(`${gid}/s:${s.name}`, ns.length);
+				const sa = ang + (si - (m - 1) / 2) * 0.6;
 				ns.push({
 					id: `${gid}/s:${s.name}`,
 					kind: 'sub',
 					name: s.name,
 					count: s.count,
-					r: subR(s.count),
+					r: 9 + Math.sqrt(s.count) * 1.3,
 					hue,
 					parent: gid,
 					group: g,
 					sub: s,
-					x: gx + Math.cos(sa) * (gr + 34),
-					y: gy + Math.sin(sa) * (gr + 34),
+					x: gx + Math.cos(sa) * 95,
+					y: gy + Math.sin(sa) * 95,
 					vx: 0,
 					vy: 0,
 					fx: null,
@@ -127,11 +128,16 @@
 				});
 			});
 		});
-
 		nodes = ns;
-		links = ns
-			.map((nd, i) => (nd.parent ? { a: idx.get(nd.parent)!, b: i } : null))
-			.filter((l): l is { a: number; b: number } => !!l && l.a != null);
+		const byId = new Map(nodes.map((nd) => [nd.id, nd]));
+		links = nodes
+			.filter((nd) => nd.parent)
+			.map((nd) => ({ a: byId.get(nd.parent!)!, b: nd }))
+			.filter((l) => l.a && l.b);
+		// Reset the view so a fresh graph is centred and fully visible.
+		zoom = 1;
+		panX = 0;
+		panY = 0;
 		startSim();
 	}
 
@@ -140,27 +146,23 @@
 		let alpha = 1;
 		const tick = () => {
 			const arr = nodes;
-
-			// 1) Strong spring: each subgroup is pulled to hug its parent group.
+			// Strong spring: each subgroup hugs its parent group.
 			for (const l of links) {
-				const a = arr[l.a];
-				const b = arr[l.b];
+				const a = l.a;
+				const b = l.b;
 				let dx = b.x - a.x;
 				let dy = b.y - a.y;
-				let d = Math.hypot(dx, dy) || 0.01;
-				const target = a.r + b.r + 14;
-				const f = ((d - target) / d) * 0.12 * alpha;
-				const fx = dx * f;
-				const fy = dy * f;
-				// Groups are heavy: nudge them little, move subgroups more.
-				a.vx += fx * 0.25;
-				a.vy += fy * 0.25;
-				b.vx -= fx * 1.0;
-				b.vy -= fy * 1.0;
+				let d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+				const target = a.r + b.r + 20;
+				const f = ((d - target) / d) * 0.09 * alpha;
+				const fxv = dx * f;
+				const fyv = dy * f;
+				a.vx += fxv;
+				a.vy += fyv;
+				b.vx -= fxv;
+				b.vy -= fyv;
 			}
-
-			// 2) Repulsion: groups spread from each other; siblings fan out. Kept
-			//    short-range and gentle so nothing is flung to the walls.
+			// Repulsion between GROUPS only (spread the hubs); collision for all.
 			for (let i = 0; i < arr.length; i++) {
 				const a = arr[i];
 				for (let j = i + 1; j < arr.length; j++) {
@@ -171,18 +173,14 @@
 					let d = Math.sqrt(d2);
 					const ux = dx / d;
 					const uy = dy / d;
-
-					// Long-range charge only between the big group hubs.
 					if (a.kind === 'group' && b.kind === 'group') {
-						const rep = ((a.r * b.r) / d2) * 40 * alpha;
+						const rep = ((a.r * b.r) / d2) * 160 * alpha;
 						a.vx += ux * rep;
 						a.vy += uy * rep;
 						b.vx -= ux * rep;
 						b.vy -= uy * rep;
 					}
-
-					// Collision: never let two bubbles overlap.
-					const min = a.r + b.r + 4;
+					const min = a.r + b.r + 6;
 					if (d < min) {
 						const push = (min - d) * 0.5;
 						a.x += ux * push;
@@ -192,28 +190,24 @@
 					}
 				}
 			}
-
-			// 3) Gentle centering + integrate.
+			// Gentle centring + integrate.
 			for (const nd of arr) {
-				if (nd.fx != null && nd.fy != null) {
+				if (nd.fx !== null) {
 					nd.x = nd.fx;
-					nd.y = nd.fy;
+					nd.y = nd.fy!;
 					nd.vx = 0;
 					nd.vy = 0;
 					continue;
 				}
-				if (nd.kind === 'group') {
-					nd.vx += (W / 2 - nd.x) * 0.004 * alpha;
-					nd.vy += (H / 2 - nd.y) * 0.004 * alpha;
-				}
-				nd.vx *= 0.8;
-				nd.vy *= 0.8;
+				nd.vx += (W / 2 - nd.x) * 0.0012 * alpha;
+				nd.vy += (H / 2 - nd.y) * 0.0012 * alpha;
+				nd.vx *= 0.82;
+				nd.vy *= 0.82;
 				nd.x += nd.vx;
 				nd.y += nd.vy;
 				nd.x = Math.max(nd.r, Math.min(W - nd.r, nd.x));
 				nd.y = Math.max(nd.r, Math.min(H - nd.r, nd.y));
 			}
-
 			alpha *= 0.99;
 			if (alpha > 0.015) raf = requestAnimationFrame(tick);
 		};
@@ -222,107 +216,200 @@
 
 	onMount(() => () => cancelAnimationFrame(raf));
 
-	// --- drag ---
-	let dragId: string | null = null;
-	let svgEl: SVGSVGElement | null = null;
+	// ---- coordinate helpers -------------------------------------------------
+	/** Pixels → viewBox units (approx; assumes width-driven scale). */
+	function unit(): number {
+		const rect = svgEl?.getBoundingClientRect();
+		return rect && rect.width ? W / rect.width : 1;
+	}
 
-	function toSvg(e: PointerEvent): { x: number; y: number } {
-		if (!svgEl) return { x: 0, y: 0 };
-		const rect = svgEl.getBoundingClientRect();
-		return {
-			x: ((e.clientX - rect.left) / rect.width) * W,
-			y: ((e.clientY - rect.top) / rect.height) * H
-		};
+	// ---- interactions -------------------------------------------------------
+	let dragNode: Node | null = null;
+	let panning = false;
+	let lastX = 0;
+	let lastY = 0;
+	let moved = false;
+
+	function onNodeDown(nd: Node, e: PointerEvent) {
+		e.stopPropagation();
+		dragNode = nd;
+		moved = false;
+		lastX = e.clientX;
+		lastY = e.clientY;
+		nd.fx = nd.x;
+		nd.fy = nd.y;
+		(e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+		onInteract?.();
 	}
-	function onDown(nd: Node, e: PointerEvent) {
-		dragId = nd.id;
-		const p = toSvg(e);
-		nd.fx = p.x;
-		nd.fy = p.y;
-		(e.target as Element).setPointerCapture?.(e.pointerId);
-		startSim();
+
+	function onBgDown(e: PointerEvent) {
+		panning = true;
+		moved = false;
+		lastX = e.clientX;
+		lastY = e.clientY;
+		onInteract?.();
 	}
+
 	function onMove(e: PointerEvent) {
-		if (!dragId) return;
-		const nd = nodes.find((n) => n.id === dragId);
-		if (!nd) return;
-		const p = toSvg(e);
-		nd.fx = p.x;
-		nd.fy = p.y;
-		nd.x = p.x;
-		nd.y = p.y;
-	}
-	function onUp() {
-		if (!dragId) return;
-		const nd = nodes.find((n) => n.id === dragId);
-		if (nd) {
-			nd.fx = null;
-			nd.fy = null;
+		if (dragNode) {
+			const k = unit() / zoom;
+			const nx = dragNode.x + (e.clientX - lastX) * k;
+			const ny = dragNode.y + (e.clientY - lastY) * k;
+			dragNode.x = nx;
+			dragNode.y = ny;
+			dragNode.fx = nx;
+			dragNode.fy = ny;
+			lastX = e.clientX;
+			lastY = e.clientY;
+			if (Math.abs(e.movementX) + Math.abs(e.movementY) > 2) moved = true;
+			startSim();
+		} else if (panning) {
+			const k = unit();
+			panX += (e.clientX - lastX) * k;
+			panY += (e.clientY - lastY) * k;
+			lastX = e.clientX;
+			lastY = e.clientY;
+			if (Math.abs(e.movementX) + Math.abs(e.movementY) > 2) moved = true;
 		}
-		dragId = null;
 	}
 
-	function pick(nd: Node) {
-		if (nd.kind === 'sub' && nd.sub) onSelect?.(nd.group, nd.sub);
+	function endDrag() {
+		if (dragNode) dragNode.fx = null;
+		if (dragNode) dragNode.fy = null;
+		dragNode = null;
+		panning = false;
+	}
+
+	function onNodeClick(nd: Node) {
+		if (moved) return; // it was a drag, not a click
+		onSelect?.(nd.group, nd.kind === 'sub' ? (nd.sub ?? null) : null);
+	}
+
+	function onWheel(e: WheelEvent) {
+		e.preventDefault();
+		const rect = svgEl?.getBoundingClientRect();
+		if (!rect) return;
+		// Cursor in viewBox coords.
+		const sx = ((e.clientX - rect.left) / rect.width) * W;
+		const sy = ((e.clientY - rect.top) / rect.height) * H;
+		const worldX = (sx - panX) / zoom;
+		const worldY = (sy - panY) / zoom;
+		const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+		const nz = Math.max(0.35, Math.min(5, zoom * factor));
+		panX = sx - worldX * nz;
+		panY = sy - worldY * nz;
+		zoom = nz;
+		onInteract?.();
+	}
+
+	function zoomBy(factor: number) {
+		const nz = Math.max(0.35, Math.min(5, zoom * factor));
+		// Zoom around the centre.
+		const worldX = (W / 2 - panX) / zoom;
+		const worldY = (H / 2 - panY) / zoom;
+		panX = W / 2 - worldX * nz;
+		panY = H / 2 - worldY * nz;
+		zoom = nz;
+		onInteract?.();
+	}
+	function resetView() {
+		zoom = 1;
+		panX = 0;
+		panY = 0;
+	}
+
+	function fill(nd: Node): string {
+		return nd.kind === 'group' ? `hsl(${nd.hue} 62% 52%)` : `hsl(${nd.hue} 52% 62%)`;
 	}
 </script>
 
-{#if nodes.length === 0}
-	<div
-		class="flex h-64 items-center justify-center rounded-lg border bg-card text-sm text-muted-foreground"
-	>
-		Aucun groupe à afficher.
+<div class="relative">
+	<!-- zoom controls -->
+	<div class="absolute right-2 top-2 z-10 flex flex-col gap-1">
+		<button
+			type="button"
+			class="h-7 w-7 rounded border bg-card text-sm shadow-sm hover:bg-muted"
+			onclick={() => zoomBy(1.25)}
+			aria-label="zoom in">+</button
+		>
+		<button
+			type="button"
+			class="h-7 w-7 rounded border bg-card text-sm shadow-sm hover:bg-muted"
+			onclick={() => zoomBy(1 / 1.25)}
+			aria-label="zoom out">−</button
+		>
+		<button
+			type="button"
+			class="h-7 w-7 rounded border bg-card text-[0.6rem] shadow-sm hover:bg-muted"
+			onclick={resetView}
+			aria-label="reset view">⟲</button
+		>
 	</div>
-{:else}
-	<svg
-		bind:this={svgEl}
-		viewBox="0 0 {W} {H}"
-		class="w-full touch-none select-none rounded-lg border bg-card"
-		onpointermove={onMove}
-		onpointerup={onUp}
-		onpointerleave={onUp}
-		role="presentation"
-	>
-		{#each links as l (l.a + '-' + l.b)}
-			<line
-				x1={nodes[l.a].x}
-				y1={nodes[l.a].y}
-				x2={nodes[l.b].x}
-				y2={nodes[l.b].y}
-				stroke="hsl({nodes[l.a].hue} 45% 55% / 0.4)"
-				stroke-width="1.5"
-			/>
-		{/each}
-		{#each nodes as nd (nd.id)}
-			<g
-				class="cursor-pointer"
-				onpointerdown={(e) => onDown(nd, e)}
-				onclick={() => pick(nd)}
-				onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && pick(nd)}
-				role="button"
-				tabindex="-1"
-			>
-				<circle
-					cx={nd.x}
-					cy={nd.y}
-					r={nd.r}
-					fill="hsl({nd.hue} {nd.kind === 'group' ? 60 : 52}% {nd.kind === 'group'
-						? 52
-						: 62}% / {nd.kind === 'group' ? 0.9 : 0.85})"
-					stroke={selectedId === nd.id ? 'white' : `hsl(${nd.hue} 55% 40%)`}
-					stroke-width={selectedId === nd.id ? 3 : nd.kind === 'group' ? 2 : 1}
-				/>
-				<text
-					x={nd.x}
-					y={nd.kind === 'group' ? nd.y - nd.r - 4 : nd.y + nd.r + 10}
-					text-anchor="middle"
-					class="pointer-events-none fill-foreground font-medium"
-					font-size={nd.kind === 'group' ? 13 : 10}
-				>
-					{nd.name}
-					<tspan class="fill-muted-foreground">· {nd.count}</tspan>
-				</text>
+
+	{#if nodes.length === 0}
+		<div
+			class="flex h-[70vh] items-center justify-center rounded-lg border bg-card text-sm text-muted-foreground"
+		>
+			No PRs to group yet.
+		</div>
+	{:else}
+		<svg
+			bind:this={svgEl}
+			viewBox="0 0 {W} {H}"
+			class="h-[74vh] w-full touch-none select-none rounded-lg border bg-card"
+			role="application"
+			aria-label="PR groups network graph"
+			onwheel={onWheel}
+			onpointerdown={onBgDown}
+			onpointermove={onMove}
+			onpointerup={endDrag}
+			onpointerleave={endDrag}
+		>
+			<!-- Transparent hit-area so background drag (pan) works over EMPTY space:
+			     an inline SVG doesn't dispatch pointer events where nothing is painted. -->
+			<rect x="0" y="0" width={W} height={H} fill="transparent" style="pointer-events: all" />
+			<g transform="translate({panX} {panY}) scale({zoom})">
+				{#each links as l (l.b.id)}
+					<line
+						x1={l.a.x}
+						y1={l.a.y}
+						x2={l.b.x}
+						y2={l.b.y}
+						stroke="hsl({l.a.hue} 45% 55% / 0.35)"
+						stroke-width="1.5"
+					/>
+				{/each}
+				{#each nodes as nd (nd.id)}
+					<g
+						class="cursor-pointer"
+						onpointerdown={(e) => onNodeDown(nd, e)}
+						onclick={() => onNodeClick(nd)}
+						onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && onNodeClick(nd)}
+						role="button"
+						tabindex="-1"
+					>
+						<circle
+							cx={nd.x}
+							cy={nd.y}
+							r={nd.r}
+							fill={fill(nd)}
+							stroke={selectedId === nd.id ? 'white' : `hsl(${nd.hue} 55% 35%)`}
+							stroke-width={selectedId === nd.id ? 3 : nd.kind === 'group' ? 2 : 1}
+							opacity={nd.kind === 'group' ? 0.92 : 0.85}
+						/>
+						<text
+							x={nd.x}
+							y={nd.kind === 'group' ? nd.y - nd.r - 4 : nd.y - nd.r - 3}
+							text-anchor="middle"
+							class="pointer-events-none fill-foreground font-medium"
+							font-size={nd.kind === 'group' ? 15 : 11}
+						>
+							{nd.name}
+							<tspan class="fill-muted-foreground">· {nd.count}</tspan>
+						</text>
+					</g>
+				{/each}
 			</g>
-		{/each}
-	</svg>
-{/if}
+		</svg>
+	{/if}
+</div>

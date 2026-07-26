@@ -3,6 +3,13 @@ import { writable } from 'svelte/store';
 /** Currently selected repo slug (e.g. "owner/name"), or null for "All repos". */
 export const selectedRepo = writable<string | null>(null);
 
+/**
+ * Bumped by content pages when the user starts an immersive interaction (e.g.
+ * manipulating the graph) to request the nav sidebar auto-collapse and free up
+ * horizontal space. The layout watches this counter and folds the sidebar.
+ */
+export const collapseSidebarSignal = writable<number>(0);
+
 export type Theme = 'dark' | 'light';
 
 function readInitialTheme(): Theme {

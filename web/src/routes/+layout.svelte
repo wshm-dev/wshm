@@ -2,7 +2,7 @@
 	import type { Snippet } from 'svelte';
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { selectedRepo, theme, type Theme } from '$lib/stores';
+	import { selectedRepo, theme, collapseSidebarSignal, type Theme } from '$lib/stores';
 	import {
 		fetchStatus,
 		fetchMe,
@@ -210,6 +210,16 @@
 		{ value: '', name: 'All repos' },
 		...repos.map((r) => ({ value: r.slug, name: r.slug }))
 	]);
+	// Auto-collapse the sidebar when a content page requests it (e.g. the graph
+	// on interaction). Only reacts to real bumps (>0), so it never fires on load.
+	let lastCollapseSignal = 0;
+	$effect(() => {
+		if ($collapseSidebarSignal > lastCollapseSignal) {
+			lastCollapseSignal = $collapseSidebarSignal;
+			sidebarOpen = false;
+		}
+	});
+
 	let selectedRepoValue: string = $state('');
 	selectedRepo.subscribe((v) => (selectedRepoValue = v ?? ''));
 	$effect(() => {

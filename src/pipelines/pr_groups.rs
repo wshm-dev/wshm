@@ -31,12 +31,14 @@ pub struct SubGroup {
     pub prs: Vec<PrRef>,
 }
 
-/// A grand groupe (top-level subject) and its subgroups.
+/// A grand groupe (top-level subject), its subgroups, and a sample of its own
+/// PRs (so clicking the group can list them, not just its subgroups).
 #[derive(Serialize)]
 pub struct Group {
     pub name: String,
     pub count: usize,
     pub subgroups: Vec<SubGroup>,
+    pub prs: Vec<PrRef>,
 }
 
 /// Build the group → subgroup → PRs hierarchy from a PR set.
@@ -95,10 +97,21 @@ pub fn build_from(
             });
         }
 
+        // The group's own PRs (capped), for the "click a group" list.
+        let group_prs: Vec<PrRef> = members
+            .iter()
+            .take(PR_CAP_PER_SUBGROUP)
+            .map(|(num, title, _)| PrRef {
+                number: *num,
+                title: title.clone(),
+            })
+            .collect();
+
         groups.push(Group {
             name: g,
             count: g_count,
             subgroups,
+            prs: group_prs,
         });
     }
     groups

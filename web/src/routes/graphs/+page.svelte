@@ -1,13 +1,18 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { selectedRepo } from '$lib/stores';
+	import { selectedRepo, collapseSidebarSignal } from '$lib/stores';
 	import { fetchIssues, type Issue } from '$lib/api';
 	import * as Tabs from '$lib/components/ui/tabs';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import IssueDetail from '$lib/components/IssueDetail.svelte';
 	import LabelGraphPanel from '$lib/components/LabelGraphPanel.svelte';
 	import PrGroupGraph from '$lib/components/PrGroupGraph.svelte';
-	import { fetchPrGroups, type PrGroup, type PrSubGroup } from '$lib/api';
+	import {
+		fetchPrGroups,
+		type PrGroup,
+		type PrSubGroup,
+		type PrGroupPr
+	} from '$lib/api';
 
 	let issues = $state<Issue[]>([]);
 	let issueLoading = $state(true);
@@ -18,7 +23,20 @@
 	let groupsLoading = $state(true);
 	let groupsCount = $state(12);
 	let groupsError = $state<string | null>(null);
-	let selectedSub = $state<{ group: PrGroup; sub: PrSubGroup; id: string } | null>(null);
+	// Unified selection: a grand groupe (sub null) or a sous-groupe.
+	let selected = $state<{ id: string; label: string; count: number; prs: PrGroupPr[] } | null>(
+		null
+	);
+	function selectNode(group: PrGroup, sub: PrSubGroup | null) {
+		selected = sub
+			? {
+					id: `g:${group.name}/s:${sub.name}`,
+					label: `${group.name} → ${sub.name}`,
+					count: sub.count,
+					prs: sub.prs
+				}
+			: { id: `g:${group.name}`, label: group.name, count: group.count, prs: group.prs };
+	}
 
 	let groupToken = 0;
 	async function loadGroups(slug: string | null) {
@@ -32,7 +50,7 @@
 			if (mine !== groupToken) return;
 			prGroups = r.groups;
 			groupsCount = r.groups_limit;
-			selectedSub = null;
+			selected = null;
 		} catch (e) {
 			if (mine === groupToken) groupsError = e instanceof Error ? e.message : 'failed to load groups';
 		} finally {
@@ -154,43 +172,38 @@
 				Aucun groupe — pas encore de pull requests synchronisées pour ce dépôt.
 			</p>
 		{:else}
-			<div class="grid gap-4 lg:grid-cols-[1fr_320px]">
+			<div class="grid gap-4 lg:grid-cols-[1fr_300px]">
 				<PrGroupGraph
 					groups={prGroups}
-					selectedId={selectedSub?.id ?? null}
-					onSelect={(p) => (selectedSub = p)}
+					selectedId={selected?.id ?? null}
+					onSelect={selectNode}
+					onInteract={() => collapseSidebarSignal.update((n) => n + 1)}
 				/>
 				<div class="rounded-lg border bg-card p-3">
-					{#if selectedSub}
+					{#if selected}
 						<div class="mb-2">
-							<div class="text-sm font-semibold">
-								{selectedSub.group.name} → {selectedSub.sub.name}
-							</div>
+							<div class="text-sm font-semibold">{selected.label}</div>
 							<div class="text-xs text-muted-foreground">
-								{selectedSub.sub.count} PR{selectedSub.sub.count > 1 ? 's' : ''} dans « {selectedSub
-									.group.name} »
+								{selected.count} PR{selected.count > 1 ? 's' : ''}
 							</div>
 						</div>
-						<div class="max-h-[560px] space-y-0.5 overflow-y-auto">
-							{#each selectedSub.sub.prs as pr}
-								<a
-									href="/prs/{pr.number}"
-									class="block rounded px-2 py-1 text-xs hover:bg-muted"
-								>
+						<div class="max-h-[600px] space-y-0.5 overflow-y-auto">
+							{#each selected.prs as pr}
+								<a href="/prs/{pr.number}" class="block rounded px-2 py-1 text-xs hover:bg-muted">
 									<span class="mono text-muted-foreground">#{pr.number}</span>
 									{pr.title}
 								</a>
 							{/each}
-							{#if selectedSub.sub.count > selectedSub.sub.prs.length}
+							{#if selected.count > selected.prs.length}
 								<p class="px-2 pt-1 text-[0.7rem] text-muted-foreground">
-									+ {selectedSub.sub.count - selectedSub.sub.prs.length} de plus…
+									+ {selected.count - selected.prs.length} de plus…
 								</p>
 							{/if}
 						</div>
 					{:else}
 						<p class="text-xs text-muted-foreground">
-							Clique un <strong>sous-groupe</strong> (petite bulle) dans le graphe pour lister ses pull
-							requests ici.
+							Clique un <strong>groupe</strong> ou un <strong>sous-groupe</strong> dans le graphe pour
+							lister ses pull requests ici. Molette = zoom, glisser le fond = déplacer.
 						</p>
 					{/if}
 				</div>
