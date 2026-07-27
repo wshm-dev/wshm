@@ -16,11 +16,14 @@ use crate::pipelines::discover_domains::{title_words, top_terms};
 /// very large groups; the `count` is always the true total.
 const PR_CAP_PER_SUBGROUP: usize = 200;
 
-/// A pull request referenced by a subgroup.
+/// A pull request (or issue) referenced by a group/subgroup. Carries its repo
+/// so the UI can link correctly across repos and for closed items (which the
+/// in-app PR view doesn't load).
 #[derive(Serialize)]
 pub struct PrRef {
     pub number: u64,
     pub title: String,
+    pub repo: String,
 }
 
 /// A secondary subject inside a grand groupe.
@@ -43,34 +46,34 @@ pub struct Group {
 
 /// Build the group → subgroup → PRs hierarchy from a PR set.
 ///
-/// `prs` is (number, title) for every PR to consider; `name_stop` holds the
+/// `prs` is (number, title, repo) for every PR to consider; `name_stop` holds the
 /// repo owner/name tokens to exclude as self-referential noise. `group_limit` =
 /// number of grand groupes, `sub_limit` = subgroups per group.
 pub fn build_from(
-    prs: &[(u64, String)],
+    prs: &[(u64, String, String)],
     name_stop: &HashSet<String>,
     group_limit: usize,
     sub_limit: usize,
 ) -> Vec<Group> {
-    // (number, title, singularised word-set) per PR.
-    let items: Vec<(u64, String, HashSet<String>)> = prs
+    // (number, title, repo, singularised word-set) per PR.
+    let items: Vec<(u64, String, String, HashSet<String>)> = prs
         .iter()
-        .map(|(n, t)| (*n, t.clone(), title_words(t)))
+        .map(|(n, t, r)| (*n, t.clone(), r.clone(), title_words(t)))
         .collect();
-    let all_titles: Vec<String> = items.iter().map(|(_, t, _)| t.clone()).collect();
+    let all_titles: Vec<String> = items.iter().map(|(_, t, _, _)| t.clone()).collect();
 
     // Grand groupes: the top subjects across all PR titles.
     let group_terms = top_terms(&all_titles, &[], name_stop, group_limit);
 
     let mut groups = Vec::with_capacity(group_terms.len());
     for (g, _) in group_terms {
-        let members: Vec<&(u64, String, HashSet<String>)> =
-            items.iter().filter(|(_, _, w)| w.contains(&g)).collect();
+        let members: Vec<&(u64, String, String, HashSet<String>)> =
+            items.iter().filter(|(_, _, _, w)| w.contains(&g)).collect();
         let g_count = members.len();
 
         // Sous-groupes: frequent secondary terms among this group's PRs,
         // excluding the group term itself and the repo name.
-        let member_titles: Vec<String> = members.iter().map(|(_, t, _)| t.clone()).collect();
+        let member_titles: Vec<String> = members.iter().map(|(_, t, _, _)| t.clone()).collect();
         let mut sub_stop = name_stop.clone();
         sub_stop.insert(g.clone());
         let sub_terms = top_terms(&member_titles, &[], &sub_stop, sub_limit);
@@ -79,13 +82,14 @@ pub fn build_from(
         for (s, _) in sub_terms {
             let mut count = 0usize;
             let mut list: Vec<PrRef> = Vec::new();
-            for (num, title, w) in members.iter().copied() {
+            for (num, title, repo, w) in members.iter().copied() {
                 if w.contains(&s) {
                     count += 1;
                     if list.len() < PR_CAP_PER_SUBGROUP {
                         list.push(PrRef {
                             number: *num,
                             title: title.clone(),
+                            repo: repo.clone(),
                         });
                     }
                 }
@@ -101,9 +105,10 @@ pub fn build_from(
         let group_prs: Vec<PrRef> = members
             .iter()
             .take(PR_CAP_PER_SUBGROUP)
-            .map(|(num, title, _)| PrRef {
+            .map(|(num, title, repo, _)| PrRef {
                 number: *num,
                 title: title.clone(),
+                repo: repo.clone(),
             })
             .collect();
 

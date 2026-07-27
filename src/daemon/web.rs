@@ -2557,7 +2557,7 @@ async fn api_pr_groups_get(
             .collect()
     };
 
-    let mut prs: Vec<(u64, String)> = Vec::new();
+    let mut prs: Vec<(u64, String, String)> = Vec::new();
     let mut name_stop: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut default_limit: Option<usize> = None;
     for (slug, ds) in &snapshot {
@@ -2573,10 +2573,10 @@ async fn api_pr_groups_get(
             ));
         }
         for p in ds.db.get_open_pulls().unwrap_or_default() {
-            prs.push((p.number, p.title));
+            prs.push((p.number, p.title, slug.clone()));
         }
         for p in ds.db.get_closed_pulls(100_000).unwrap_or_default() {
-            prs.push((p.number, p.title));
+            prs.push((p.number, p.title, slug.clone()));
         }
     }
 
@@ -2619,7 +2619,7 @@ async fn api_issue_groups_get(
             .collect()
     };
 
-    let mut issues: Vec<(u64, String)> = Vec::new();
+    let mut issues: Vec<(u64, String, String)> = Vec::new();
     let mut name_stop: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut default_limit: Option<usize> = None;
     for (slug, ds) in &snapshot {
@@ -2635,7 +2635,7 @@ async fn api_issue_groups_get(
             ));
         }
         for i in ds.db.get_open_issues().unwrap_or_default() {
-            issues.push((i.number, i.title));
+            issues.push((i.number, i.title, slug.clone()));
         }
     }
 

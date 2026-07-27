@@ -25,8 +25,14 @@
 	} = $props();
 
 	let noun = $derived(kind === 'pr' ? 'PR' : 'issue');
-	let linkBase = $derived(kind === 'pr' ? '/prs/' : '/issues/');
 	let fetcher = $derived(kind === 'pr' ? fetchPrGroups : fetchIssueGroups);
+
+	// Link to GitHub rather than the in-app page: the graph groups ALL PRs incl.
+	// closed ones (and can span repos), which the in-app PR view can't load.
+	function itemUrl(pr: PrGroupPr): string {
+		const seg = kind === 'pr' ? 'pull' : 'issues';
+		return `https://github.com/${pr.repo}/${seg}/${pr.number}`;
+	}
 
 	let groups = $state<PrGroup[]>([]);
 	let loading = $state(true);
@@ -133,7 +139,12 @@
 				</div>
 				<div class="max-h-[70vh] space-y-0.5 overflow-y-auto">
 					{#each selected.prs as pr}
-						<a href="{linkBase}{pr.number}" class="block rounded px-2 py-1 text-xs hover:bg-muted">
+						<a
+							href={itemUrl(pr)}
+							target="_blank"
+							rel="noopener noreferrer"
+							class="block rounded px-2 py-1 text-xs hover:bg-muted"
+						>
 							<span class="mono text-muted-foreground">#{pr.number}</span>
 							{pr.title}
 						</a>

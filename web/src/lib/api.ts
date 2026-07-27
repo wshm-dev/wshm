@@ -590,6 +590,7 @@ export async function discoverRepoDomains(slug: string, limit?: number): Promise
 export interface PrGroupPr {
 	number: number;
 	title: string;
+	repo: string;
 }
 /** A secondary subject inside a grand groupe. */
 export interface PrSubGroup {
