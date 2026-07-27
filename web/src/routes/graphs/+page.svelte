@@ -12,13 +12,15 @@
 
 	async function loadTrends() {
 		try {
-			const r = await fetch('/api/v1/pr-insights/trend');
+			// no-store: the endpoint sends no Cache-Control, so avoid the browser
+			// serving a stale (previously empty) response.
+			const r = await fetch('/api/v1/pr-insights/trend', { cache: 'no-store' });
 			if (r.ok) prTrend = (await r.json()).points ?? [];
 		} catch {
 			/* ignore */
 		}
 		try {
-			const r = await fetch('/api/v1/issue-insights/trend');
+			const r = await fetch('/api/v1/issue-insights/trend', { cache: 'no-store' });
 			if (r.ok) issueTrend = (await r.json()).points ?? [];
 		} catch {
 			/* ignore */
