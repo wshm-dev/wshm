@@ -88,7 +88,9 @@
 
 	// Rebuild whenever the incoming groups change.
 	let signature = $derived(
-		groups.map((g) => `${g.name}:${g.count}:${g.subgroups.length}`).join('|')
+		groups
+			.map((g) => `${g.name}:${g.count}:${g.subgroups.map((s) => s.name + s.count).join(',')}`)
+			.join('|')
 	);
 	let builtFor = '';
 	$effect(() => {
@@ -153,7 +155,9 @@
 			.filter((nd) => nd.parent)
 			.map((nd) => ({ a: byId.get(nd.parent!)!, b: nd }))
 			.filter((l) => l.a && l.b);
-		// Reset the view so a fresh graph is centred and fully visible.
+		// Reset the view so a fresh graph is centred and fully visible, and drop
+		// any hover pointing at a node from the previous build.
+		hovered = null;
 		zoom = 1;
 		panX = 0;
 		panY = 0;
@@ -237,9 +241,14 @@
 
 	// ---- coordinate helpers -------------------------------------------------
 	/** Pixels → viewBox units (approx; assumes width-driven scale). */
+	// Screen px → viewBox units. With preserveAspectRatio="xMidYMid meet" the
+	// uniform scale is min(w/W, h/H), so one px equals max(W/w, H/H) viewBox
+	// units — using only W/width mis-scales drag/pan on height-constrained
+	// (widescreen, tall) viewports.
 	function unit(): number {
 		const rect = svgEl?.getBoundingClientRect();
-		return rect && rect.width ? W / rect.width : 1;
+		if (!rect || !rect.width || !rect.height) return 1;
+		return Math.max(W / rect.width, H / rect.height);
 	}
 
 	// ---- interactions -------------------------------------------------------
@@ -247,14 +256,16 @@
 	let panning = false;
 	let lastX = 0;
 	let lastY = 0;
+	let startX = 0;
+	let startY = 0;
 	let moved = false;
 
 	function onNodeDown(nd: Node, e: PointerEvent) {
 		e.stopPropagation();
 		dragNode = nd;
 		moved = false;
-		lastX = e.clientX;
-		lastY = e.clientY;
+		lastX = startX = e.clientX;
+		lastY = startY = e.clientY;
 		nd.fx = nd.x;
 		nd.fy = nd.y;
 		(e.currentTarget as Element).setPointerCapture?.(e.pointerId);
@@ -264,9 +275,15 @@
 	function onBgDown(e: PointerEvent) {
 		panning = true;
 		moved = false;
-		lastX = e.clientX;
-		lastY = e.clientY;
+		lastX = startX = e.clientX;
+		lastY = startY = e.clientY;
 		onInteract?.();
+	}
+
+	// Cumulative distance from press start — a slow drag of many tiny steps
+	// still counts as a drag (not a click).
+	function markMoved(e: PointerEvent) {
+		if (Math.hypot(e.clientX - startX, e.clientY - startY) > 4) moved = true;
 	}
 
 	function onMove(e: PointerEvent) {
@@ -280,7 +297,7 @@
 			dragNode.fy = ny;
 			lastX = e.clientX;
 			lastY = e.clientY;
-			if (Math.abs(e.movementX) + Math.abs(e.movementY) > 2) moved = true;
+			markMoved(e);
 			startSim();
 		} else if (panning) {
 			const k = unit();
@@ -288,7 +305,7 @@
 			panY += (e.clientY - lastY) * k;
 			lastX = e.clientX;
 			lastY = e.clientY;
-			if (Math.abs(e.movementX) + Math.abs(e.movementY) > 2) moved = true;
+			markMoved(e);
 		}
 	}
 

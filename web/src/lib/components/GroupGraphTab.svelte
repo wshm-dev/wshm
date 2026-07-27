@@ -103,7 +103,9 @@
 
 {#if error}
 	<p class="text-sm text-destructive">{error}</p>
-{:else if !loading && groups.length === 0}
+{:else if loading && groups.length === 0}
+	<p class="py-10 text-center text-sm text-muted-foreground">Chargement…</p>
+{:else if groups.length === 0}
 	<p class="py-10 text-center text-sm text-muted-foreground">
 		Aucun groupe — pas encore de {noun}s synchronisées.
 	</p>
