@@ -82,6 +82,8 @@
 	"settings.repos.configured": "Configurés",
 	"settings.repos.none": "Aucun dépôt configuré.",
 	"settings.repos.editFeatures": "Modifier les options",
+	"settings.repos.remove": "Retirer le dépôt",
+	"settings.repos.removeConfirm": "Retirer ce dépôt du suivi ? Ses données collectées restent en base, mais le démon cesse de le synchroniser.",
 	"settings.repos.badge.apply": "apply",
 	"settings.repos.badge.dryrun": "dry-run",
 	"settings.repos.slug": "Slug",

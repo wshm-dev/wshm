@@ -441,6 +441,15 @@ export function addRepo(slug: string, path?: string): Promise<{ status: string; 
 	return apiPost('/repos', path ? { slug, path } : { slug });
 }
 
+export async function removeRepo(slug: string): Promise<{ status: string; slug: string; message: string }> {
+	const res = await apiMutate(`/repos/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+	const json = await res.json();
+	if (!res.ok) {
+		throw new Error((json && (json.error || json.message)) || `HTTP ${res.status}`);
+	}
+	return json;
+}
+
 export interface AuthStatus {
 	github: boolean;
 	anthropic: 'oauth' | 'api_key' | null;

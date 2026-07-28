@@ -23,6 +23,7 @@
 		activateLicense,
 		fetchRepos,
 		addRepo,
+		removeRepo,
 		fetchAuthStatus,
 		setGithubToken,
 		setAnthropicToken,
@@ -449,6 +450,22 @@
 		addingRepo = false;
 	}
 
+	let removingRepo: string | null = $state(null);
+	async function handleRemoveRepo(slug: string) {
+		if (!confirm(`${slug}\n\n${$t('settings.repos.removeConfirm')}`)) return;
+		removingRepo = slug;
+		addRepoMessage = null; addRepoError = false;
+		try {
+			const r = await removeRepo(slug);
+			addRepoMessage = r.message;
+			await refreshRepos();
+		} catch (e) {
+			addRepoMessage = e instanceof Error ? e.message : 'Remove failed';
+			addRepoError = true;
+		}
+		removingRepo = null;
+	}
+
 	async function handleSetGithub() {
 		if (!ghToken.trim()) return;
 		savingGh = true; ghMessage = null; ghError = false;
@@ -637,6 +654,14 @@
 												<Button variant="outline" size="xs" onclick={() => openFeaturesModal(r.slug)}>
 													{$t('settings.repos.editFeatures')}
 												</Button>
+												<Button
+													variant="ghost"
+													size="xs"
+													class="text-destructive hover:bg-destructive/10"
+													disabled={removingRepo === r.slug}
+													title={$t('settings.repos.remove')}
+													onclick={() => handleRemoveRepo(r.slug)}
+												>✕</Button>
 											</div>
 										</li>
 									{/each}

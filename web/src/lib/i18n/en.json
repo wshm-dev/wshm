@@ -82,6 +82,8 @@
 	"settings.repos.configured": "Configured",
 	"settings.repos.none": "None configured.",
 	"settings.repos.editFeatures": "Edit features",
+	"settings.repos.remove": "Remove repository",
+	"settings.repos.removeConfirm": "Remove this repository from tracking? Its collected data stays in the database, but the daemon stops syncing it.",
 	"settings.repos.badge.apply": "apply",
 	"settings.repos.badge.dryrun": "dry-run",
 	"settings.repos.slug": "Slug",
