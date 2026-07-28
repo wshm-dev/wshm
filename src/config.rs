@@ -1416,7 +1416,7 @@ fn default_poll_interval() -> u64 {
     30
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RepoEntry {
     /// Repository slug: "owner/repo"
     pub slug: String,

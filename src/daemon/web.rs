@@ -14,7 +14,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use base64::Engine;
@@ -2286,13 +2286,14 @@ async fn api_repo_features_patch(
         ds.set_apply(new_apply);
     }
 
-    // Persist to global.toml so the change survives restart. Errors are
-    // logged but not propagated — the in-memory state is already updated,
-    // worst case the user has to re-toggle after a restart.
-    let global_path = crate::config::GlobalConfig::default_path();
-    if global_path.exists() {
-        if let Ok(mut global) = crate::config::GlobalConfig::load(&global_path) {
-            for entry in &mut global.repos {
+    // Persist so the change survives restart: mutate the canonical registry
+    // and flush via the persistence hook (Pro → Postgres) or the TOML
+    // fallback (OSS). Errors are logged but not propagated — the in-memory
+    // state is already updated, worst case the user re-toggles after restart.
+    if let Some(runtime) = state.multi.runtime.as_ref() {
+        {
+            let mut canonical = runtime.repos.write().await;
+            for entry in canonical.iter_mut() {
                 if entry.slug == slug {
                     entry.features = features.clone();
                     if let Some(new_apply) = apply_change {
@@ -2300,9 +2301,9 @@ async fn api_repo_features_patch(
                     }
                 }
             }
-            if let Err(e) = global.save(&global_path) {
-                tracing::warn!("Failed to persist features to global.toml: {e}");
-            }
+        }
+        if let Err(e) = runtime.persist().await {
+            tracing::warn!("Failed to persist repo features: {e}");
         }
     }
 
@@ -2782,6 +2783,41 @@ async fn api_add_repo(
             let msg = format!("{e}");
             let code = if msg.contains("already") {
                 StatusCode::CONFLICT
+            } else if msg.contains("not available") {
+                StatusCode::METHOD_NOT_ALLOWED
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (code, Json(json!({"status": "error", "message": msg}))).into_response()
+        }
+    }
+}
+
+/// DELETE /api/v1/repos/{slug} -- remove a repo at runtime (multi-repo mode
+/// only). Stops its scheduler/poller and persists the removal so it survives a
+/// restart. Requires `admin` role.
+async fn api_remove_repo(
+    State(state): State<Arc<WebState>>,
+    user: axum::Extension<Option<crate::auth::User>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> Response {
+    if state.users.is_some() {
+        if let Err(e) = require_admin(&user) {
+            return e;
+        }
+    }
+
+    match state.multi.remove_repo(&slug).await {
+        Ok(()) => Json(json!({
+            "status": "ok",
+            "slug": slug,
+            "message": "Repo removed — scheduler/poller stopped",
+        }))
+        .into_response(),
+        Err(e) => {
+            let msg = format!("{e}");
+            let code = if msg.contains("not registered") {
+                StatusCode::NOT_FOUND
             } else if msg.contains("not available") {
                 StatusCode::METHOD_NOT_ALLOWED
             } else {
@@ -3683,6 +3719,7 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         .route("/api/v1/license", get(api_license))
         .route("/api/v1/license/activate", post(api_license_activate))
         .route("/api/v1/repos", get(api_list_repos).post(api_add_repo))
+        .route("/api/v1/repos/{slug}", delete(api_remove_repo))
         .route(
             "/api/v1/config/retry",
             get(api_retry_get).patch(api_retry_patch),
