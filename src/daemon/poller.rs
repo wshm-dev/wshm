@@ -54,7 +54,10 @@ pub async fn run_multi(
     );
 
     loop {
-        tokio::time::sleep(interval).await;
+        if state.sleep_or_cancel(interval).await {
+            info!("[{slug}] repo removed — stopping poller");
+            break;
+        }
 
         match poll_events(&state, &mut last_event_id).await {
             Ok(events) => {

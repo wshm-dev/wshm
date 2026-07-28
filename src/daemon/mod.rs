@@ -45,6 +45,13 @@ pub struct DaemonState {
     /// Pipelines must check the relevant flag before performing mutating
     /// actions (triage, analyze, auto-fix, merge).
     features: std::sync::RwLock<crate::config::RepoFeatures>,
+    /// Set when the repo is removed at runtime; the scheduler and poller
+    /// check [`DaemonState::is_cancelled`] each cycle and exit so a removed
+    /// repo stops writing to the DB without a daemon restart.
+    cancelled: std::sync::atomic::AtomicBool,
+    /// Wakes the scheduler/poller immediately on cancellation instead of
+    /// waiting out the current sleep interval.
+    cancel_notify: tokio::sync::Notify,
 }
 
 impl DaemonState {
@@ -74,7 +81,35 @@ impl DaemonState {
             config,
             apply: std::sync::atomic::AtomicBool::new(apply),
             features: std::sync::RwLock::new(features),
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+            cancel_notify: tokio::sync::Notify::new(),
         }
+    }
+
+    /// True once the repo has been removed at runtime. Long-running loops
+    /// (scheduler, poller) must check this each cycle and exit.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Signal the scheduler/poller to stop and wake them immediately.
+    pub fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancel_notify.notify_waiters();
+    }
+
+    /// Sleep for `dur`, returning early if the repo is cancelled. Returns
+    /// `true` if cancelled (caller should break its loop).
+    pub async fn sleep_or_cancel(&self, dur: std::time::Duration) -> bool {
+        if self.is_cancelled() {
+            return true;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(dur) => {}
+            _ = self.cancel_notify.notified() => {}
+        }
+        self.is_cancelled()
     }
 
     /// Live apply-mode flag. `true` → mutating actions hit GitHub;
@@ -146,6 +181,31 @@ pub struct DynamicRuntime {
     pub poll_interval: u64,
     pub global_apply: bool,
     pub global_config_path: PathBuf,
+    /// Canonical repo registry (list + per-repo settings). Source of truth for
+    /// persistence; seeded from `GlobalConfig.repos` at boot and mutated by
+    /// add/remove/feature edits.
+    pub repos: Arc<RwLock<Vec<crate::config::RepoEntry>>>,
+    /// Persist the registry (Pro → Postgres). When `None`, `persist()` writes
+    /// `global.toml` at `global_config_path`.
+    pub persist_repos: Option<RepoPersist>,
+    /// Build a repo's storage backend (Pro → shared Postgres pool). When
+    /// `None`, a runtime-added repo opens a per-repo SQLite `Database`.
+    pub db_factory: Option<DbFactory>,
+}
+
+impl DynamicRuntime {
+    /// Persist the current registry: via the Pro hook when set, else by
+    /// rewriting `global.toml`. Best-effort; errors are returned to the caller.
+    pub async fn persist(&self) -> Result<()> {
+        let repos = self.repos.read().await.clone();
+        if let Some(hook) = &self.persist_repos {
+            hook(&repos)
+        } else {
+            let mut global = GlobalConfig::load(&self.global_config_path).unwrap_or_default();
+            global.repos = repos;
+            global.save(&self.global_config_path)
+        }
+    }
 }
 
 /// Multi-repo state: maps "owner/repo" slug to its DaemonState.
@@ -225,7 +285,14 @@ impl MultiDaemonState {
         std::fs::create_dir_all(&config.wshm_dir)?;
         config.web.resolve_password(&config.wshm_dir);
 
-        let db = Arc::new(Database::open(&config)?) as Arc<dyn DatabaseBackend>;
+        // Build the storage backend via the Pro-provided factory (shared
+        // Postgres pool) when present; otherwise open a per-repo SQLite DB.
+        // Using the factory is what makes a runtime-added repo land in
+        // Postgres in prod instead of a stray, empty SQLite file.
+        let db = match &runtime.db_factory {
+            Some(factory) => factory(&config)?,
+            None => Arc::new(Database::open(&config)?) as Arc<dyn DatabaseBackend>,
+        };
         let gh = Arc::new(GhClient::new(&config)?);
         let state = Arc::new(DaemonState::new(
             db,
@@ -235,9 +302,23 @@ impl MultiDaemonState {
         ));
 
         // Persist before mutating runtime state so a crash can't lose the
-        // user's intent silently.
-        crate::config::append_repo_to_global(&runtime.global_config_path, slug, &path, None)
-            .with_context(|| format!("failed to persist {slug} to global config"))?;
+        // user's intent silently. Append to the canonical registry, then flush
+        // via the persistence hook (Pro → Postgres) or the TOML fallback.
+        {
+            let mut canonical = runtime.repos.write().await;
+            canonical.push(crate::config::RepoEntry {
+                slug: slug.to_string(),
+                path: path.clone(),
+                apply: None,
+                enabled: true,
+                secret: None,
+                features: crate::config::RepoFeatures::default(),
+            });
+        }
+        runtime
+            .persist()
+            .await
+            .with_context(|| format!("failed to persist {slug} to repo registry"))?;
 
         {
             let mut repos = self.repos.write().await;
@@ -269,6 +350,38 @@ impl MultiDaemonState {
         );
 
         Ok(state)
+    }
+
+    /// Remove a repo at runtime: stop its scheduler/poller, drop it from the
+    /// live map and the canonical registry, and persist (Pro → Postgres, else
+    /// TOML) so the removal survives a restart. Idempotent-ish: errors if the
+    /// slug isn't registered.
+    pub async fn remove_repo(&self, slug: &str) -> Result<()> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .context("Dynamic remove_repo not available (daemon not running in multi-repo mode)")?;
+
+        // Drop from the live map and signal its background tasks to exit.
+        let removed = {
+            let mut repos = self.repos.write().await;
+            repos.remove(slug)
+        };
+        let state = removed.with_context(|| format!("repo {slug} not registered"))?;
+        state.cancel();
+
+        // Remove from the canonical registry, then persist the new list.
+        {
+            let mut canonical = runtime.repos.write().await;
+            canonical.retain(|e| e.slug != slug);
+        }
+        runtime
+            .persist()
+            .await
+            .with_context(|| format!("failed to persist removal of {slug}"))?;
+
+        info!("Repo removed at runtime: {slug}");
+        Ok(())
     }
 }
 
@@ -428,15 +541,23 @@ pub struct DaemonExtensions {
     /// pool across all repos while scoping each backend instance by repo
     /// slug. When `None`, falls back to `Database::open(config)` (the
     /// historical OSS-only behaviour).
-    #[allow(clippy::type_complexity)]
-    pub db_factory: Option<
-        Arc<
-            dyn Fn(&crate::Config) -> anyhow::Result<Arc<dyn crate::db::backend::DatabaseBackend>>
-                + Send
-                + Sync,
-        >,
-    >,
+    pub db_factory: Option<DbFactory>,
+    /// Optional hook to persist the full repo registry (Pro writes it to
+    /// Postgres). When `Some`, runtime add/remove/feature edits call this
+    /// instead of rewriting `global.toml`; when `None`, the TOML file is used.
+    pub persist_repos: Option<RepoPersist>,
 }
+
+/// Produces the storage backend for one repo. Pro shares a single Postgres
+/// pool across repos, scoping each instance by slug; OSS opens a per-repo
+/// SQLite `Database`.
+pub type DbFactory =
+    Arc<dyn Fn(&Config) -> anyhow::Result<Arc<dyn DatabaseBackend>> + Send + Sync>;
+
+/// Persists the whole tracked-repo registry (list + per-repo settings). Pro
+/// writes the JSON blob to Postgres; OSS falls back to `global.toml`.
+pub type RepoPersist =
+    Arc<dyn Fn(&[crate::config::RepoEntry]) -> anyhow::Result<()> + Send + Sync>;
 
 /// Run daemon in multi-repo mode from a global config file.
 pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
@@ -644,6 +765,9 @@ pub async fn run_multi_with_extensions(
         poll_interval,
         global_apply,
         global_config_path,
+        repos: Arc::new(RwLock::new(global.repos.clone())),
+        persist_repos: extensions.persist_repos.clone(),
+        db_factory: extensions.db_factory.clone(),
     };
 
     let multi = Arc::new(MultiDaemonState::with_runtime(repos, runtime));

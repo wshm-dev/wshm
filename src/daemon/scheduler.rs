@@ -76,7 +76,13 @@ pub async fn run(state: Arc<DaemonState>) {
     }
 
     loop {
-        tokio::time::sleep(interval).await;
+        if state.sleep_or_cancel(interval).await {
+            info!(
+                "[{}] repo removed — stopping scheduler",
+                state.config.repo_slug()
+            );
+            break;
+        }
 
         let features = state.features();
         if !features.collect_issues && !features.collect_prs {
