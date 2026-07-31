@@ -496,9 +496,13 @@ fn show_status() -> Result<()> {
     println!("── Authentication Status ──\n");
 
     // GitHub
+    // `.ok()` alone treats an env var that's *set but empty* (e.g. a K8s
+    // Deployment declaring `GITHUB_TOKEN=""` just to make the var visible)
+    // as present, which used to report "authenticated" for a blank token.
     let gh_token = std::env::var("GITHUB_TOKEN")
         .or_else(|_| std::env::var("WSHM_TOKEN"))
-        .ok();
+        .ok()
+        .filter(|s| !s.trim().is_empty());
 
     let gh_cli = std::process::Command::new("gh")
         .args(["auth", "token"])
