@@ -203,6 +203,8 @@
 	"settings.secrets.repoSlug": "Slug du dépôt",
 	"settings.secrets.key": "Clé",
 	"settings.secrets.commonKeys": "Clés courantes :",
+	"settings.secrets.githubAppHint": "Pour un bot à jeton auto-renouvelé plutôt qu'un token personnel, renseignez les trois :",
+	"settings.secrets.githubAppHintSuffix": "(clé privée : collez le PEM tel quel, ou avec \\n à la place des retours à la ligne).",
 	"settings.secrets.value": "Valeur",
 	"settings.secrets.save": "Enregistrer le secret",
 

@@ -6512,6 +6512,7 @@ dependencies = [
  "hmac 0.12.1",
  "hostname",
  "is-terminal",
+ "jsonwebtoken",
  "mime_guess",
  "mongodb",
  "mysql_async",

@@ -40,6 +40,10 @@ vault-all = ["vault-hashicorp", "vault-aws", "vault-gcp"]
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 octocrab = "0.44"
+# Pinned to the exact version octocrab 0.44 depends on — its `.app()`
+# builder takes a `jsonwebtoken::EncodingKey` by value, so a mismatched
+# major/minor version would fail to type-check even though both compile.
+jsonwebtoken = "9.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }

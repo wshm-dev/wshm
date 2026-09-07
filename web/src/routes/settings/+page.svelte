@@ -1374,6 +1374,11 @@
 								{$t('settings.secrets.commonKeys')} <code>github_token</code>, <code>anthropic_oauth_token</code>,
 								<code>anthropic_api_key</code>.
 							</p>
+							<p class="text-xs text-muted-foreground mt-1">
+								{$t('settings.secrets.githubAppHint')} <code>github_app_id</code>,
+								<code>github_app_installation_id</code>, <code>github_app_private_key</code>
+								{$t('settings.secrets.githubAppHintSuffix')}
+							</p>
 						</div>
 						<div>
 							<Label for="sec-value" class="text-xs mb-1">{$t('settings.secrets.value')}</Label>

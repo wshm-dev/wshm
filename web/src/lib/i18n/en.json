@@ -203,6 +203,8 @@
 	"settings.secrets.repoSlug": "Repository slug",
 	"settings.secrets.key": "Key",
 	"settings.secrets.commonKeys": "Common keys:",
+	"settings.secrets.githubAppHint": "For a self-refreshing bot instead of a personal token, set all three:",
+	"settings.secrets.githubAppHintSuffix": "(private key: paste the PEM as-is, or with \\n in place of line breaks).",
 	"settings.secrets.value": "Value",
 	"settings.secrets.save": "Save secret",
 

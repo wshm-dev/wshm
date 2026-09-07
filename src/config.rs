@@ -5,6 +5,15 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
 
+/// Resolved GitHub App credentials — never part of `config.toml` (secrets
+/// only live in the encrypted store / env, per [`Config::github_app_auth_optional`]).
+#[derive(Debug, Clone)]
+pub struct GithubAppAuth {
+    pub app_id: u64,
+    pub installation_id: u64,
+    pub private_key_pem: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
@@ -1871,6 +1880,14 @@ impl Config {
 
         let template = r#"[github]
 # Token from env var GITHUB_TOKEN or WSHM_TOKEN, or `gh auth token` (never stored in config)
+#
+# Alternative: authenticate as a GitHub App instead of a personal token.
+# A self-refreshing installation token beats a PAT for an unattended bot —
+# no manual rotation, and it's scoped to only the repos the App is
+# installed on. Set all three (env or Settings -> Secrets), never in this
+# file: WSHM_GITHUB_APP_ID, WSHM_GITHUB_APP_INSTALLATION_ID,
+# WSHM_GITHUB_APP_PRIVATE_KEY (PEM; literal "\n" line breaks are accepted).
+# When present, App auth takes priority over GITHUB_TOKEN/WSHM_TOKEN.
 
 [ai]
 provider = "anthropic"
@@ -2141,6 +2158,53 @@ full_sync_interval_hours = 24
             .context("No GitHub token found. Set GITHUB_TOKEN, WSHM_TOKEN, authenticate with `gh auth login`, or add a github_token in Settings → Secrets")
     }
 
+    /// Resolve GitHub App credentials for self-refreshing bot auth, without
+    /// bailing when absent (App auth is opt-in; most installs still use a
+    /// PAT). All three fields must be present and non-empty — a partially
+    /// configured App is treated as "not configured" so callers fall back
+    /// to [`Self::github_token_optional`] instead of failing outright.
+    ///
+    /// Same resolution order as `github_token_optional`: encrypted secret
+    /// store (per-repo override → global) → env var.
+    pub fn github_app_auth_optional(&self) -> Option<GithubAppAuth> {
+        let store = crate::secrets::global();
+        let slug = self.repo_slug();
+        let resolve = |key: &str, env_name: &str| {
+            crate::secrets::resolve(store.as_ref(), Some(&slug), key, env_name)
+                .filter(|v| !v.trim().is_empty())
+        };
+
+        let app_id = resolve("github_app_id", "WSHM_GITHUB_APP_ID")?;
+        let installation_id = resolve(
+            "github_app_installation_id",
+            "WSHM_GITHUB_APP_INSTALLATION_ID",
+        )?;
+        let private_key_pem = resolve("github_app_private_key", "WSHM_GITHUB_APP_PRIVATE_KEY")?;
+
+        let app_id = app_id.trim().parse().ok().or_else(|| {
+            tracing::warn!("github_app_id is not a valid integer — ignoring GitHub App auth");
+            None
+        })?;
+        let installation_id = installation_id.trim().parse().ok().or_else(|| {
+            tracing::warn!(
+                "github_app_installation_id is not a valid integer — ignoring GitHub App auth"
+            );
+            None
+        })?;
+
+        // A PEM pasted into a single-line secret input can't carry real
+        // newlines, so accept the literal two-character sequence `\n` as an
+        // escape and unescape it here — same convention as Firebase/Vercel
+        // service-account env vars.
+        let private_key_pem = private_key_pem.replace("\\n", "\n");
+
+        Some(GithubAppAuth {
+            app_id,
+            installation_id,
+            private_key_pem,
+        })
+    }
+
     /// Resolve a GitHub token without bailing when absent. Returns `None` so
     /// the daemon can run in anonymous read-only mode against public repos
     /// (rate-limited to 60 req/h). Mutating endpoints (post labels/comments,
@@ -2286,5 +2350,60 @@ mod tests {
         let (owner, repo) = parse_github_url("https://github.com/user/project").unwrap();
         assert_eq!(owner, "user");
         assert_eq!(repo, "project");
+    }
+
+    /// Self-contained: sets/clears its own env vars sequentially so it's
+    /// safe alongside other tests running in the same process (no other
+    /// test touches these var names). `secrets::global()` is never
+    /// installed in a unit-test process, so `github_app_auth_optional`
+    /// resolves purely from env — matching production's env-var fallback
+    /// path for a standalone (non-daemon) install.
+    #[test]
+    fn test_github_app_auth_optional_requires_all_three_fields() {
+        const VARS: [&str; 3] = [
+            "WSHM_GITHUB_APP_ID",
+            "WSHM_GITHUB_APP_INSTALLATION_ID",
+            "WSHM_GITHUB_APP_PRIVATE_KEY",
+        ];
+        for v in VARS {
+            std::env::remove_var(v);
+        }
+
+        let config = Config {
+            repo_owner: "acme".to_string(),
+            repo_name: "widgets".to_string(),
+            ..Config::default()
+        };
+
+        assert!(
+            config.github_app_auth_optional().is_none(),
+            "no App fields set — must not report configured"
+        );
+
+        std::env::set_var("WSHM_GITHUB_APP_ID", "123456");
+        assert!(
+            config.github_app_auth_optional().is_none(),
+            "only app_id set — partial config must still be None"
+        );
+
+        std::env::set_var("WSHM_GITHUB_APP_INSTALLATION_ID", "789");
+        std::env::set_var(
+            "WSHM_GITHUB_APP_PRIVATE_KEY",
+            "-----BEGIN RSA PRIVATE KEY-----\\nabc\\n-----END RSA PRIVATE KEY-----",
+        );
+        let auth = config
+            .github_app_auth_optional()
+            .expect("all three fields set — must resolve");
+        assert_eq!(auth.app_id, 123456);
+        assert_eq!(auth.installation_id, 789);
+        assert_eq!(
+            auth.private_key_pem,
+            "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----",
+            "literal \\n must be unescaped to real newlines"
+        );
+
+        for v in VARS {
+            std::env::remove_var(v);
+        }
     }
 }
