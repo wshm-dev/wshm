@@ -9,6 +9,7 @@
 	import * as Card from '$lib/components/ui/card';
 	import * as Table from '$lib/components/ui/table';
 	import * as Dialog from '$lib/components/ui/dialog';
+	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { colorConfig, prStatusBorder, priorityColor, categoryColor, type ColorConfig } from '$lib/colors';
 	import IssueDetail from '$lib/components/IssueDetail.svelte';
 	import TablePagination from '$lib/components/TablePagination.svelte';
@@ -140,7 +141,7 @@
 	</Card.Root>
 {:else}
 	<div class="rounded-lg border">
-		<Table.Root class="w-full">
+		<Table.Root class="w-full table-fixed">
 			<Table.Header class="text-xs uppercase text-muted-foreground">
 				<Table.Row>
 					<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[60px]" onclick={(e: MouseEvent) => handleSort('number', e)}>
@@ -181,14 +182,28 @@
 						onclick={() => openIssue(issue)}
 					>
 						<Table.Cell class="px-2 py-1.5 mono text-foreground">{issue.number}</Table.Cell>
-						<Table.Cell class="px-2 py-1.5 truncate text-foreground">{issue.title}</Table.Cell>
+						<Table.Cell class="px-2 py-1.5 text-foreground">
+							<Tooltip.Provider>
+								<Tooltip.Root>
+									<Tooltip.Trigger>
+										{#snippet child({ props })}
+											<span {...props} class="block truncate">{issue.title}</span>
+										{/snippet}
+									</Tooltip.Trigger>
+									<Tooltip.Content class="max-w-sm text-xs leading-snug">{issue.title}</Tooltip.Content>
+								</Tooltip.Root>
+							</Tooltip.Provider>
+						</Table.Cell>
 						<Table.Cell class="px-2 py-1.5 text-foreground text-xs">
 							{issue.pr_status === 'pr_ready' ? 'PR ready' : issue.pr_status === 'has_pr' ? 'PR open' : 'No PR'}
 						</Table.Cell>
-						<Table.Cell class="px-2 py-1.5">
-							{#each issue.labels as label}
+						<Table.Cell class="px-2 py-1.5 overflow-hidden whitespace-nowrap">
+							{#each issue.labels.slice(0, 2) as label}
 								<Badge variant="outline" class="bg-primary/15 text-primary mr-1">{label}</Badge>
 							{/each}
+							{#if issue.labels.length > 2}
+								<Badge variant="outline" class="text-muted-foreground">+{issue.labels.length - 2}</Badge>
+							{/if}
 						</Table.Cell>
 						<Table.Cell class="px-2 py-1.5 text-foreground">{issue.priority ?? '-'}</Table.Cell>
 						<Table.Cell class="px-2 py-1.5 text-foreground">{issue.category ?? '-'}</Table.Cell>

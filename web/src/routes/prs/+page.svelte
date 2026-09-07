@@ -8,6 +8,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import * as Table from '$lib/components/ui/table';
 	import * as Dialog from '$lib/components/ui/dialog';
+	import * as Tooltip from '$lib/components/ui/tooltip';
 	import PrDetail from '$lib/components/PrDetail.svelte';
 	import TablePagination from '$lib/components/TablePagination.svelte';
 	import FilterSelect from '$lib/components/FilterSelect.svelte';
@@ -149,7 +150,7 @@
 	</div>
 {:else}
 	<div class="rounded-lg border">
-		<Table.Root class="w-full">
+		<Table.Root class="w-full table-fixed">
 			<Table.Header class="text-xs uppercase text-muted-foreground">
 				<Table.Row>
 					<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[60px]" onclick={(e: MouseEvent) => handleSort('number', e)}>
@@ -192,7 +193,18 @@
 				{#each sorted as pr}
 					<Table.Row class="cursor-pointer" onclick={() => openPr(pr)}>
 						<Table.Cell class="px-2 py-1.5 mono">{pr.number}</Table.Cell>
-						<Table.Cell class="px-2 py-1.5 truncate">{pr.title}</Table.Cell>
+						<Table.Cell class="px-2 py-1.5">
+							<Tooltip.Provider>
+								<Tooltip.Root>
+									<Tooltip.Trigger>
+										{#snippet child({ props })}
+											<span {...props} class="block truncate">{pr.title}</span>
+										{/snippet}
+									</Tooltip.Trigger>
+									<Tooltip.Content class="max-w-sm text-xs leading-snug">{pr.title}</Tooltip.Content>
+								</Tooltip.Root>
+							</Tooltip.Provider>
+						</Table.Cell>
 						<Table.Cell class="px-2 py-1.5">
 							<Badge variant="outline" class={pr.state === 'open' ? GREEN_BADGE : RED_BADGE}>{pr.state}</Badge>
 						</Table.Cell>

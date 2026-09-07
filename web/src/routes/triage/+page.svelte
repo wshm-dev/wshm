@@ -8,6 +8,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
 	import * as Table from '$lib/components/ui/table';
+	import * as Tooltip from '$lib/components/ui/tooltip';
 	import TablePagination from '$lib/components/TablePagination.svelte';
 	import FilterSelect from '$lib/components/FilterSelect.svelte';
 
@@ -118,7 +119,7 @@
 	</div>
 {:else}
 	<div class="rounded-lg border">
-		<Table.Root class="w-full">
+		<Table.Root class="w-full table-fixed">
 			<Table.Header class="text-xs uppercase text-muted-foreground">
 				<Table.Row>
 					<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[70px]" onclick={(e: MouseEvent) => handleSort('issue_number', e)}>
@@ -133,7 +134,8 @@
 					<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[90px]" onclick={(e: MouseEvent) => handleSort('priority', e)}>
 						Priority <span class={sortArrowClass(sortColumns, 'priority')}>{sortArrow(sortColumns, 'priority')}</span>{#if sortIndex(sortColumns, 'priority') > 0}<span class="text-[0.625rem] text-primary ml-0.5">{sortIndex(sortColumns, 'priority')}</span>{/if}
 					</Table.Head>
-					<Table.Head class="cursor-pointer select-none px-2 py-1.5" onclick={(e: MouseEvent) => handleSort('acted_at', e)}>
+					<Table.Head class="px-2 py-1.5">Summary</Table.Head>
+					<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[110px]" onclick={(e: MouseEvent) => handleSort('acted_at', e)}>
 						Acted At <span class={sortArrowClass(sortColumns, 'acted_at')}>{sortArrow(sortColumns, 'acted_at')}</span>{#if sortIndex(sortColumns, 'acted_at') > 0}<span class="text-[0.625rem] text-primary ml-0.5">{sortIndex(sortColumns, 'acted_at')}</span>{/if}
 					</Table.Head>
 				</Table.Row>
@@ -144,6 +146,7 @@
 					<Table.Cell class="px-2 py-1"><FilterSelect bind:value={filters.category} options={categoryOptions} /></Table.Cell>
 					<Table.Cell class="px-2 py-1"><Input type="text" bind:value={filters.confidence} placeholder=">85" class="h-7 px-1 text-xs" /></Table.Cell>
 					<Table.Cell class="px-2 py-1"><FilterSelect bind:value={filters.priority} options={priorityOptions} /></Table.Cell>
+					<Table.Cell class="px-2 py-1"></Table.Cell>
 					<Table.Cell class="px-2 py-1"><Input type="text" bind:value={filters.acted_at} placeholder="filter..." class="h-7 px-1 text-xs" /></Table.Cell>
 				</Table.Row>
 				{#each sorted as result}
@@ -156,13 +159,29 @@
 							<span class="mono font-semibold {confidenceColor(result.confidence)}">{(result.confidence * 100).toFixed(0)}%</span>
 						</Table.Cell>
 						<Table.Cell class="px-2 py-1.5">{result.priority}</Table.Cell>
+						<Table.Cell class="px-2 py-1.5 text-muted-foreground">
+							{#if result.summary}
+								<Tooltip.Provider>
+									<Tooltip.Root>
+										<Tooltip.Trigger>
+											{#snippet child({ props })}
+												<span {...props} class="block truncate">{result.summary}</span>
+											{/snippet}
+										</Tooltip.Trigger>
+										<Tooltip.Content class="max-w-sm text-xs leading-snug">{result.summary}</Tooltip.Content>
+									</Tooltip.Root>
+								</Tooltip.Provider>
+							{:else}
+								-
+							{/if}
+						</Table.Cell>
 						<Table.Cell class="px-2 py-1.5 text-muted-foreground" title={result.acted_at ? exactTime(result.acted_at) : undefined}>
 							{result.acted_at ? timeAgo(result.acted_at) : 'Not acted'}
 						</Table.Cell>
 					</Table.Row>
 				{:else}
 					<Table.Row>
-						<Table.Cell colspan={5} class="text-center text-muted-foreground py-8">
+						<Table.Cell colspan={6} class="text-center text-muted-foreground py-8">
 							{#if loading}
 								Loading…
 							{:else}
