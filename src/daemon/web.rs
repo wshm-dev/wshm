@@ -2084,7 +2084,7 @@ async fn api_license_activate(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "status": "error",
-                "message": format!("{e}"),
+                "message": e.to_string(),
             })),
         )
             .into_response(),
@@ -2995,7 +2995,15 @@ async fn api_auth_status(State(state): State<Arc<WebState>>) -> impl IntoRespons
         false
     };
 
-    let github = secrets_has("github_token").await
+    let github_app = secrets_has("github_app_id").await
+        && secrets_has("github_app_installation_id").await
+        && secrets_has("github_app_private_key").await
+        || (std::env::var("WSHM_GITHUB_APP_ID").is_ok()
+            && std::env::var("WSHM_GITHUB_APP_INSTALLATION_ID").is_ok()
+            && std::env::var("WSHM_GITHUB_APP_PRIVATE_KEY").is_ok());
+
+    let github = github_app
+        || secrets_has("github_token").await
         || creds.contains_key("GITHUB_TOKEN")
         || std::env::var("GITHUB_TOKEN").is_ok()
         || std::env::var("WSHM_TOKEN").is_ok();
@@ -3015,8 +3023,17 @@ async fn api_auth_status(State(state): State<Arc<WebState>>) -> impl IntoRespons
         None
     };
 
+    let github_kind = if github_app {
+        Some("app")
+    } else if github {
+        Some("token")
+    } else {
+        None
+    };
+
     Json(json!({
         "github": github,
+        "github_kind": github_kind,
         "anthropic": anthropic_kind,
     }))
 }
@@ -3511,19 +3528,26 @@ async fn api_secrets_put(
                 "api_secrets_put: store.put OK — row id={id}"
             );
             // Hot-reload affected daemon clients so the new token / API key
-            // takes effect without a restart. Only github_token reloads the
-            // GhClient today; other keys are read on-demand by the relevant
-            // pipeline so no reload is needed.
-            if key.trim() == "github_token" {
+            // takes effect without a restart. GitHub-auth keys (PAT or the
+            // three GitHub App fields) reload the GhClient; other keys are
+            // read on-demand by the relevant pipeline so no reload is needed.
+            const GITHUB_AUTH_KEYS: [&str; 4] = [
+                "github_token",
+                "github_app_id",
+                "github_app_installation_id",
+                "github_app_private_key",
+            ];
+            if GITHUB_AUTH_KEYS.contains(&key.trim()) {
                 tracing::debug!(
                     target: "wshm_core::secrets_trace",
-                    "api_secrets_put: key is github_token — triggering reload"
+                    "api_secrets_put: key={:?} is a GitHub auth key — triggering reload",
+                    key.trim()
                 );
                 reload_github_clients(&state, scope, effective_slug).await;
             } else {
                 tracing::debug!(
                     target: "wshm_core::secrets_trace",
-                    "api_secrets_put: key={:?} ≠ github_token — no reload",
+                    "api_secrets_put: key={:?} is not a GitHub auth key — no reload",
                     key.trim()
                 );
             }

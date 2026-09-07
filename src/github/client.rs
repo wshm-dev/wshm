@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use octocrab::models::{AppId, InstallationId};
 use octocrab::Octocrab;
 use tracing::debug;
 
@@ -20,21 +21,55 @@ pub struct Client {
     pub authenticated: bool,
 }
 
+/// Build the `Octocrab` auth layer: GitHub App (self-refreshing installation
+/// token, preferred for an unattended bot) if fully configured, else a
+/// static personal/legacy token, else anonymous. Returns whether the
+/// resulting client is authenticated.
+fn build_octocrab(config: &Config) -> Result<(Octocrab, bool)> {
+    if let Some(app_auth) = config.github_app_auth_optional() {
+        let key = jsonwebtoken::EncodingKey::from_rsa_pem(app_auth.private_key_pem.as_bytes())
+            .context(
+                "Invalid GitHub App private key (expected a PEM-encoded RSA key, \
+                 e.g. the .pem file GitHub gives you when you generate a private key \
+                 for the App)",
+            )?;
+        let app_client = Octocrab::builder()
+            .app(AppId(app_auth.app_id), key)
+            .build()
+            .context("Failed to create GitHub App client")?;
+        let installation_client = app_client
+            .installation(InstallationId(app_auth.installation_id))
+            .context("Failed to scope GitHub App client to its installation")?;
+        tracing::info!(
+            target: "wshm_core::github",
+            app_id = app_auth.app_id,
+            installation_id = app_auth.installation_id,
+            "GitHub client authenticated as App installation (self-refreshing token)"
+        );
+        return Ok((installation_client, true));
+    }
+
+    let token = config.github_token_optional();
+    let authenticated = token.is_some();
+    let mut builder = Octocrab::builder();
+    if let Some(t) = token {
+        builder = builder.personal_token(t);
+    } else {
+        tracing::warn!(
+            target: "wshm_core::github",
+            "GitHub client built without a token — anonymous mode (60 req/h, public repos read-only). \
+             Add a token in Settings → Secrets for full functionality."
+        );
+    }
+    Ok((
+        builder.build().context("Failed to create GitHub client")?,
+        authenticated,
+    ))
+}
+
 impl Client {
     pub fn new(config: &Config) -> Result<Self> {
-        let token = config.github_token_optional();
-        let authenticated = token.is_some();
-        let mut builder = Octocrab::builder();
-        if let Some(t) = token {
-            builder = builder.personal_token(t);
-        } else {
-            tracing::warn!(
-                target: "wshm_core::github",
-                "GitHub client built without a token — anonymous mode (60 req/h, public repos read-only). \
-                 Add a token in Settings → Secrets for full functionality."
-            );
-        }
-        let octocrab = builder.build().context("Failed to create GitHub client")?;
+        let (octocrab, authenticated) = build_octocrab(config)?;
 
         let http = reqwest::Client::builder()
             .user_agent("wshm")
@@ -90,8 +125,8 @@ impl Client {
     pub fn require_auth(&self, action: &str) -> Result<()> {
         if !self.authenticated {
             anyhow::bail!(
-                "{action}: GitHub auth required. Add a github_token in \
-                 Settings → Secrets, or set GITHUB_TOKEN."
+                "{action}: GitHub auth required. Add a github_token (or GitHub App \
+                 credentials) in Settings → Secrets, or set GITHUB_TOKEN."
             );
         }
         Ok(())
