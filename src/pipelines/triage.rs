@@ -384,6 +384,18 @@ async fn triage_issue(
         user_prompt.push_str(&domains_prompt);
     }
 
+    // Inject configured Skills that apply to triage (see config::skills_prompt).
+    let skills: Vec<crate::config::SkillDef> = db
+        .get_app_setting(crate::db::settings::SKILLS_KEY)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let skills_prompt = crate::config::skills_prompt(&skills, "triage");
+    if !skills_prompt.is_empty() {
+        user_prompt.push_str(&skills_prompt);
+    }
+
     if !icm_context.is_empty() {
         user_prompt.push_str(&format!(
             "\n\n## Past triage context (from memory)\n{icm_context}"

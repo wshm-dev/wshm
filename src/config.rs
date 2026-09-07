@@ -677,6 +677,53 @@ pub fn domains_prompt(domains: &[DomainDef], custom: Option<&str>) -> String {
     out
 }
 
+/// A named block of standing instructions the AI review should follow when
+/// it applies — the same idea as an Anthropic Agent Skill (a reusable
+/// capability the model loads when relevant), scoped here to wshm's own
+/// triage/PR-review calls rather than a whole Claude session. Users write
+/// these in Settings; `skills_prompt` renders the ones that match the
+/// current pipeline into the user prompt, right after domains.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SkillDef {
+    /// Short human name (e.g. "rust-error-handling").
+    pub name: String,
+
+    /// One-line summary shown in the Settings list — NOT sent to the AI.
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// The actual instructions appended to the prompt verbatim.
+    pub content: String,
+
+    /// Which pipelines this skill applies to: any of "triage", "pr_review".
+    /// Empty means both.
+    #[serde(default)]
+    pub pipelines: Vec<String>,
+
+    /// Skills can be authored but temporarily switched off without deleting them.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// Build the AI-prompt fragment listing the skills that apply to `pipeline`
+/// ("triage" or "pr_review"). Mirrors [`domains_prompt`]'s DB-backed,
+/// stateless-pods-safe pattern — see its doc comment for why this isn't TOML.
+/// Returns empty when no enabled skill matches.
+pub fn skills_prompt(skills: &[SkillDef], pipeline: &str) -> String {
+    let matching: Vec<&SkillDef> = skills
+        .iter()
+        .filter(|s| s.enabled && (s.pipelines.is_empty() || s.pipelines.iter().any(|p| p == pipeline)))
+        .collect();
+    if matching.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n## Skills — standing instructions to apply to this review:\n");
+    for skill in matching {
+        out.push_str(&format!("\n### {}\n{}\n", skill.name, skill.content.trim()));
+    }
+    out
+}
+
 /// A "grand domain" — a broad area of the codebase/product (e.g. codex, bun,
 /// c#). Multi-valued per PR/issue, assigned by the AI review, and surfaced as
 /// filters in the PR network graph. Mirrors [`LabelDef`] minus the color/when.
@@ -2405,5 +2452,38 @@ mod tests {
         for v in VARS {
             std::env::remove_var(v);
         }
+    }
+
+    fn skill(name: &str, pipelines: &[&str], enabled: bool) -> SkillDef {
+        SkillDef {
+            name: name.to_string(),
+            description: None,
+            content: format!("do {name} things"),
+            pipelines: pipelines.iter().map(|s| s.to_string()).collect(),
+            enabled,
+        }
+    }
+
+    #[test]
+    fn test_skills_prompt_filters_by_pipeline_and_enabled() {
+        let skills = vec![
+            skill("triage-only", &["triage"], true),
+            skill("pr-only", &["pr_review"], true),
+            skill("both", &[], true),
+            skill("disabled", &["triage"], false),
+        ];
+
+        let triage = skills_prompt(&skills, "triage");
+        assert!(triage.contains("triage-only"));
+        assert!(triage.contains("both"));
+        assert!(!triage.contains("pr-only"));
+        assert!(!triage.contains("disabled"));
+
+        let pr = skills_prompt(&skills, "pr_review");
+        assert!(pr.contains("pr-only"));
+        assert!(pr.contains("both"));
+        assert!(!pr.contains("triage-only"));
+
+        assert_eq!(skills_prompt(&[], "triage"), "");
     }
 }

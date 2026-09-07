@@ -2476,6 +2476,94 @@ async fn api_repo_domains_patch(
     Json(json!({ "domains": domains, "review_prompt": prompt, "limit": limit })).into_response()
 }
 
+/// GET /api/v1/repos/{slug}/skills -- read the configured AI review skills.
+/// DB-backed (app_settings), same rationale as domains: survives stateless
+/// pod restarts and is shared across replicas.
+async fn api_repo_skills_get(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> Response {
+    let repos = state.multi.repos.read().await;
+    match repos.get(&slug) {
+        Some(ds) => {
+            let skills: Vec<crate::config::SkillDef> = ds
+                .db
+                .get_app_setting(crate::db::settings::SKILLS_KEY)
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            Json(json!({ "skills": skills })).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("repo '{slug}' not configured")})),
+        )
+            .into_response(),
+    }
+}
+
+/// PATCH /api/v1/repos/{slug}/skills -- replace the configured skills list.
+/// Body: `{ "skills": [{ "name", "description", "content", "pipelines", "enabled" }] }`.
+/// Persists to the DB (app_settings), effective on the next triage/PR review
+/// pass across every pod — no restart needed.
+async fn api_repo_skills_patch(
+    State(state): State<Arc<WebState>>,
+    user: axum::Extension<Option<crate::auth::User>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if state.users.is_some() {
+        if let Err(e) = require_admin(&user) {
+            return e;
+        }
+    }
+
+    let repos = state.multi.repos.read().await;
+    let ds = match repos.get(&slug) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("repo '{slug}' not configured")})),
+            )
+                .into_response();
+        }
+    };
+    drop(repos);
+
+    let skills = match body.get("skills") {
+        Some(s) => match serde_json::from_value::<Vec<crate::config::SkillDef>>(s.clone()) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid skills: {e}")})),
+                )
+                    .into_response();
+            }
+        },
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "skills is required"})),
+            )
+                .into_response();
+        }
+    };
+
+    let json_str = serde_json::to_string(&skills).unwrap_or_else(|_| "[]".into());
+    if let Err(e) = ds.db.set_app_setting(crate::db::settings::SKILLS_KEY, &json_str) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+
+    Json(json!({ "skills": skills })).into_response()
+}
+
 /// POST /api/v1/repos/{slug}/domains/discover -- infer the repo's grand domains
 /// from the frequency of subjects across ALL its PR & issue titles and merge
 /// the top ones into the DB set as PROPOSED. Deterministic and instant (no AI),
@@ -3759,6 +3847,10 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         .route(
             "/api/v1/repos/{slug}/domains/discover",
             post(api_repo_domains_discover),
+        )
+        .route(
+            "/api/v1/repos/{slug}/skills",
+            get(api_repo_skills_get).patch(api_repo_skills_patch),
         )
         .route("/api/v1/pr-groups", get(api_pr_groups_get))
         .route("/api/v1/issue-groups", get(api_issue_groups_get))

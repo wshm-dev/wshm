@@ -595,6 +595,40 @@ export async function discoverRepoDomains(slug: string, limit?: number): Promise
 	return res.json();
 }
 
+/** A standing instruction block the AI review loads when it applies —
+ *  the same idea as an Anthropic Agent Skill, scoped to wshm's own
+ *  triage/PR-review prompts. Stored in the DB (works on stateless pods). */
+export interface Skill {
+	name: string;
+	description?: string | null;
+	content: string;
+	/** Which pipelines this applies to: "triage" and/or "pr_review". Empty = both. */
+	pipelines: string[];
+	enabled: boolean;
+}
+
+export async function fetchRepoSkills(slug: string): Promise<{ skills: Skill[] }> {
+	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/skills`);
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.error ?? `HTTP ${res.status}`);
+	}
+	return res.json();
+}
+
+export async function updateRepoSkills(slug: string, skills: Skill[]): Promise<{ skills: Skill[] }> {
+	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/skills`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json', ...CSRF_HEADERS },
+		body: JSON.stringify({ skills })
+	});
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.error ?? `HTTP ${res.status}`);
+	}
+	return res.json();
+}
+
 /** A pull request referenced by a subgroup in the PR network graph. */
 export interface PrGroupPr {
 	number: number;
