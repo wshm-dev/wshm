@@ -7,7 +7,9 @@
 		fetchPulls,
 		type Summary,
 		type Issue,
-		type PullRequest
+		type PullRequest,
+		type IssueBrief,
+		type PrBrief
 	} from '$lib/api';
 	import { Badge } from '$lib/components/ui/badge';
 	import * as Card from '$lib/components/ui/card';
@@ -50,10 +52,10 @@
 	// high-risk or have merge conflicts. TODAY = the rest of the curated
 	// top_* lists, deduped against NOW. THIS WEEK is just counters.
 	type Bucketed = {
-		nowIssues: Issue[];
-		nowPrs: PullRequest[];
-		todayIssues: Issue[];
-		todayPrs: PullRequest[];
+		nowIssues: IssueBrief[];
+		nowPrs: PrBrief[];
+		todayIssues: IssueBrief[];
+		todayPrs: PrBrief[];
 	};
 
 	let bucketed = $derived.by<Bucketed>(() => {
@@ -62,7 +64,7 @@
 		const nowIssueSet = new Set(nowIssues.map((i) => i.number));
 
 		const nowPrSet = new Set<number>();
-		const nowPrs: PullRequest[] = [];
+		const nowPrs: PrBrief[] = [];
 		for (const pr of summary.high_risk_prs) {
 			if (!nowPrSet.has(pr.number)) {
 				nowPrSet.add(pr.number);
@@ -151,47 +153,47 @@
 	{/if}
 </div>
 
-{#snippet issueRow(issue: Issue)}
-	<li
-		class="flex items-center gap-2 text-sm cursor-pointer hover:bg-muted/50 rounded px-2 py-1"
-		onclick={() => openIssue(issue.number)}
-		onkeydown={(e) => e.key === 'Enter' && openIssue(issue.number)}
-		role="button"
-		tabindex="0"
-	>
-		<span class="mono text-yellow-600 dark:text-yellow-400 text-xs w-12 shrink-0">#{issue.number}</span>
-		{#if issue.priority}
-			{@const b = priorityBadge(issue.priority)}
-			<Badge variant={b.variant} class="shrink-0 {b.class}">{issue.priority}</Badge>
-		{/if}
-		<span class="text-foreground/90 flex-1 truncate">{issue.title}</span>
-		{#if issue.age_days > 0}
-			<span class="text-muted-foreground text-xs mono shrink-0">{issue.age_days}d</span>
-		{/if}
-		<span class="text-muted-foreground shrink-0">→</span>
+{#snippet issueRow(issue: IssueBrief)}
+	<li>
+		<button
+			type="button"
+			class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted/50"
+			onclick={() => openIssue(issue.number)}
+		>
+			<span class="mono text-yellow-600 dark:text-yellow-400 text-xs w-12 shrink-0">#{issue.number}</span>
+			{#if issue.priority}
+				{@const b = priorityBadge(issue.priority)}
+				<Badge variant={b.variant} class="shrink-0 {b.class}">{issue.priority}</Badge>
+			{/if}
+			<span class="text-foreground/90 flex-1 truncate" title={issue.title}>{issue.title}</span>
+			{#if issue.age_days > 0}
+				<span class="text-muted-foreground text-xs mono shrink-0">{issue.age_days}d</span>
+			{/if}
+			<span class="text-muted-foreground shrink-0">→</span>
+		</button>
 	</li>
 {/snippet}
 
-{#snippet prRow(pr: PullRequest)}
-	<li
-		class="flex items-center gap-2 text-sm cursor-pointer hover:bg-muted/50 rounded px-2 py-1"
-		onclick={() => openPr(pr.number)}
-		onkeydown={(e) => e.key === 'Enter' && openPr(pr.number)}
-		role="button"
-		tabindex="0"
-	>
-		<span class="mono text-yellow-600 dark:text-yellow-400 text-xs w-12 shrink-0">#{pr.number}</span>
-		{#if pr.has_conflicts}
-			<Badge variant="outline" class="shrink-0 border-red-500/30 bg-red-500/15 text-red-600 dark:text-red-400">conflict</Badge>
-		{:else if pr.risk_level}
-			{@const b = priorityBadge(pr.risk_level)}
-			<Badge variant={b.variant} class="shrink-0 {b.class}">{pr.risk_level}</Badge>
-		{/if}
-		<span class="text-foreground/90 flex-1 truncate">{pr.title}</span>
-		{#if pr.age_days > 0}
-			<span class="text-muted-foreground text-xs mono shrink-0">{pr.age_days}d</span>
-		{/if}
-		<span class="text-muted-foreground shrink-0">→</span>
+{#snippet prRow(pr: PrBrief)}
+	<li>
+		<button
+			type="button"
+			class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted/50"
+			onclick={() => openPr(pr.number)}
+		>
+			<span class="mono text-yellow-600 dark:text-yellow-400 text-xs w-12 shrink-0">#{pr.number}</span>
+			{#if pr.has_conflicts}
+				<Badge variant="outline" class="shrink-0 border-red-500/30 bg-red-500/15 text-red-600 dark:text-red-400">conflict</Badge>
+			{:else if pr.risk_level}
+				{@const b = priorityBadge(pr.risk_level)}
+				<Badge variant={b.variant} class="shrink-0 {b.class}">{pr.risk_level}</Badge>
+			{/if}
+			<span class="text-foreground/90 flex-1 truncate" title={pr.title}>{pr.title}</span>
+			{#if pr.age_days > 0}
+				<span class="text-muted-foreground text-xs mono shrink-0">{pr.age_days}d</span>
+			{/if}
+			<span class="text-muted-foreground shrink-0">→</span>
+		</button>
 	</li>
 {/snippet}
 
@@ -208,7 +210,7 @@
 	{@const nowCount = bucketed.nowIssues.length + bucketed.nowPrs.length}
 	{@const todayCount = bucketed.todayIssues.length + bucketed.todayPrs.length}
 
-	<div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+	<div class="grid grid-cols-1 gap-4 mb-4 lg:grid-cols-[1fr_1.3fr_0.8fr]">
 		<!-- NOW column: red accent — drop everything and look at this. -->
 		<Card.Root
 			class="border-l-4 {nowCount > 0 ? 'border-l-red-500' : 'border-l-border'}"
