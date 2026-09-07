@@ -712,7 +712,9 @@ pub struct SkillDef {
 pub fn skills_prompt(skills: &[SkillDef], pipeline: &str) -> String {
     let matching: Vec<&SkillDef> = skills
         .iter()
-        .filter(|s| s.enabled && (s.pipelines.is_empty() || s.pipelines.iter().any(|p| p == pipeline)))
+        .filter(|s| {
+            s.enabled && (s.pipelines.is_empty() || s.pipelines.iter().any(|p| p == pipeline))
+        })
         .collect();
     if matching.is_empty() {
         return String::new();

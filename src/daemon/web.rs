@@ -2553,7 +2553,10 @@ async fn api_repo_skills_patch(
     };
 
     let json_str = serde_json::to_string(&skills).unwrap_or_else(|_| "[]".into());
-    if let Err(e) = ds.db.set_app_setting(crate::db::settings::SKILLS_KEY, &json_str) {
+    if let Err(e) = ds
+        .db
+        .set_app_setting(crate::db::settings::SKILLS_KEY, &json_str)
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
