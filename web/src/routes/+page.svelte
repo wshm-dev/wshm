@@ -65,7 +65,9 @@
 		<Card.Root class="text-center">
 			<Card.Content>
 				<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Conflicts</div>
-				<div class="text-3xl font-bold text-foreground mono">{status?.conflicts ?? '--'}</div>
+				<div
+					class="text-3xl font-bold mono {status?.conflicts ? 'text-red-600 dark:text-red-400' : 'text-foreground'}"
+				>{status?.conflicts ?? '--'}</div>
 			</Card.Content>
 		</Card.Root>
 	</div>
@@ -100,7 +102,9 @@
 								<Table.Cell class="px-2 py-1.5 mono text-right">{repo.open_issues}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5 mono text-right">{repo.open_prs}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5 mono text-right">{repo.untriaged}</Table.Cell>
-								<Table.Cell class="px-2 py-1.5 mono text-right">{repo.conflicts}</Table.Cell>
+								<Table.Cell
+									class="px-2 py-1.5 mono text-right {repo.conflicts ? 'text-red-600 dark:text-red-400' : ''}"
+								>{repo.conflicts}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5 text-muted-foreground" title={exactTime(repo.last_sync)}>{timeAgo(repo.last_sync)}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5">
 									{#if repo.apply}

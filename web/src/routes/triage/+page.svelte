@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { selectedRepo } from '$lib/stores';
 	import { fetchTriage, type TriageResult } from '$lib/api';
+	import { timeAgo, exactTime } from '$lib/time';
 	import { multiSort, toggleSort as toggle, sortArrow, sortIndex, sortArrowClass, type SortColumn } from '$lib/sort';
 	import { applyFilters, distinctValues } from '$lib/filter';
 	import { Badge } from '$lib/components/ui/badge';
@@ -155,7 +156,9 @@
 							<span class="mono font-semibold {confidenceColor(result.confidence)}">{(result.confidence * 100).toFixed(0)}%</span>
 						</Table.Cell>
 						<Table.Cell class="px-2 py-1.5">{result.priority}</Table.Cell>
-						<Table.Cell class="px-2 py-1.5 text-muted-foreground">{result.acted_at ?? 'Not acted'}</Table.Cell>
+						<Table.Cell class="px-2 py-1.5 text-muted-foreground" title={result.acted_at ? exactTime(result.acted_at) : undefined}>
+							{result.acted_at ? timeAgo(result.acted_at) : 'Not acted'}
+						</Table.Cell>
 					</Table.Row>
 				{:else}
 					<Table.Row>

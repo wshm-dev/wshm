@@ -61,8 +61,8 @@
 <div class="mb-4">
 	<h2 class="text-xl font-semibold text-foreground mb-1">Graphs</h2>
 	<p class="text-sm text-muted-foreground">
-		Pull requests and issues clustered by subject across the whole DB — grands groupes and their
-		sous-groupes — plus how the backlog evolved over time.
+		Pull requests and issues clustered by subject across the whole DB — top-level groups and their
+		subgroups — plus how the backlog evolved over time.
 	</p>
 </div>
 
