@@ -14,7 +14,7 @@ Works with GitHub, GitLab, Gitea, and Azure DevOps. Plug in Claude Max, OpenAI, 
 
 > 🧪 Built and battle-tested at **[RTK-ai Labs](https://rtk-ai.app)** — born out of the daily backlog pain on [**rtk-ai/rtk**](https://github.com/rtk-ai/rtk) (Rust Token Killer), now used in production by the team to run its own repos.
 
-[![License: SSPL](https://img.shields.io/badge/License-SSPL--1.0-blue.svg)](LICENSE)
+[![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 ![Linux](https://img.shields.io/badge/Linux-x64%20%7C%20ARM-yellow?logo=linux)
 ![Windows](https://img.shields.io/badge/Windows-x64-blue?logo=windows)
@@ -716,25 +716,25 @@ See [CLAUDE.md](CLAUDE.md) for the full architecture document.
 
 ## License
 
-This project is licensed under the **[Server Side Public License (SSPL v1)](LICENSE)**.
+This project is licensed under the **[Business Source License 1.1 (BUSL-1.1)](LICENSE)**. On 2029-09-07 it automatically converts to the **Apache License 2.0** — a permissive open source license — for every version released before that date.
 
 ### What you CAN do
 
 - Use wshm for any purpose (personal, commercial, enterprise)
 - Read, study, and audit every line of code
 - Modify the code for your own internal use
+- Self-host it, including in production
 - Contribute back to the project
 
 ### What you CANNOT do
 
-- Offer wshm (or a modified version) as a managed/hosted service to third parties without releasing your entire service stack under the SSPL
-- Build a competing commercial service based on this code
+- Offer wshm (or a modified version) as a managed/hosted service to third parties that competes with wshm Pro, without a separate commercial agreement
 
-### Why SSPL?
+### Why BUSL?
 
-We believe in transparency. You should be able to audit the tool that manages your repositories. But we also need to sustain development — the SSPL ensures that no one can take this work and sell it as their own service without contributing back.
+We believe in transparency. You should be able to audit the tool that manages your repositories. But we also need to sustain development — BUSL ensures that no one can take this work and sell it as a competing hosted service without contributing back, while guaranteeing the code becomes fully open source (Apache 2.0) a few years down the line.
 
-This is the same model used by **MongoDB**, **Elastic**, and **Graylog**.
+This is the same model used by **HashiCorp**, **Sentry**, and **CockroachDB**.
 
 For enterprise licensing or questions: [contact@wshm.dev](mailto:contact@wshm.dev)
 
@@ -819,11 +819,11 @@ Full guides in [`docs/`](./docs):
 
 **Pro features** live in a separate crate (`wshm-pro`, not open source) and attach via runtime hooks.
 
-## Why SSPL?
+## Why BUSL?
 
-Like MongoDB and Elastic, wshm uses the [Server Side Public License v1](./LICENSE). You can use, modify, and self-host freely. The only restriction: if you offer wshm as a **hosted SaaS service** to third parties, you must open-source your entire service stack.
+Like HashiCorp and Sentry, wshm uses the [Business Source License 1.1](./LICENSE). You can use, modify, and self-host freely, including in production. The only restriction: you can't offer wshm as a **competing hosted SaaS service** to third parties. And unlike a permanent restriction, this one expires — every version converts to the permissive Apache 2.0 license on 2029-09-07.
 
-This protects the business model while keeping the core truly open for self-hosted use. 99% of users will never hit the SSPL restriction.
+This protects the business model while keeping the core truly open for self-hosted use, and guarantees the code becomes fully open source over time. 99% of users will never hit the BUSL restriction.
 
 ## Contributing
 
@@ -845,4 +845,4 @@ By using wshm you acknowledge that you have read, understood, and agreed to thes
 
 ## License
 
-[SSPL-1.0](./LICENSE) — Copyright © 2025-2026 wshm-dev
+[BUSL-1.1](./LICENSE) — Copyright © 2025-2026 wshm-dev — converts to Apache 2.0 on 2029-09-07
