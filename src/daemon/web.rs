@@ -2084,7 +2084,7 @@ async fn api_license_activate(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "status": "error",
-                "message": format!("{e}"),
+                "message": e.to_string(),
             })),
         )
             .into_response(),
