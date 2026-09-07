@@ -14,6 +14,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import * as Card from '$lib/components/ui/card';
 	import * as Dialog from '$lib/components/ui/dialog';
+	import * as Tooltip from '$lib/components/ui/tooltip';
 	import IssueDetail from '$lib/components/IssueDetail.svelte';
 	import PrDetail from '$lib/components/PrDetail.svelte';
 
@@ -165,7 +166,16 @@
 				{@const b = priorityBadge(issue.priority)}
 				<Badge variant={b.variant} class="shrink-0 {b.class}">{issue.priority}</Badge>
 			{/if}
-			<span class="text-foreground/90 flex-1 truncate" title={issue.title}>{issue.title}</span>
+			<Tooltip.Provider>
+				<Tooltip.Root>
+					<Tooltip.Trigger>
+						{#snippet child({ props })}
+							<span {...props} class="text-foreground/90 flex-1 truncate">{issue.title}</span>
+						{/snippet}
+					</Tooltip.Trigger>
+					<Tooltip.Content class="max-w-sm text-xs leading-snug">{issue.title}</Tooltip.Content>
+				</Tooltip.Root>
+			</Tooltip.Provider>
 			{#if issue.age_days > 0}
 				<span class="text-muted-foreground text-xs mono shrink-0">{issue.age_days}d</span>
 			{/if}
@@ -188,7 +198,16 @@
 				{@const b = priorityBadge(pr.risk_level)}
 				<Badge variant={b.variant} class="shrink-0 {b.class}">{pr.risk_level}</Badge>
 			{/if}
-			<span class="text-foreground/90 flex-1 truncate" title={pr.title}>{pr.title}</span>
+			<Tooltip.Provider>
+				<Tooltip.Root>
+					<Tooltip.Trigger>
+						{#snippet child({ props })}
+							<span {...props} class="text-foreground/90 flex-1 truncate">{pr.title}</span>
+						{/snippet}
+					</Tooltip.Trigger>
+					<Tooltip.Content class="max-w-sm text-xs leading-snug">{pr.title}</Tooltip.Content>
+				</Tooltip.Root>
+			</Tooltip.Provider>
 			{#if pr.age_days > 0}
 				<span class="text-muted-foreground text-xs mono shrink-0">{pr.age_days}d</span>
 			{/if}
