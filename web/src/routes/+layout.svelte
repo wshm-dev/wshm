@@ -455,8 +455,8 @@
 		<Sidebar.Rail />
 	</Sidebar.Root>
 
-	<Sidebar.Inset>
-		<main class="p-3">
+	<Sidebar.Inset class="min-w-0">
+		<main class="min-w-0 p-3">
 			{#if authStatus && !authStatus.github && bannerOpen}
 				<Alert.Root
 					class="mb-3 border-yellow-500/40 bg-yellow-500/10 text-yellow-700 dark:text-yellow-200 [&>svg]:text-yellow-500"
