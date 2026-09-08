@@ -1060,7 +1060,10 @@ struct StatusResponse {
 /// String comparison works because RFC3339 timestamps sort lexicographically
 /// by time — no parsing needed for a "since N days ago" cutoff.
 fn count_created_since<T>(items: &[T], created_at: impl Fn(&T) -> &str, cutoff: &str) -> usize {
-    items.iter().filter(|item| created_at(item) >= cutoff).count()
+    items
+        .iter()
+        .filter(|item| created_at(item) >= cutoff)
+        .count()
 }
 
 #[derive(Serialize)]
