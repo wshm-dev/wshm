@@ -224,6 +224,64 @@ impl Client {
         Ok(map)
     }
 
+    /// Fetch combined CI status for every open PR, number → state.
+    ///
+    /// GitHub's `/pulls` list carries no CI info, and there's no per-PR
+    /// combined-status endpoint worth calling N times over — mirrors
+    /// `fetch_review_decisions`: three `status:*` Search API qualifiers,
+    /// same endpoint/retry/1000-result cap, no extra request budget spent
+    /// per PR. A PR matching none of the three (no commit statuses/check
+    /// runs reported yet) is simply absent from the map.
+    pub async fn fetch_ci_statuses(
+        &self,
+    ) -> Result<std::collections::HashMap<u64, Option<String>>> {
+        let mut map = std::collections::HashMap::new();
+        for (qualifier, state) in [
+            ("status:success", "success"),
+            ("status:failure", "failure"),
+            ("status:pending", "pending"),
+        ] {
+            let query = format!(
+                "repo:{}/{} is:pr is:open {qualifier}",
+                self.owner, self.repo
+            );
+            let mut page = 1u32;
+            loop {
+                let url = format!(
+                    "https://api.github.com/search/issues?q={}&per_page=100&page={page}",
+                    urlencoding::encode(&query)
+                );
+                let body = crate::retry::with_retry("github: search ci statuses", || async {
+                    let resp = self
+                        .octocrab
+                        ._get(&url)
+                        .await
+                        .context("Failed to search CI statuses")?;
+                    self.octocrab
+                        .body_to_string(resp)
+                        .await
+                        .context("Failed to read search response body")
+                })
+                .await?;
+                let json: serde_json::Value = serde_json::from_str(&body)
+                    .context("Failed to parse ci-status search response")?;
+                let items = json["items"].as_array().cloned().unwrap_or_default();
+                let n = items.len();
+                for item in &items {
+                    if let Some(number) = item["number"].as_u64() {
+                        map.insert(number, Some(state.to_string()));
+                    }
+                }
+                // The Search API caps results at 1000 (10 pages of 100).
+                if n < 100 || page >= 10 {
+                    break;
+                }
+                page += 1;
+            }
+        }
+        Ok(map)
+    }
+
     /// Fetch pull requests filtered by state ("open", "closed", or "all").
     /// Used by incremental sync to fetch only open PRs (saves bandwidth).
     pub async fn fetch_pulls_by_state(&self, state: &str) -> Result<Vec<PullRequest>> {

@@ -125,6 +125,19 @@ pub trait DatabaseBackend: Send + Sync {
         Ok(0)
     }
 
+    /// Apply freshly-synced CI statuses (PR number → state) to open PRs;
+    /// PRs absent from the map get their status cleared. Backs the CI
+    /// column on the PRs and Merge Queue views. Default no-op returning 0
+    /// so backends without the column keep compiling — real backends
+    /// override it.
+    fn set_ci_statuses(
+        &self,
+        statuses: &std::collections::HashMap<u64, Option<String>>,
+    ) -> Result<u64> {
+        let _ = statuses;
+        Ok(0)
+    }
+
     /// Read a runtime K/V setting (DB-backed so it survives on stateless pods
     /// and is shared across replicas). Default: unset. Real backends override.
     fn get_app_setting(&self, key: &str) -> Result<Option<String>> {
@@ -402,6 +415,13 @@ impl DatabaseBackend for super::Database {
 
     fn set_pull_reactions(&self, reactions: &std::collections::HashMap<u64, u32>) -> Result<u64> {
         self.set_pull_reactions(reactions)
+    }
+
+    fn set_ci_statuses(
+        &self,
+        statuses: &std::collections::HashMap<u64, Option<String>>,
+    ) -> Result<u64> {
+        self.set_ci_statuses(statuses)
     }
 
     fn get_app_setting(&self, key: &str) -> Result<Option<String>> {

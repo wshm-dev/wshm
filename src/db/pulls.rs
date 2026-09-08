@@ -178,6 +178,39 @@ impl Database {
         self.with_conn(|conn| get_pull(conn, number))
     }
 
+    /// Apply freshly-synced CI statuses to open PRs; PRs absent from the map
+    /// (no commit status/check run reported) get their status cleared, same
+    /// "absence clears it" contract as `set_review_decisions`. Backs the CI
+    /// column on the PRs and Merge Queue views. Returns the number of PRs
+    /// whose status changed.
+    pub fn set_ci_statuses(
+        &self,
+        statuses: &std::collections::HashMap<u64, Option<String>>,
+    ) -> Result<u64> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let mut changed = 0u64;
+            {
+                let mut current =
+                    tx.prepare("SELECT number, ci_status FROM pull_requests WHERE state = 'open'")?;
+                let rows: Vec<(u64, Option<String>)> = current
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<_, _>>()?;
+                let mut update =
+                    tx.prepare("UPDATE pull_requests SET ci_status = ?1 WHERE number = ?2")?;
+                for (number, old) in rows {
+                    let new = statuses.get(&number).cloned().unwrap_or(None);
+                    if new != old {
+                        update.execute(params![new, number])?;
+                        changed += 1;
+                    }
+                }
+            }
+            tx.commit()?;
+            Ok(changed)
+        })
+    }
+
     /// Apply freshly-synced 👍 (+1) reaction counts to open PRs. Mirrors
     /// `set_review_decisions`: maintained by a dedicated sync pass, NOT the
     /// upsert (GitHub's `/pulls` list carries no reactions). `reactions` maps
