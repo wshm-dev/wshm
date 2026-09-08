@@ -208,6 +208,19 @@ async fn sync_pulls_finalize(
         Err(e) => tracing::warn!("Failed to fetch PR reactions: {e}"),
     }
 
+    // CI status backs the CI column on the PRs and Merge Queue views — never
+    // populated by the /pulls list itself. Same best-effort contract as
+    // review decisions/reactions: a Search API failure leaves prior statuses
+    // untouched.
+    match gh.fetch_ci_statuses().await {
+        Ok(statuses) => match db.set_ci_statuses(&statuses) {
+            Ok(0) => {}
+            Ok(n) => info!("CI statuses updated for {n} PR(s)"),
+            Err(e) => tracing::warn!("Failed to store CI statuses: {e}"),
+        },
+        Err(e) => tracing::warn!("Failed to fetch CI statuses: {e}"),
+    }
+
     let now = Utc::now().to_rfc3339();
     db.update_sync_entry("pulls", &now, None)?;
 
