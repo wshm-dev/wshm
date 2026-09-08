@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { page } from '$app/stores';
 	import { selectedRepo } from '$lib/stores';
 	import { fetchPulls, type PullRequest } from '$lib/api';
 	import { multiSort, toggleSort as toggle, sortArrow, sortIndex, sortArrowClass, type SortColumn } from '$lib/sort';
@@ -31,7 +32,8 @@
 	let loading = $state(true);
 	let sortColumns: SortColumn[] = $state([{ key: 'risk_level', asc: true }, { key: 'age', asc: false }]);
 	let filters: Record<string, string> = $state({
-		number: '', title: '', state: '', base_ref: '', risk: '', ci_status: '', conflicts: '', age: ''
+		number: '', title: '', state: '', base_ref: '', risk: '', ci_status: '',
+		conflicts: $page.url.searchParams.get('conflicts') ?? '', age: ''
 	});
 
 	function timeAgo(dateStr: string): string {
