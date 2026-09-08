@@ -151,7 +151,7 @@
 				</Table.Row>
 				{#each sorted as result}
 					<Table.Row>
-						<Table.Cell class="px-2 py-1.5 mono"><a href="/issues">#{result.issue_number}</a></Table.Cell>
+						<Table.Cell class="px-2 py-1.5 mono"><a href="/issues/{result.issue_number}" class="text-primary hover:underline">#{result.issue_number}</a></Table.Cell>
 						<Table.Cell class="px-2 py-1.5">
 							<Badge variant={categoryBadge(result.category).variant} class={categoryBadge(result.category).class}>{result.category}</Badge>
 						</Table.Cell>
