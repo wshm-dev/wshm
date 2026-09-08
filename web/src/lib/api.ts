@@ -53,6 +53,8 @@ export interface Status {
 	open_prs: number;
 	unanalyzed: number;
 	conflicts: number;
+	issues_new_7d: number;
+	prs_new_7d: number;
 	last_sync: string | null;
 	repos: RepoInfo[];
 }

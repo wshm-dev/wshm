@@ -1037,6 +1037,8 @@ struct RepoStatus {
     open_prs: usize,
     unanalyzed: usize,
     conflicts: usize,
+    issues_new_7d: usize,
+    prs_new_7d: usize,
     last_sync: Option<String>,
     apply: bool,
 }
@@ -1048,8 +1050,17 @@ struct StatusResponse {
     open_prs: usize,
     unanalyzed: usize,
     conflicts: usize,
+    issues_new_7d: usize,
+    prs_new_7d: usize,
     last_sync: Option<String>,
     repos: Vec<RepoStatus>,
+}
+
+/// Count items whose `created_at` (RFC3339) falls within the last 7 days.
+/// String comparison works because RFC3339 timestamps sort lexicographically
+/// by time — no parsing needed for a "since N days ago" cutoff.
+fn count_created_since<T>(items: &[T], created_at: impl Fn(&T) -> &str, cutoff: &str) -> usize {
+    items.iter().filter(|item| created_at(item) >= cutoff).count()
 }
 
 #[derive(Serialize)]
@@ -1079,9 +1090,12 @@ async fn api_status(
         open_prs: 0,
         unanalyzed: 0,
         conflicts: 0,
+        issues_new_7d: 0,
+        prs_new_7d: 0,
         last_sync: None,
         repos: Vec::new(),
     };
+    let week_ago = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
 
     // Snapshot the repo map and drop the read guard before the per-repo
     // blocking DB work, so the RwLock is not held across the whole scan
@@ -1107,6 +1121,9 @@ async fn api_status(
             .filter(|pr| pr.mergeable == Some(false))
             .count();
 
+        let issues_new_7d = count_created_since(&open_issues, |i| i.created_at.as_str(), &week_ago);
+        let prs_new_7d = count_created_since(&open_prs, |p| p.created_at.as_str(), &week_ago);
+
         let last_sync = ds
             .db
             .get_sync_entry("issues")
@@ -1121,6 +1138,8 @@ async fn api_status(
             open_prs: open_prs.len(),
             unanalyzed: unanalyzed.len(),
             conflicts,
+            issues_new_7d,
+            prs_new_7d,
             last_sync: last_sync.clone(),
             apply: ds.apply(),
         };
@@ -1130,6 +1149,8 @@ async fn api_status(
         resp.open_prs += repo_status.open_prs;
         resp.unanalyzed += repo_status.unanalyzed;
         resp.conflicts += repo_status.conflicts;
+        resp.issues_new_7d += repo_status.issues_new_7d;
+        resp.prs_new_7d += repo_status.prs_new_7d;
 
         // Use the most recent sync time across repos
         if let Some(ref ls) = last_sync {

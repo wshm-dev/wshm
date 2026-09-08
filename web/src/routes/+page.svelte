@@ -44,32 +44,46 @@
 	</Card.Root>
 {:else}
 	<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-		<Card.Root class="text-center">
-			<Card.Content>
-				<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Open Issues</div>
-				<div class="text-3xl font-bold text-foreground mono">{status?.open_issues ?? '--'}</div>
-			</Card.Content>
-		</Card.Root>
-		<Card.Root class="text-center">
-			<Card.Content>
-				<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Open PRs</div>
-				<div class="text-3xl font-bold text-foreground mono">{status?.open_prs ?? '--'}</div>
-			</Card.Content>
-		</Card.Root>
-		<Card.Root class="text-center">
-			<Card.Content>
-				<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Untriaged</div>
-				<div class="text-3xl font-bold text-foreground mono">{status?.untriaged ?? '--'}</div>
-			</Card.Content>
-		</Card.Root>
-		<Card.Root class="text-center">
-			<Card.Content>
-				<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Conflicts</div>
-				<div
-					class="text-3xl font-bold mono {status?.conflicts ? 'text-red-600 dark:text-red-400' : 'text-foreground'}"
-				>{status?.conflicts ?? '--'}</div>
-			</Card.Content>
-		</Card.Root>
+		<a href="/issues" class="block">
+			<Card.Root class="text-center transition-colors hover:border-primary/50 hover:bg-accent/30">
+				<Card.Content>
+					<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Open Issues</div>
+					<div class="text-3xl font-bold text-foreground mono">{status?.open_issues ?? '--'}</div>
+					{#if status && status.issues_new_7d > 0}
+						<div class="text-xs text-green-600 dark:text-green-400 mt-1">+{status.issues_new_7d} this week</div>
+					{/if}
+				</Card.Content>
+			</Card.Root>
+		</a>
+		<a href="/prs" class="block">
+			<Card.Root class="text-center transition-colors hover:border-primary/50 hover:bg-accent/30">
+				<Card.Content>
+					<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Open PRs</div>
+					<div class="text-3xl font-bold text-foreground mono">{status?.open_prs ?? '--'}</div>
+					{#if status && status.prs_new_7d > 0}
+						<div class="text-xs text-green-600 dark:text-green-400 mt-1">+{status.prs_new_7d} this week</div>
+					{/if}
+				</Card.Content>
+			</Card.Root>
+		</a>
+		<a href="/issues" class="block">
+			<Card.Root class="text-center transition-colors hover:border-primary/50 hover:bg-accent/30">
+				<Card.Content>
+					<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Untriaged</div>
+					<div class="text-3xl font-bold text-foreground mono">{status?.untriaged ?? '--'}</div>
+				</Card.Content>
+			</Card.Root>
+		</a>
+		<a href="/prs?conflicts=yes" class="block">
+			<Card.Root class="text-center transition-colors hover:border-primary/50 hover:bg-accent/30">
+				<Card.Content>
+					<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Conflicts</div>
+					<div
+						class="text-3xl font-bold mono {status?.conflicts ? 'text-red-600 dark:text-red-400' : 'text-foreground'}"
+					>{status?.conflicts ?? '--'}</div>
+				</Card.Content>
+			</Card.Root>
+		</a>
 	</div>
 
 	<Card.Root class="mt-6">
