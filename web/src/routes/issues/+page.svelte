@@ -197,12 +197,25 @@
 						<Table.Cell class="px-2 py-1.5 text-foreground text-xs">
 							{issue.pr_status === 'pr_ready' ? 'PR ready' : issue.pr_status === 'has_pr' ? 'PR open' : 'No PR'}
 						</Table.Cell>
-						<Table.Cell class="px-2 py-1.5 overflow-hidden whitespace-nowrap">
-							{#each issue.labels.slice(0, 2) as label}
-								<Badge variant="outline" class="bg-primary/15 text-primary mr-1">{label}</Badge>
-							{/each}
-							{#if issue.labels.length > 2}
-								<Badge variant="outline" class="text-muted-foreground">+{issue.labels.length - 2}</Badge>
+						<Table.Cell class="px-2 py-1.5 overflow-hidden">
+							{#if issue.labels.length > 0}
+								<Tooltip.Provider>
+									<Tooltip.Root>
+										<Tooltip.Trigger>
+											{#snippet child({ props })}
+												<span {...props} class="flex items-center gap-1 truncate">
+													{#each issue.labels.slice(0, 2) as label}
+														<Badge variant="outline" class="bg-primary/15 text-primary shrink-0">{label}</Badge>
+													{/each}
+													{#if issue.labels.length > 2}
+														<Badge variant="outline" class="text-muted-foreground shrink-0">+{issue.labels.length - 2}</Badge>
+													{/if}
+												</span>
+											{/snippet}
+										</Tooltip.Trigger>
+										<Tooltip.Content class="max-w-sm text-xs leading-snug">{issue.labels.join(', ')}</Tooltip.Content>
+									</Tooltip.Root>
+								</Tooltip.Provider>
 							{/if}
 						</Table.Cell>
 						<Table.Cell class="px-2 py-1.5 text-foreground">{issue.priority ?? '-'}</Table.Cell>

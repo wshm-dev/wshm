@@ -1495,36 +1495,11 @@ async fn api_queue(
         if let Ok(prs) = ds.db.get_open_pulls() {
             let analyses = ds.db.get_all_pr_analyses().unwrap_or_default();
             for pr in prs {
-                // Basic scoring (mirrors pipelines::merge_queue logic)
-                let mut score: i64 = 0;
-
-                // CI passing
-                if pr.ci_status.as_deref() == Some("success") {
-                    score += 10;
-                }
-
-                // Conflicts
-                if pr.mergeable == Some(false) {
-                    score -= 10;
-                }
-
-                // Staleness bonus: +1 per day since creation, max 10
-                if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&pr.created_at) {
-                    let age_days = (chrono::Utc::now() - created.with_timezone(&chrono::Utc))
-                        .num_days()
-                        .min(10);
-                    score += age_days;
-                }
-
-                // Analysis data (if available)
+                // Same scoring engine used by `wshm health` / merge_queue, so
+                // the web queue and the CLI never disagree on a PR's rank.
+                let (score, _breakdown) =
+                    crate::pipelines::pr_health::score_pr_with(&pr, &ds.config.scoring.pr);
                 let analysis = analyses.get(&pr.number);
-                if let Some(a) = analysis {
-                    match a.risk_level.as_str() {
-                        "low" => score += 5,
-                        "high" => score -= 5,
-                        _ => {}
-                    }
-                }
 
                 queue.push(json!({
                     "repo": slug,
