@@ -1052,6 +1052,9 @@ struct StatusResponse {
     conflicts: usize,
     issues_new_7d: usize,
     prs_new_7d: usize,
+    /// Last 14 days, oldest first, of open-issue/open-PR creation counts —
+    /// backs the Dashboard's trend sparkline.
+    daily_activity: Vec<DailyCount>,
     last_sync: Option<String>,
     repos: Vec<RepoStatus>,
 }
@@ -1064,6 +1067,38 @@ fn count_created_since<T>(items: &[T], created_at: impl Fn(&T) -> &str, cutoff: 
         .iter()
         .filter(|item| created_at(item) >= cutoff)
         .count()
+}
+
+#[derive(Serialize, Clone)]
+struct DailyCount {
+    /// "YYYY-MM-DD"
+    date: String,
+    issues: usize,
+    prs: usize,
+}
+
+/// Build the last `days` daily buckets (oldest first, today last) and bump
+/// `issues`/`prs` for every item whose `created_at` falls on that date.
+/// Only counts currently-open items — same "backlog created recently"
+/// semantic as `count_created_since`, not a full creation history (a
+/// same-day-closed item would be missed, which is fine for a trend
+/// sparkline over the open backlog).
+fn bucket_daily_activity(
+    buckets: &mut [DailyCount],
+    date_index: &std::collections::HashMap<String, usize>,
+    issues: &[crate::db::issues::Issue],
+    prs: &[crate::db::pulls::PullRequest],
+) {
+    for issue in issues {
+        if let Some(&idx) = issue.created_at.get(..10).and_then(|d| date_index.get(d)) {
+            buckets[idx].issues += 1;
+        }
+    }
+    for pr in prs {
+        if let Some(&idx) = pr.created_at.get(..10).and_then(|d| date_index.get(d)) {
+            buckets[idx].prs += 1;
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1095,10 +1130,31 @@ async fn api_status(
         conflicts: 0,
         issues_new_7d: 0,
         prs_new_7d: 0,
+        daily_activity: Vec::new(),
         last_sync: None,
         repos: Vec::new(),
     };
     let week_ago = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
+
+    const DAILY_WINDOW: i64 = 14;
+    let today = chrono::Utc::now().date_naive();
+    let mut daily_activity: Vec<DailyCount> = (0..DAILY_WINDOW)
+        .rev()
+        .map(|offset| DailyCount {
+            date: (today - chrono::Duration::days(offset))
+                .format("%Y-%m-%d")
+                .to_string(),
+            issues: 0,
+            prs: 0,
+        })
+        .collect();
+    // Owned keys (not &str borrows into daily_activity) so the map can
+    // outlive the mutable borrows taken while bucketing each repo below.
+    let date_index: std::collections::HashMap<String, usize> = daily_activity
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.date.clone(), i))
+        .collect();
 
     // Snapshot the repo map and drop the read guard before the per-repo
     // blocking DB work, so the RwLock is not held across the whole scan
@@ -1126,6 +1182,7 @@ async fn api_status(
 
         let issues_new_7d = count_created_since(&open_issues, |i| i.created_at.as_str(), &week_ago);
         let prs_new_7d = count_created_since(&open_prs, |p| p.created_at.as_str(), &week_ago);
+        bucket_daily_activity(&mut daily_activity, &date_index, &open_issues, &open_prs);
 
         let last_sync = ds
             .db
@@ -1165,6 +1222,7 @@ async fn api_status(
         resp.repos.push(repo_status);
     }
 
+    resp.daily_activity = daily_activity;
     Json(resp)
 }
 

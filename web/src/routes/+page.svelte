@@ -6,6 +6,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import * as Card from '$lib/components/ui/card';
 	import * as Table from '$lib/components/ui/table';
+	import ActivitySparkline from '$lib/components/ActivitySparkline.svelte';
 
 	let status: Status | null = $state(null);
 	let error: string | null = $state(null);
@@ -85,6 +86,17 @@
 			</Card.Root>
 		</a>
 	</div>
+
+	{#if status && status.daily_activity.length > 0}
+		<Card.Root class="mt-6">
+			<Card.Header>
+				<Card.Title class="text-base">Activity — last 14 days</Card.Title>
+			</Card.Header>
+			<Card.Content>
+				<ActivitySparkline data={status.daily_activity} />
+			</Card.Content>
+		</Card.Root>
+	{/if}
 
 	<Card.Root class="mt-6">
 		<Card.Header>
