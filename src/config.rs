@@ -695,8 +695,8 @@ pub struct SkillDef {
     /// The actual instructions appended to the prompt verbatim.
     pub content: String,
 
-    /// Which pipelines this skill applies to: any of "triage", "pr_review".
-    /// Empty means both.
+    /// Which pipelines this skill applies to: any of "triage", "pr_review",
+    /// "review" (inline code review). Empty means all of them.
     #[serde(default)]
     pub pipelines: Vec<String>,
 
@@ -724,6 +724,44 @@ pub fn skills_prompt(skills: &[SkillDef], pipeline: &str) -> String {
         out.push_str(&format!("\n### {}\n{}\n", skill.name, skill.content.trim()));
     }
     out
+}
+
+/// Load this repo's configured Skills, falling back to [`default_skills`]
+/// when the repo has never saved its own list (`SKILLS_KEY` unset). Once a
+/// repo saves ANY list via Settings — including an empty one — that becomes
+/// its persisted choice and the default is no longer consulted for it.
+pub fn load_skills(db: &dyn crate::db::backend::DatabaseBackend) -> Vec<SkillDef> {
+    match db
+        .get_app_setting(crate::db::settings::SKILLS_KEY)
+        .ok()
+        .flatten()
+    {
+        Some(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        None => default_skills(),
+    }
+}
+
+/// The single Skill pre-seeded for a repo that has never configured its own
+/// skills list (i.e. the `SKILLS_KEY` app_setting has never been written).
+/// Applies to every pipeline by default; repos disable or edit it like any
+/// other skill via Settings — once a repo saves ANY skills list (even an
+/// empty one), that repo's own choice is persisted and this default is no
+/// longer consulted for it.
+pub fn default_skills() -> Vec<SkillDef> {
+    vec![SkillDef {
+        name: "core-review-checklist".to_string(),
+        description: Some(
+            "Baseline checks applied to every AI review pass by default.".to_string(),
+        ),
+        content: "Flag concrete defects only: real bugs, security issues (injection, auth \
+bypass, leaked secrets, unsafe deserialization), correctness errors, and obvious data \
+races/resource leaks. Do not nitpick style, formatting, or naming that a linter already \
+enforces. Do not suggest speculative refactors or hypothetical future-proofing. If a change \
+looks correct and reasonably simple, say so briefly instead of inventing issues."
+            .to_string(),
+        pipelines: vec![],
+        enabled: true,
+    }]
 }
 
 /// A "grand domain" — a broad area of the codebase/product (e.g. codex, bun,
@@ -1523,6 +1561,14 @@ pub struct RepoFeatures {
     /// Pro-only inline code review.
     #[serde(default)]
     pub review_prs: bool,
+    /// Whether a computed review is also posted to GitHub as inline PR
+    /// comments. Independent of `apply` (the repo's general "write to
+    /// GitHub" mode) so a repo can run review computation silently — shown
+    /// on the dashboard only — even while `apply` is on for other features.
+    /// Defaults true so enabling `review_prs` elsewhere keeps today's
+    /// behavior (compute-and-post) unless explicitly turned off.
+    #[serde(default = "default_true")]
+    pub review_post_comments: bool,
 
     // Mutating actions on the repo
     #[serde(default)]
@@ -1543,6 +1589,7 @@ impl Default for RepoFeatures {
             triage_issues: false,
             analyze_prs: false,
             review_prs: false,
+            review_post_comments: true,
             auto_pr: false,
             auto_merge: false,
             filters: RepoFilters::default(),

@@ -45,7 +45,10 @@
 	"settings.features.ai.analyze.tip": "Sends the PR diff + body to your AI provider and gets back a risk level (low/medium/high), PR type (feature/fix/refactor/...), summary, and a review checklist. When Apply is on, posts a summary comment on the PR. Skipped for drafts when skip_drafts is enabled.",
 	"settings.features.ai.review": "Review PRs (Pro)",
 	"settings.features.ai.review.help": "— inline code review on PR diffs (Pro feature)",
-	"settings.features.ai.review.tip": "Pro feature. Sends the PR diff to the AI for line-by-line review. When Apply is on, posts inline review comments on suspicious lines (security, perf, bugs, style). Higher token cost than Analyze PRs — use it on PRs that matter.",
+	"settings.features.ai.review.tip": "Pro feature. Sends the PR diff to the AI for line-by-line review. Results always show up on the wshm dashboard. When Apply is on AND \"Post review comments to GitHub\" is checked, also posts inline review comments on suspicious lines (security, perf, bugs, style). Higher token cost than Analyze PRs — use it on PRs that matter.",
+	"settings.features.ai.review.post": "Post review comments to GitHub",
+	"settings.features.ai.review.post.help": "— otherwise findings stay visible only on the wshm dashboard",
+	"settings.features.ai.review.post.tip": "When unchecked, the review still runs and is stored/visible on the wshm dashboard, but no comment is posted on the PR itself. Independent from Apply mode — lets you turn on auto-review without spamming the PR yet.",
 
 	"settings.features.auto.title": "Auto-actions",
 	"settings.features.auto.body": "Mutating actions on the repo. Off by default; require Mode: Apply to take effect.",

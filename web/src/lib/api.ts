@@ -516,6 +516,7 @@ export interface RepoFeatures {
 	triage_issues: boolean;
 	analyze_prs: boolean;
 	review_prs: boolean;
+	review_post_comments: boolean;
 	auto_pr: boolean;
 	auto_merge: boolean;
 	filters: RepoFilters;
