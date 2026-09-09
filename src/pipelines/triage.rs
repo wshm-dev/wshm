@@ -541,7 +541,7 @@ async fn triage_issue(
                         "Closing as duplicate of #{original}. See the original issue for updates."
                     );
                     gh.comment_issue(issue.number, &close_msg).await?;
-                    gh.close_issue(issue.number).await?;
+                    gh.close_issue_not_planned(issue.number).await?;
                 }
             }
             "wontfix" => {
