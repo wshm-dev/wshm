@@ -49,6 +49,7 @@ export interface RepoInfo {
 
 export interface DailyCount {
 	date: string;
+	repo: string;
 	issues: number;
 	prs: number;
 }
