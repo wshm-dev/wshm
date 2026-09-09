@@ -1463,49 +1463,13 @@
 		<div class="w-full space-y-4">
 			<Card.Root>
 				<Card.Header>
-					<Card.Title>How Skills fit into the review pipeline</Card.Title>
-					<Card.Description class="text-xs">
-						A Skill is a standing instruction block the AI loads when it applies — the same idea as an
-						Anthropic Agent Skill, scoped here to wshm's own triage and PR-review calls. It's appended to
-						the prompt alongside labels and grand domains, right before the AI provider call.
-					</Card.Description>
-				</Card.Header>
-				<Card.Content>
-					<div class="flex flex-col items-stretch gap-0 max-w-md mx-auto text-xs">
-						{#snippet flowStep(label: string, fn: string, highlight: boolean)}
-							<div
-								class="rounded-md border px-3 py-2 text-center {highlight
-									? 'border-primary bg-primary/10 text-primary font-semibold'
-									: 'bg-muted/30 text-foreground/90'}"
-							>
-								<div>{label}</div>
-								<div class="mono text-[0.65rem] {highlight ? 'text-primary/80' : 'text-muted-foreground'}">{fn}</div>
-							</div>
-							<div class="text-center text-muted-foreground leading-none py-0.5">↓</div>
-						{/snippet}
-						{@render flowStep('GitHub event — issue opened / PR updated', 'daemon::processor', false)}
-						{@render flowStep('Build base prompt', 'issue_classify / pr_analyze :: build_user_prompt()', false)}
-						{@render flowStep('+ Labels', 'Config::labels_prompt()', false)}
-						{@render flowStep('+ Grand domains', 'config::domains_prompt()', false)}
-						{@render flowStep('+ Skills (this tab)', 'config::skills_prompt()', true)}
-						<div
-							class="rounded-md border bg-muted/30 px-3 py-2 text-center text-foreground/90"
-						>
-							<div>AI provider call</div>
-							<div class="mono text-[0.65rem] text-muted-foreground">AiClient::complete()</div>
-						</div>
-					</div>
-					<p class="text-[0.7rem] text-muted-foreground mt-3">
-						Each Skill below can target <code>triage</code>, <code>pr_review</code>, or both. Disabled
-						skills stay saved but are skipped. Changes take effect on the next triage/PR-review pass —
-						no restart needed.
-					</p>
-				</Card.Content>
-			</Card.Root>
-
-			<Card.Root>
-				<Card.Header>
 					<Card.Title>Configured skills</Card.Title>
+					<Card.Description class="text-xs">
+						A Skill is a standing instruction the AI follows whenever it applies — appended to the prompt
+						alongside labels and grand domains before triage, PR analysis, or code review runs. Each
+						Skill below can target triage, PR analysis, review, or all three. Disabled skills stay saved
+						but are skipped. Changes take effect on the next pass — no restart needed.
+					</Card.Description>
 				</Card.Header>
 				<Card.Content class="space-y-3">
 					<div>
@@ -1580,9 +1544,18 @@
 												checked={s.pipelines.includes('pr_review')}
 												onchange={() => togglePipeline(i, 'pr_review')}
 											/>
-											PR review
+											PR analysis
 										</label>
-										<span class="italic">(both, if none checked)</span>
+										<label class="flex items-center gap-1">
+											<input
+												type="checkbox"
+												class="h-3.5 w-3.5"
+												checked={s.pipelines.includes('review')}
+												onchange={() => togglePipeline(i, 'review')}
+											/>
+											Code review (Pro)
+										</label>
+										<span class="italic">(all, if none checked)</span>
 									</div>
 									<textarea
 										class="w-full rounded-md border bg-background px-2 py-1 text-xs min-h-[72px] mono"
@@ -1922,10 +1895,10 @@
 							</span>
 							{@render infoTip('tip-review', 'settings.features.ai.review.tip')}
 						</label>
-						<label class="flex items-center gap-2 text-sm ml-6" class:opacity-60={!featuresDraft.review_prs}>
+						<label class="flex items-center gap-2 text-sm ml-6 pl-3 border-l-2 border-muted" class:opacity-60={!featuresDraft.review_prs}>
 							<input type="checkbox" bind:checked={featuresDraft.review_post_comments} disabled={!featuresDraft.review_prs} class="rounded" />
 							<span>
-								{$t('settings.features.ai.review.post')}
+								<strong>{$t('settings.features.ai.review.post')}</strong>
 								<span class="text-xs text-muted-foreground">{$t('settings.features.ai.review.post.help')}</span>
 							</span>
 							{@render infoTip('tip-review-post', 'settings.features.ai.review.post.tip')}

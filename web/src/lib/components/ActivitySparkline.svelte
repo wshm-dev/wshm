@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { DailyCount } from '$lib/api';
+	import * as Tooltip from '$lib/components/ui/tooltip';
 
 	let { data }: { data: DailyCount[] } = $props();
 
@@ -39,26 +40,46 @@
 </script>
 
 <div class="flex items-end gap-1 h-16">
-	{#each byDate as day (day.date)}
-		{@const total = dayTotal(day.entries)}
-		<div
-			class="flex-1 flex flex-col-reverse h-full min-w-[6px] rounded-t-sm overflow-hidden"
-			title="{shortDate(day.date)}: {day.entries.map((e) => `${e.repo} (${e.issues} issues, ${e.prs} PRs)`).join(', ') || 'no activity'}"
-		>
-			{#each day.entries as e (e.repo)}
-				<div
-					class="{repoColor.get(e.repo)} w-full"
-					style="height: {(e.total / max) * 100}%"
-				></div>
-			{/each}
-			{#if total === 0}
-				<div class="w-full bg-muted-foreground/10" style="height: 2px"></div>
-			{/if}
-		</div>
-	{/each}
+	<Tooltip.Provider>
+		{#each byDate as day (day.date)}
+			{@const total = dayTotal(day.entries)}
+			<Tooltip.Root>
+				<Tooltip.Trigger>
+					{#snippet child({ props })}
+						<div
+							{...props}
+							class="flex-1 flex flex-col-reverse h-full min-w-[6px] rounded-t-sm overflow-hidden"
+						>
+							{#each day.entries as e (e.repo)}
+								<div
+									class="{repoColor.get(e.repo)} w-full"
+									style="height: {(e.total / max) * 100}%"
+								></div>
+							{/each}
+							{#if total === 0}
+								<div class="w-full bg-muted-foreground/10" style="height: 2px"></div>
+							{/if}
+						</div>
+					{/snippet}
+				</Tooltip.Trigger>
+				<Tooltip.Content class="text-xs leading-snug">
+					<div class="font-medium">{shortDate(day.date)}</div>
+					{#if day.entries.length > 0}
+						{#each day.entries as e (e.repo)}
+							<div>{e.repo}: {e.issues} issues, {e.prs} PRs</div>
+						{/each}
+					{:else}
+						<div>no activity</div>
+					{/if}
+				</Tooltip.Content>
+			</Tooltip.Root>
+		{/each}
+	</Tooltip.Provider>
 </div>
 <div class="flex items-center justify-between mt-1.5 text-[0.65rem] text-muted-foreground">
-	<span>{dates.length > 0 ? shortDate(dates[0]) : ''}</span>
+	<span>
+		{dates.length > 0 ? shortDate(dates[0]) : ''}{dates.length > 1 ? ` – ${shortDate(dates[dates.length - 1])}` : ''}
+	</span>
 	<div class="flex flex-wrap items-center gap-x-3 gap-y-1 justify-end">
 		{#each repos as repo}
 			<span class="flex items-center gap-1">
