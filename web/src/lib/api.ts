@@ -47,6 +47,12 @@ export interface RepoInfo {
 	apply: boolean;
 }
 
+export interface DailyCount {
+	date: string;
+	issues: number;
+	prs: number;
+}
+
 export interface Status {
 	open_issues: number;
 	untriaged: number;
@@ -55,6 +61,7 @@ export interface Status {
 	conflicts: number;
 	issues_new_7d: number;
 	prs_new_7d: number;
+	daily_activity: DailyCount[];
 	last_sync: string | null;
 	repos: RepoInfo[];
 }
