@@ -345,6 +345,22 @@ impl Client {
             .with_context(|| format!("Failed to close issue #{number}"))?;
         Ok(())
     }
+
+    /// Close an issue as "not planned" rather than the API's default
+    /// "completed" — used for duplicates, since the original issue (not
+    /// this one) tracks the actual work. GitHub only accepts `completed` or
+    /// `not_planned` as a close `state_reason`.
+    pub async fn close_issue_not_planned(&self, number: u64) -> Result<()> {
+        self.octocrab
+            .issues(&self.owner, &self.repo)
+            .update(number)
+            .state(octocrab::models::IssueState::Closed)
+            .state_reason(octocrab::models::issues::IssueStateReason::NotPlanned)
+            .send()
+            .await
+            .with_context(|| format!("Failed to close issue #{number} as not planned"))?;
+        Ok(())
+    }
 }
 
 /// Ensure the comment body contains a hidden marker for idempotent updates.
