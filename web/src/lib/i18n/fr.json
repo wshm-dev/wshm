@@ -45,7 +45,10 @@
 	"settings.features.ai.analyze.tip": "Envoie le diff + corps de la PR à ton fournisseur IA et reçoit en retour un niveau de risque (low/medium/high), un type de PR (feature/fix/refactor/...), un résumé et une checklist de revue. En mode Apply, poste un commentaire de résumé sur la PR. Ignoré pour les drafts si skip_drafts est actif.",
 	"settings.features.ai.review": "Reviewer les PRs (Pro)",
 	"settings.features.ai.review.help": "— revue de code inline sur les diffs (feature Pro)",
-	"settings.features.ai.review.tip": "Feature Pro. Envoie le diff de la PR à l'IA pour une revue ligne par ligne. En mode Apply, poste des commentaires de revue inline sur les lignes suspectes (sécurité, perf, bugs, style). Coût en tokens plus élevé qu'Analyze PRs — à réserver aux PRs qui comptent.",
+	"settings.features.ai.review.tip": "Feature Pro. Envoie le diff de la PR à l'IA pour une revue ligne par ligne. Le résultat est toujours visible sur le dashboard wshm. Si Apply est actif ET que \"Poster les commentaires de revue sur GitHub\" est coché, poste aussi des commentaires de revue inline sur les lignes suspectes (sécurité, perf, bugs, style). Coût en tokens plus élevé qu'Analyze PRs — à réserver aux PRs qui comptent.",
+	"settings.features.ai.review.post": "Poster les commentaires de revue sur GitHub",
+	"settings.features.ai.review.post.help": "— sinon les résultats restent visibles uniquement sur le dashboard wshm",
+	"settings.features.ai.review.post.tip": "Si décoché, la revue s'exécute et reste visible sur le dashboard wshm, mais aucun commentaire n'est posté sur la PR. Indépendant du mode Apply — permet d'activer la revue auto sans encore spammer la PR.",
 
 	"settings.features.auto.title": "Auto-actions",
 	"settings.features.auto.body": "Actions mutantes sur le repo. Désactivées par défaut ; nécessitent Mode : Apply pour prendre effet.",

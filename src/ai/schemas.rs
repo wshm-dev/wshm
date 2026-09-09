@@ -80,7 +80,7 @@ pub struct DomainDiscovery {
     pub domains: Vec<DiscoveredDomain>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InlineReviewResult {
     #[serde(default)]
     pub comments: Vec<InlineComment>,

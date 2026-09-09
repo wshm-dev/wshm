@@ -1922,6 +1922,14 @@
 							</span>
 							{@render infoTip('tip-review', 'settings.features.ai.review.tip')}
 						</label>
+						<label class="flex items-center gap-2 text-sm ml-6" class:opacity-60={!featuresDraft.review_prs}>
+							<input type="checkbox" bind:checked={featuresDraft.review_post_comments} disabled={!featuresDraft.review_prs} class="rounded" />
+							<span>
+								{$t('settings.features.ai.review.post')}
+								<span class="text-xs text-muted-foreground">{$t('settings.features.ai.review.post.help')}</span>
+							</span>
+							{@render infoTip('tip-review-post', 'settings.features.ai.review.post.tip')}
+						</label>
 					</div>
 				</div>
 

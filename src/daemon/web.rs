@@ -2355,6 +2355,7 @@ async fn api_repo_features_patch(
     patch_bool!(triage_issues);
     patch_bool!(analyze_prs);
     patch_bool!(review_prs);
+    patch_bool!(review_post_comments);
     patch_bool!(auto_pr);
     patch_bool!(auto_merge);
 
@@ -2576,13 +2577,7 @@ async fn api_repo_skills_get(
     let repos = state.multi.repos.read().await;
     match repos.get(&slug) {
         Some(ds) => {
-            let skills: Vec<crate::config::SkillDef> = ds
-                .db
-                .get_app_setting(crate::db::settings::SKILLS_KEY)
-                .ok()
-                .flatten()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
+            let skills = crate::config::load_skills(ds.db.as_ref());
             Json(json!({ "skills": skills })).into_response()
         }
         None => (

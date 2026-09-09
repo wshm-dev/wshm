@@ -68,6 +68,14 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             analyzed_at   TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS pr_reviews (
+            pr_number        INTEGER PRIMARY KEY,
+            result_json      TEXT NOT NULL,
+            posted_to_github INTEGER NOT NULL DEFAULT 0,
+            content_hash     TEXT,
+            reviewed_at      TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS sync_log (
             table_name     TEXT PRIMARY KEY,
             last_synced_at TEXT NOT NULL,

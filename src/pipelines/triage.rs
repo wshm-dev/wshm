@@ -385,12 +385,7 @@ async fn triage_issue(
     }
 
     // Inject configured Skills that apply to triage (see config::skills_prompt).
-    let skills: Vec<crate::config::SkillDef> = db
-        .get_app_setting(crate::db::settings::SKILLS_KEY)
-        .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    let skills = crate::config::load_skills(db);
     let skills_prompt = crate::config::skills_prompt(&skills, "triage");
     if !skills_prompt.is_empty() {
         user_prompt.push_str(&skills_prompt);
