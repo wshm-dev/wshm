@@ -3,7 +3,7 @@ name = "wshm-core"
 version = "0.31.7"
 edition = "2021"
 description = "Core library for wshm"
-license = "SSPL-1.0"
+license = "BUSL-1.1"
 
 [[bin]]
 name = "wshm"

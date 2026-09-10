@@ -1,118 +1,110 @@
-Server Side Public License (SSPL) v1
+Business Source License 1.1
 
-Copyright (c) 2025-2026 wshm-dev / Patrick Szymkowiak. All rights reserved.
+Parameters
 
-1. DEFINITIONS
+Licensor:              wshm-dev / Patrick Szymkowiak
+Licensed Work:         wshm
+                       The Licensed Work is (c) 2025-2026 wshm-dev / Patrick Szymkowiak. All rights reserved.
+Additional Use Grant:  You may use, copy, modify, and self-host the Licensed
+                       Work for any purpose, including commercial and
+                       enterprise use, and you may redistribute it and
+                       contribute changes back to the project.
 
-"This License" refers to Server Side Public License, Version 1.
+                       You may not offer the Licensed Work, or a modified or
+                       unmodified version of it, to third parties as a
+                       managed or hosted service (e.g. SaaS) that provides
+                       the same or substantially similar functionality as
+                       wshm Pro, without a separate commercial agreement with
+                       Licensor.
+Change Date:           2029-09-07
+Change License:        Apache License, Version 2.0
 
-"The Program" refers to any copyrightable work licensed under this License.
+For information about alternative licensing arrangements for the Licensed Work,
+please contact contact@wshm.dev.
 
-"Copyright Holder" refers to wshm-dev / Patrick Szymkowiak.
+Notice
 
-"You" refers to any individual or legal entity exercising permissions
-granted by this License.
+The Business Source License (this document, or the "License") is not an Open
+Source license. However, the Licensed Work will eventually be made available
+under an Open Source License, as stated in this License.
 
-"Service" means making the functionality of the Program or a modified
-version available to third parties as a service, including but not limited
-to enabling third parties to interact with the functionality of the Program
-or a modified version remotely through a computer network, offering a
-service the value of which entirely or primarily derives from the value of
-the Program, or offering a service that accomplishes for users the primary
-purpose of the Program or a modified version.
+License text copyright (c) 2017 MariaDB Corporation Ab, All Rights Reserved.
+"Business Source License" is a trademark of MariaDB Corporation Ab.
 
-2. GRANT OF LICENSE
+-----------------------------------------------------------------------------
 
-Subject to the terms and conditions of this License, the Copyright Holder
-hereby grants to You a worldwide, royalty-free, non-exclusive license to:
+Business Source License 1.1
 
-  a) Use the Program for any purpose, including commercial use, without
-     restriction.
+Terms
 
-  b) View, study, and audit the source code of the Program.
+The Licensor hereby grants you the right to copy, modify, create derivative
+works, redistribute, and make non-production use of the Licensed Work. The
+Licensor may make an Additional Use Grant, above, permitting limited
+production use.
 
-  c) Modify the Program for your own internal use.
+Effective on the Change Date, or the fourth anniversary of the first publicly
+available distribution of a specific version of the Licensed Work under this
+License, whichever comes first, the Licensor hereby grants you rights under
+the terms of the Change License, and the rights granted in the paragraph
+above terminate.
 
-  d) Distribute copies of the unmodified Program, provided that you include
-     a complete copy of this License and prominently display all copyright
-     notices.
+If your use of the Licensed Work does not comply with the requirements
+currently in effect as described in this License, you must purchase a
+commercial license from the Licensor, its affiliated entities, or authorized
+resellers, or you must refrain from using the Licensed Work.
 
-3. SERVICE RESTRICTION
+All copies of the original and modified Licensed Work, and derivative works
+of the Licensed Work, are subject to this License. This License applies
+separately for each version of the Licensed Work and the Change Date may vary
+for each version of the Licensed Work released by Licensor.
 
-If you make the functionality of the Program or a modified version
-available to third parties as a Service, you must make the complete
-corresponding source code of your Service available to everyone, under
-this License, at no charge.
+You must conspicuously display this License on each original or modified copy
+of the Licensed Work. If you receive the Licensed Work in original or
+modified form from a third party, the terms and conditions set forth in this
+License apply to your use of that work.
 
-"Complete corresponding source code" means all the source code needed to
-generate, install, and (for an executable work) run the object code and to
-modify the work, including scripts to control those activities, as well as
-the source code for all programs and services that the Service depends on
-to operate, including, without limitation, all server-side software,
-management software, user interfaces, application program interfaces,
-databases, data-export functionality, and configuration needed for anyone
-to be able to deploy and offer a substantially similar service.
+Any use of the Licensed Work in violation of this License will automatically
+terminate your rights under this License for the current and all other
+versions of the Licensed Work.
 
-4. NO COMPETING SERVICE
+This License does not grant you any right in any trademark or logo of
+Licensor or its affiliates (provided that you may use a trademark or logo of
+Licensor as expressly required by this License).
 
-You may NOT use the Program, or any modified version of it, to offer a
-commercial service that competes with any product or service offered by the
-Copyright Holder, without prior written authorization from the Copyright
-Holder.
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON
+AN "AS IS" BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS,
+EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND
+TITLE.
 
-5. CONTRIBUTIONS
+MariaDB hereby grants you permission to use this License's text to license
+your works, and to refer to it using the trademark "Business Source License",
+as long as you comply with the Covenants of Licensor below.
 
-By submitting a contribution (pull request, patch, issue, or other
-modification) to this project, you:
+Covenants of Licensor
 
-  a) Grant the Copyright Holder a perpetual, worldwide, royalty-free,
-     non-exclusive, irrevocable license to use, reproduce, modify,
-     distribute, and sublicense your contribution.
+In consideration of the right to use this License's text and the "Business
+Source License" name and trademark, Licensor covenants to MariaDB, and to all
+other recipients of the licensed work to be provided by Licensor:
 
-  b) Represent that you have the legal right to make such contribution.
+1. To specify as the Change License the GPL Version 2.0 or any later version,
+   or a license that is compatible with GPL Version 2.0 or a later version,
+   where "compatible" means that software provided under the Change License can
+   be included in a program with software provided under GPL Version 2.0 or a
+   later version. Licensor may specify additional Change Licenses without
+   limitation.
 
-6. TRADEMARKS
+2. To either: (a) specify an additional grant of rights to use that does not
+   impose any additional restriction on the right to use granted in this
+   License, as the Additional Use Grant, or (b) insert the text "None".
 
-This License does not grant permission to use the trade names, trademarks,
-service marks, or product names of the Copyright Holder, except as required
-for reasonable and customary use in describing the origin of the Program.
+3. To specify a Change Date.
 
-7. PATENT GRANT
+4. Not to modify this License in any other way.
 
-Each contributor hereby grants to You a perpetual, worldwide, non-exclusive,
-no-charge, royalty-free, irrevocable patent license to make, use, sell,
-import, and otherwise transfer the Program, where such license applies only
-to those patent claims licensable by such contributor that are necessarily
-infringed by their contribution(s) alone or by combination of their
-contribution(s) with the Program.
-
-8. DISCLAIMER OF WARRANTY
-
-THE PROGRAM IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF
-OR IN CONNECTION WITH THE PROGRAM OR THE USE OR OTHER DEALINGS IN THE
-PROGRAM.
-
-9. LIMITATION OF LIABILITY
-
-IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY INDIRECT,
-INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
-NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
-THIS PROGRAM, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-10. TERMINATION
-
-This License and the rights granted hereunder will terminate automatically
-if You fail to comply with any term herein. Upon termination, you must
-cease all use and destroy all copies of the Program in your possession.
-
----
-
-For commercial licensing, enterprise agreements, or questions:
-contact@wshm.dev | https://wshm.dev
+Notice: This copy of the Business Source License substitutes the Apache
+License, Version 2.0 as the Change License. That substitution follows
+common practice among other Business Source License adopters (e.g. Sentry,
+CockroachDB) and is intentional: it maximizes the Licensed Work's future
+openness by converting to a permissive, widely-compatible license rather
+than a copyleft one.
