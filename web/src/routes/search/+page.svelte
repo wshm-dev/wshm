@@ -254,6 +254,7 @@
 		offset={pageOffset}
 		storageKey={PAGE_KEY}
 		onChange={onPageChange}
+		filteredCount={filtered.length}
 	/>
 {/if}
 
