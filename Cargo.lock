@@ -6511,6 +6511,8 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "hostname",
+ "http 1.4.0",
+ "http-body-util",
  "is-terminal",
  "jsonwebtoken",
  "mime_guess",

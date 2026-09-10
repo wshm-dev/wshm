@@ -40,6 +40,13 @@ vault-all = ["vault-hashicorp", "vault-aws", "vault-gcp"]
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 octocrab = "0.44"
+# Used with octocrab's low-level `_get_with_headers` to fetch a PR diff
+# through the authenticated api.github.com endpoint instead of the public
+# github.com/*.diff URL — see fetch_pr_diff_raw. Versions match what
+# octocrab 0.44 itself resolves to (Cargo.lock already carries both
+# transitively; these just make them directly nameable in our code).
+http = "1"
+http-body-util = "0.1"
 # Pinned to the exact version octocrab 0.44 depends on — its `.app()`
 # builder takes a `jsonwebtoken::EncodingKey` by value, so a mismatched
 # major/minor version would fail to type-check even though both compile.

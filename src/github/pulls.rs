@@ -416,27 +416,41 @@ impl Client {
         self.fetch_pr_diff_raw(number).await
     }
 
-    /// Fetch the raw unified diff for a PR
+    /// Fetch the raw unified diff for a PR.
+    ///
+    /// Goes through the authenticated `api.github.com` REST endpoint (content
+    /// negotiation via the diff media type), not the public
+    /// `github.com/.../pull/N.diff` URL — that URL lives on GitHub's main web
+    /// domain rather than its API, which some network paths (this app's own
+    /// production cluster included) reach far less reliably than
+    /// `api.github.com`, and it also bypasses whatever auth/rate-limit
+    /// headroom the GitHub App installation token gives us.
     pub async fn fetch_pr_diff_raw(&self, number: u64) -> Result<String> {
-        // Use the .diff URL which returns raw unified diff
-        let url = format!(
-            "https://github.com/{}/{}/pull/{number}.diff",
-            self.owner, self.repo
+        use http_body_util::BodyExt;
+
+        let route = format!("/repos/{}/{}/pulls/{number}", self.owner, self.repo);
+        let mut headers = http::header::HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            http::header::HeaderValue::from_static("application/vnd.github.v3.diff"),
         );
 
         crate::retry::with_retry("github: fetch PR diff", || async {
             let response = self
-                .http
-                .get(&url)
-                .send()
+                .octocrab
+                ._get_with_headers(route.as_str(), Some(headers.clone()))
                 .await
-                .with_context(|| format!("Failed to fetch raw diff for PR #{number}"))?;
+                .with_context(|| format!("Failed to fetch diff for PR #{number}"))?;
 
             let status = response.status();
-            let text = response
-                .text()
+            let body = response
+                .into_body()
+                .collect()
                 .await
-                .with_context(|| format!("Failed to read raw diff for PR #{number}"))?;
+                .with_context(|| format!("Failed to read diff body for PR #{number}"))?
+                .to_bytes();
+            let text = String::from_utf8(body.to_vec())
+                .with_context(|| format!("Diff for PR #{number} was not valid UTF-8"))?;
 
             if !status.is_success() {
                 anyhow::bail!("Failed to fetch diff for PR #{number}: HTTP {status}");
