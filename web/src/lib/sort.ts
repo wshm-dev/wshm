@@ -58,7 +58,7 @@ export function toggleSort(columns: SortColumn[], key: string, shiftKey: boolean
 export function sortArrow(columns: SortColumn[], key: string): string {
 	const col = columns.find((c) => c.key === key);
 	if (!col) return '';
-	return col.asc ? 'v' : '^';
+	return col.asc ? '▲' : '▼';
 }
 
 export function sortIndex(columns: SortColumn[], key: string): number {

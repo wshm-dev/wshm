@@ -195,7 +195,7 @@
 	</Card.Root>
 {:else}
 	<div class="w-full overflow-x-auto rounded-lg border">
-		<Table.Root class="w-full">
+		<Table.Root class="w-full table-fixed">
 			<Table.Header class="text-xs uppercase text-muted-foreground">
 				<Table.Row>
 					<Table.Head class="px-2 py-1.5 w-[80px]">Kind</Table.Head>

@@ -409,7 +409,11 @@ fn pr_default_mergeable() -> i32 {
     2
 }
 fn pr_default_conflict() -> i32 {
-    -25
+    // Must outweigh every other positive signal a PR can rack up (ci_green
+    // 25 + age_bonus_max 10 = 35) so an old, green-CI PR with a real GitHub
+    // merge conflict can never coast above a clean PR on age alone — a
+    // conflict means it needs a rebase before it's "ready", full stop.
+    -35
 }
 fn pr_default_linked_issue() -> i32 {
     5

@@ -203,9 +203,9 @@
 									<Tooltip.Root>
 										<Tooltip.Trigger>
 											{#snippet child({ props })}
-												<span {...props} class="flex items-center gap-1 truncate">
+												<span {...props} class="flex items-center gap-1 min-w-0">
 													{#each issue.labels.slice(0, 2) as label}
-														<Badge variant="outline" class="bg-primary/15 text-primary shrink-0">{label}</Badge>
+														<Badge variant="outline" class="bg-primary/15 text-primary min-w-0 shrink text-ellipsis">{label}</Badge>
 													{/each}
 													{#if issue.labels.length > 2}
 														<Badge variant="outline" class="text-muted-foreground shrink-0">+{issue.labels.length - 2}</Badge>
