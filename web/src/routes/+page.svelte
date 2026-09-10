@@ -109,6 +109,7 @@
 		</Card.Header>
 		<Card.Content>
 			{#if status && status.repos.length > 0}
+				<div class="w-full overflow-x-auto">
 				<Table.Root class="w-full">
 					<Table.Header class="text-xs uppercase text-muted-foreground">
 						<Table.Row>
@@ -143,6 +144,7 @@
 						{/each}
 					</Table.Body>
 				</Table.Root>
+				</div>
 			{:else}
 				<p class="text-sm text-muted-foreground">No repositories configured.</p>
 			{/if}

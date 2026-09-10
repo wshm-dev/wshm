@@ -43,6 +43,12 @@
 	let totalPrs: number = $derived(
 		result ? result.sections.reduce((sum: number, s: ChangelogSection) => sum + s.pull_requests.length, 0) : 0
 	);
+
+	// Each section starts capped so a large merged-PR history (hundreds of
+	// entries) doesn't render as one endless scroll — expand per section on
+	// demand instead of paginating the whole page.
+	const INITIAL_VISIBLE = 15;
+	let expanded: Record<string, boolean> = $state({});
 </script>
 
 <svelte:head>
@@ -73,7 +79,7 @@
 				</div>
 
 				<div class="space-y-2 ml-7">
-					{#each section.pull_requests as pr}
+					{#each (expanded[section.name] ? section.pull_requests : section.pull_requests.slice(0, INITIAL_VISIBLE)) as pr}
 						<div class="flex items-start gap-3 text-sm">
 							<span class="font-mono text-primary shrink-0">#{pr.number}</span>
 							<div class="flex-1">
@@ -85,6 +91,15 @@
 							<span class="text-xs text-muted-foreground shrink-0">{pr.merged_at?.slice(0, 10) ?? ''}</span>
 						</div>
 					{/each}
+					{#if section.pull_requests.length > INITIAL_VISIBLE}
+						<button
+							type="button"
+							class="text-xs text-primary hover:underline"
+							onclick={() => (expanded[section.name] = !expanded[section.name])}
+						>
+							{expanded[section.name] ? 'Show fewer' : `Show ${section.pull_requests.length - INITIAL_VISIBLE} more`}
+						</button>
+					{/if}
 				</div>
 			</div>
 		{/each}
