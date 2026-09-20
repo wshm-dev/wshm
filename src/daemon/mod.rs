@@ -551,13 +551,11 @@ pub struct DaemonExtensions {
 /// Produces the storage backend for one repo. Pro shares a single Postgres
 /// pool across repos, scoping each instance by slug; OSS opens a per-repo
 /// SQLite `Database`.
-pub type DbFactory =
-    Arc<dyn Fn(&Config) -> anyhow::Result<Arc<dyn DatabaseBackend>> + Send + Sync>;
+pub type DbFactory = Arc<dyn Fn(&Config) -> anyhow::Result<Arc<dyn DatabaseBackend>> + Send + Sync>;
 
 /// Persists the whole tracked-repo registry (list + per-repo settings). Pro
 /// writes the JSON blob to Postgres; OSS falls back to `global.toml`.
-pub type RepoPersist =
-    Arc<dyn Fn(&[crate::config::RepoEntry]) -> anyhow::Result<()> + Send + Sync>;
+pub type RepoPersist = Arc<dyn Fn(&[crate::config::RepoEntry]) -> anyhow::Result<()> + Send + Sync>;
 
 /// Run daemon in multi-repo mode from a global config file.
 pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {

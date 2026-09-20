@@ -35,6 +35,8 @@ pub struct IssueClassification {
     /// per-repo configured domain list; multi-valued. Empty when none configured.
     #[serde(default, deserialize_with = "null_as_default")]
     pub domains: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub suggested_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +82,7 @@ pub struct DomainDiscovery {
     pub domains: Vec<DiscoveredDomain>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InlineReviewResult {
     #[serde(default)]
     pub comments: Vec<InlineComment>,

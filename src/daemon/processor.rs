@@ -12,6 +12,7 @@ use super::{DaemonState, MultiDaemonState};
 use crate::cli::{PrArgs, TriageArgs};
 use crate::github::sync as gh_sync;
 use crate::pipelines;
+use crate::pro_hooks;
 
 /// Tracks which issue/PR numbers are currently being processed to prevent concurrent duplicates.
 /// Key is (repo_slug, number) for multi-repo isolation, or ("", number) for single-repo.
@@ -386,6 +387,29 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
                     return Ok(());
                 }
                 Err(e) => warn!("Direct fetch of PR #{n} failed: {e:#}"),
+            }
+        }
+    }
+
+    // Inline code review (Pro) — independent of analyze_prs below, so it
+    // still runs even for a repo that only wants review, not the coarse
+    // risk/type classification. `should_post` combines the repo's general
+    // apply mode with the review-specific post-to-GitHub toggle: both must
+    // be on for inline comments to actually land on the PR; the review
+    // itself is always computed and stored either way.
+    if features.review_prs {
+        if let Some(n) = number {
+            let should_post = state.apply() && features.review_post_comments;
+            if let Err(e) = pro_hooks::run_review(
+                &state.config,
+                state.db.as_ref(),
+                &state.gh(),
+                n,
+                should_post,
+            )
+            .await
+            {
+                warn!("Review failed for PR #{n}: {e:#}");
             }
         }
     }

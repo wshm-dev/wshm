@@ -20,6 +20,8 @@
 	import IssueDetail from '$lib/components/IssueDetail.svelte';
 	import PrDetail from '$lib/components/PrDetail.svelte';
 	import TablePagination from '$lib/components/TablePagination.svelte';
+	import FilterSelect from '$lib/components/FilterSelect.svelte';
+	import { applyFilters, distinctValues } from '$lib/filter';
 
 	const PAGE_KEY = 'wshm.pageSize.search';
 	function readStoredLimit(): number {
@@ -40,6 +42,20 @@
 	let hits: SearchHit[] = $state([]);
 	let loading = $state(false);
 	let error: string | null = $state(null);
+	let filters: Record<string, string> = $state({ kind: '', repo: '', match: '' });
+
+	let enriched = $derived(hits.map(h => ({
+		...h,
+		kindLabel: kindLabel(h.kind),
+		matchText: `${h.title ?? ''} ${(h.snippet ?? '').replace(/<[^>]+>/g, '')}`
+	})));
+	let filtered = $derived(applyFilters(enriched, {
+		kindLabel: filters.kind,
+		repo: filters.repo,
+		matchText: filters.match
+	}));
+	let kindOptions = $derived(distinctValues(enriched, 'kindLabel'));
+	let repoOptions = $derived(distinctValues(enriched, 'repo'));
 
 	let loadToken = 0;
 	async function load() {
@@ -179,7 +195,7 @@
 	</Card.Root>
 {:else}
 	<div class="w-full overflow-x-auto rounded-lg border">
-		<Table.Root class="w-full">
+		<Table.Root class="w-full table-fixed">
 			<Table.Header class="text-xs uppercase text-muted-foreground">
 				<Table.Row>
 					<Table.Head class="px-2 py-1.5 w-[80px]">Kind</Table.Head>
@@ -190,7 +206,14 @@
 				</Table.Row>
 			</Table.Header>
 			<Table.Body>
-				{#each hits as hit}
+				<Table.Row>
+					<Table.Cell class="px-2 py-1"><FilterSelect bind:value={filters.kind} options={kindOptions} /></Table.Cell>
+					<Table.Cell class="px-2 py-1"><FilterSelect bind:value={filters.repo} options={repoOptions} /></Table.Cell>
+					<Table.Cell class="px-2 py-1"></Table.Cell>
+					<Table.Cell class="px-2 py-1"><Input type="text" bind:value={filters.match} placeholder="filter..." class="h-8 px-2 text-xs" /></Table.Cell>
+					<Table.Cell class="px-2 py-1"></Table.Cell>
+				</Table.Row>
+				{#each filtered as hit}
 					<Table.Row class="cursor-pointer" onclick={() => openHit(hit)}>
 						<Table.Cell class="px-2 py-1.5">
 							{#if kindBadgeClass(hit.kind)}
@@ -231,6 +254,7 @@
 		offset={pageOffset}
 		storageKey={PAGE_KEY}
 		onChange={onPageChange}
+		filteredCount={filtered.length}
 	/>
 {/if}
 

@@ -1037,6 +1037,8 @@ struct RepoStatus {
     open_prs: usize,
     unanalyzed: usize,
     conflicts: usize,
+    issues_new_7d: usize,
+    prs_new_7d: usize,
     last_sync: Option<String>,
     apply: bool,
 }
@@ -1048,8 +1050,71 @@ struct StatusResponse {
     open_prs: usize,
     unanalyzed: usize,
     conflicts: usize,
+    issues_new_7d: usize,
+    prs_new_7d: usize,
+    /// Last 14 days, oldest first, of open-issue/open-PR creation counts —
+    /// backs the Dashboard's trend sparkline.
+    daily_activity: Vec<DailyCount>,
     last_sync: Option<String>,
     repos: Vec<RepoStatus>,
+}
+
+/// Count items whose `created_at` (RFC3339) falls within the last 7 days.
+/// String comparison works because RFC3339 timestamps sort lexicographically
+/// by time — no parsing needed for a "since N days ago" cutoff.
+fn count_created_since<T>(items: &[T], created_at: impl Fn(&T) -> &str, cutoff: &str) -> usize {
+    items
+        .iter()
+        .filter(|item| created_at(item) >= cutoff)
+        .count()
+}
+
+#[derive(Serialize, Clone)]
+struct DailyCount {
+    /// "YYYY-MM-DD"
+    date: String,
+    repo: String,
+    issues: usize,
+    prs: usize,
+}
+
+/// Build the last `days` daily buckets (oldest first, today last) for one
+/// repo and bump `issues`/`prs` for every item whose `created_at` falls on
+/// that date. Only counts currently-open items — same "backlog created
+/// recently" semantic as `count_created_since`, not a full creation history
+/// (a same-day-closed item would be missed, which is fine for a trend
+/// sparkline over the open backlog).
+fn bucket_daily_activity(
+    dates: &[String],
+    repo: &str,
+    issues: &[crate::db::issues::Issue],
+    prs: &[crate::db::pulls::PullRequest],
+) -> Vec<DailyCount> {
+    let date_index: std::collections::HashMap<&str, usize> = dates
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.as_str(), i))
+        .collect();
+    let mut buckets: Vec<DailyCount> = dates
+        .iter()
+        .map(|d| DailyCount {
+            date: d.clone(),
+            repo: repo.to_string(),
+            issues: 0,
+            prs: 0,
+        })
+        .collect();
+    for issue in issues {
+        if let Some(&idx) = issue.created_at.get(..10).and_then(|d| date_index.get(d)) {
+            buckets[idx].issues += 1;
+        }
+    }
+    for pr in prs {
+        if let Some(&idx) = pr.created_at.get(..10).and_then(|d| date_index.get(d)) {
+            buckets[idx].prs += 1;
+        }
+    }
+    buckets
 }
 
 #[derive(Serialize)]
@@ -1079,9 +1144,25 @@ async fn api_status(
         open_prs: 0,
         unanalyzed: 0,
         conflicts: 0,
+        issues_new_7d: 0,
+        prs_new_7d: 0,
+        daily_activity: Vec::new(),
         last_sync: None,
         repos: Vec::new(),
     };
+    let week_ago = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
+
+    const DAILY_WINDOW: i64 = 14;
+    let today = chrono::Utc::now().date_naive();
+    let dates: Vec<String> = (0..DAILY_WINDOW)
+        .rev()
+        .map(|offset| {
+            (today - chrono::Duration::days(offset))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .collect();
+    let mut daily_activity: Vec<DailyCount> = Vec::new();
 
     // Snapshot the repo map and drop the read guard before the per-repo
     // blocking DB work, so the RwLock is not held across the whole scan
@@ -1107,6 +1188,10 @@ async fn api_status(
             .filter(|pr| pr.mergeable == Some(false))
             .count();
 
+        let issues_new_7d = count_created_since(&open_issues, |i| i.created_at.as_str(), &week_ago);
+        let prs_new_7d = count_created_since(&open_prs, |p| p.created_at.as_str(), &week_ago);
+        daily_activity.extend(bucket_daily_activity(&dates, slug, &open_issues, &open_prs));
+
         let last_sync = ds
             .db
             .get_sync_entry("issues")
@@ -1121,6 +1206,8 @@ async fn api_status(
             open_prs: open_prs.len(),
             unanalyzed: unanalyzed.len(),
             conflicts,
+            issues_new_7d,
+            prs_new_7d,
             last_sync: last_sync.clone(),
             apply: ds.apply(),
         };
@@ -1130,6 +1217,8 @@ async fn api_status(
         resp.open_prs += repo_status.open_prs;
         resp.unanalyzed += repo_status.unanalyzed;
         resp.conflicts += repo_status.conflicts;
+        resp.issues_new_7d += repo_status.issues_new_7d;
+        resp.prs_new_7d += repo_status.prs_new_7d;
 
         // Use the most recent sync time across repos
         if let Some(ref ls) = last_sync {
@@ -1141,6 +1230,7 @@ async fn api_status(
         resp.repos.push(repo_status);
     }
 
+    resp.daily_activity = daily_activity;
     Json(resp)
 }
 
@@ -1405,36 +1495,11 @@ async fn api_queue(
         if let Ok(prs) = ds.db.get_open_pulls() {
             let analyses = ds.db.get_all_pr_analyses().unwrap_or_default();
             for pr in prs {
-                // Basic scoring (mirrors pipelines::merge_queue logic)
-                let mut score: i64 = 0;
-
-                // CI passing
-                if pr.ci_status.as_deref() == Some("success") {
-                    score += 10;
-                }
-
-                // Conflicts
-                if pr.mergeable == Some(false) {
-                    score -= 10;
-                }
-
-                // Staleness bonus: +1 per day since creation, max 10
-                if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&pr.created_at) {
-                    let age_days = (chrono::Utc::now() - created.with_timezone(&chrono::Utc))
-                        .num_days()
-                        .min(10);
-                    score += age_days;
-                }
-
-                // Analysis data (if available)
+                // Same scoring engine used by `wshm health` / merge_queue, so
+                // the web queue and the CLI never disagree on a PR's rank.
+                let (score, _breakdown) =
+                    crate::pipelines::pr_health::score_pr_with(&pr, &ds.config.scoring.pr);
                 let analysis = analyses.get(&pr.number);
-                if let Some(a) = analysis {
-                    match a.risk_level.as_str() {
-                        "low" => score += 5,
-                        "high" => score -= 5,
-                        _ => {}
-                    }
-                }
 
                 queue.push(json!({
                     "repo": slug,
@@ -2084,7 +2149,7 @@ async fn api_license_activate(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "status": "error",
-                "message": format!("{e}"),
+                "message": e.to_string(),
             })),
         )
             .into_response(),
@@ -2265,6 +2330,7 @@ async fn api_repo_features_patch(
     patch_bool!(triage_issues);
     patch_bool!(analyze_prs);
     patch_bool!(review_prs);
+    patch_bool!(review_post_comments);
     patch_bool!(auto_pr);
     patch_bool!(auto_merge);
 
@@ -2474,6 +2540,91 @@ async fn api_repo_domains_patch(
         .flatten();
     let limit = crate::pipelines::discover_domains::resolve_limit(ds.db.as_ref());
     Json(json!({ "domains": domains, "review_prompt": prompt, "limit": limit })).into_response()
+}
+
+/// GET /api/v1/repos/{slug}/skills -- read the configured AI review skills.
+/// DB-backed (app_settings), same rationale as domains: survives stateless
+/// pod restarts and is shared across replicas.
+async fn api_repo_skills_get(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> Response {
+    let repos = state.multi.repos.read().await;
+    match repos.get(&slug) {
+        Some(ds) => {
+            let skills = crate::config::load_skills(ds.db.as_ref());
+            Json(json!({ "skills": skills })).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("repo '{slug}' not configured")})),
+        )
+            .into_response(),
+    }
+}
+
+/// PATCH /api/v1/repos/{slug}/skills -- replace the configured skills list.
+/// Body: `{ "skills": [{ "name", "description", "content", "pipelines", "enabled" }] }`.
+/// Persists to the DB (app_settings), effective on the next triage/PR review
+/// pass across every pod — no restart needed.
+async fn api_repo_skills_patch(
+    State(state): State<Arc<WebState>>,
+    user: axum::Extension<Option<crate::auth::User>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if state.users.is_some() {
+        if let Err(e) = require_admin(&user) {
+            return e;
+        }
+    }
+
+    let repos = state.multi.repos.read().await;
+    let ds = match repos.get(&slug) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("repo '{slug}' not configured")})),
+            )
+                .into_response();
+        }
+    };
+    drop(repos);
+
+    let skills = match body.get("skills") {
+        Some(s) => match serde_json::from_value::<Vec<crate::config::SkillDef>>(s.clone()) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid skills: {e}")})),
+                )
+                    .into_response();
+            }
+        },
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "skills is required"})),
+            )
+                .into_response();
+        }
+    };
+
+    let json_str = serde_json::to_string(&skills).unwrap_or_else(|_| "[]".into());
+    if let Err(e) = ds
+        .db
+        .set_app_setting(crate::db::settings::SKILLS_KEY, &json_str)
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+
+    Json(json!({ "skills": skills })).into_response()
 }
 
 /// POST /api/v1/repos/{slug}/domains/discover -- infer the repo's grand domains
@@ -2995,7 +3146,15 @@ async fn api_auth_status(State(state): State<Arc<WebState>>) -> impl IntoRespons
         false
     };
 
-    let github = secrets_has("github_token").await
+    let github_app = secrets_has("github_app_id").await
+        && secrets_has("github_app_installation_id").await
+        && secrets_has("github_app_private_key").await
+        || (std::env::var("WSHM_GITHUB_APP_ID").is_ok()
+            && std::env::var("WSHM_GITHUB_APP_INSTALLATION_ID").is_ok()
+            && std::env::var("WSHM_GITHUB_APP_PRIVATE_KEY").is_ok());
+
+    let github = github_app
+        || secrets_has("github_token").await
         || creds.contains_key("GITHUB_TOKEN")
         || std::env::var("GITHUB_TOKEN").is_ok()
         || std::env::var("WSHM_TOKEN").is_ok();
@@ -3015,8 +3174,17 @@ async fn api_auth_status(State(state): State<Arc<WebState>>) -> impl IntoRespons
         None
     };
 
+    let github_kind = if github_app {
+        Some("app")
+    } else if github {
+        Some("token")
+    } else {
+        None
+    };
+
     Json(json!({
         "github": github,
+        "github_kind": github_kind,
         "anthropic": anthropic_kind,
     }))
 }
@@ -3511,19 +3679,26 @@ async fn api_secrets_put(
                 "api_secrets_put: store.put OK — row id={id}"
             );
             // Hot-reload affected daemon clients so the new token / API key
-            // takes effect without a restart. Only github_token reloads the
-            // GhClient today; other keys are read on-demand by the relevant
-            // pipeline so no reload is needed.
-            if key.trim() == "github_token" {
+            // takes effect without a restart. GitHub-auth keys (PAT or the
+            // three GitHub App fields) reload the GhClient; other keys are
+            // read on-demand by the relevant pipeline so no reload is needed.
+            const GITHUB_AUTH_KEYS: [&str; 4] = [
+                "github_token",
+                "github_app_id",
+                "github_app_installation_id",
+                "github_app_private_key",
+            ];
+            if GITHUB_AUTH_KEYS.contains(&key.trim()) {
                 tracing::debug!(
                     target: "wshm_core::secrets_trace",
-                    "api_secrets_put: key is github_token — triggering reload"
+                    "api_secrets_put: key={:?} is a GitHub auth key — triggering reload",
+                    key.trim()
                 );
                 reload_github_clients(&state, scope, effective_slug).await;
             } else {
                 tracing::debug!(
                     target: "wshm_core::secrets_trace",
-                    "api_secrets_put: key={:?} ≠ github_token — no reload",
+                    "api_secrets_put: key={:?} is not a GitHub auth key — no reload",
                     key.trim()
                 );
             }
@@ -3735,6 +3910,10 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         .route(
             "/api/v1/repos/{slug}/domains/discover",
             post(api_repo_domains_discover),
+        )
+        .route(
+            "/api/v1/repos/{slug}/skills",
+            get(api_repo_skills_get).patch(api_repo_skills_patch),
         )
         .route("/api/v1/pr-groups", get(api_pr_groups_get))
         .route("/api/v1/issue-groups", get(api_issue_groups_get))

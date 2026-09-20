@@ -68,6 +68,14 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             analyzed_at   TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS pr_reviews (
+            pr_number        INTEGER PRIMARY KEY,
+            result_json      TEXT NOT NULL,
+            posted_to_github INTEGER NOT NULL DEFAULT 0,
+            content_hash     TEXT,
+            reviewed_at      TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS sync_log (
             table_name     TEXT PRIMARY KEY,
             last_synced_at TEXT NOT NULL,
@@ -176,6 +184,15 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     if !has_triage_domains {
         conn.execute_batch(
             "ALTER TABLE triage_results ADD COLUMN domains TEXT NOT NULL DEFAULT '[]';",
+        )?;
+    }
+    // Migration: add suggested_actions to triage_results
+    let has_suggested_actions: bool = conn
+        .prepare("SELECT suggested_actions FROM triage_results LIMIT 0")
+        .is_ok();
+    if !has_suggested_actions {
+        conn.execute_batch(
+            "ALTER TABLE triage_results ADD COLUMN suggested_actions TEXT NOT NULL DEFAULT '[]';",
         )?;
     }
 

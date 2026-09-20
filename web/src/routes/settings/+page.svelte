@@ -42,9 +42,12 @@
 		fetchRepoDomains,
 		updateRepoDomains,
 		discoverRepoDomains,
+		fetchRepoSkills,
+		updateRepoSkills,
 		fetchRetrySettings,
 		updateRetrySettings,
 		type ReviewDomain,
+		type Skill,
 		type RepoFeatures,
 		type RetrySettings,
 		type LicenseInfo,
@@ -311,6 +314,64 @@
 			domainsMessageErr = true;
 		}
 		domainsSaving = false;
+	}
+
+	// AI review "Skills" — standing instructions the AI loads when they
+	// apply, same idea as an Anthropic Agent Skill. DB-backed (works on
+	// stateless pods). Managed in the dedicated "Skills" tab, per repo.
+	let skillsRepo: string = $state('');
+	let skillsDraft: Skill[] = $state([]);
+	let skillsLoading: boolean = $state(false);
+	let skillsSaving: boolean = $state(false);
+	let skillsMessage: string | null = $state(null);
+	let skillsMessageErr: boolean = $state(false);
+
+	async function loadSkillsFor(slug: string) {
+		skillsRepo = slug;
+		skillsDraft = [];
+		skillsMessage = null;
+		if (!slug) return;
+		skillsLoading = true;
+		try {
+			const s = await fetchRepoSkills(slug);
+			skillsDraft = s.skills ?? [];
+		} catch (e) {
+			skillsMessage = e instanceof Error ? e.message : 'Failed to load skills';
+			skillsMessageErr = true;
+		}
+		skillsLoading = false;
+	}
+	async function saveSkills() {
+		if (!skillsRepo) return;
+		skillsSaving = true;
+		skillsMessage = null;
+		try {
+			await updateRepoSkills(
+				skillsRepo,
+				skillsDraft.filter((s) => s.name.trim() !== '')
+			);
+			skillsMessage = 'Saved.';
+			skillsMessageErr = false;
+		} catch (e) {
+			skillsMessage = e instanceof Error ? e.message : 'save failed';
+			skillsMessageErr = true;
+		}
+		skillsSaving = false;
+	}
+	function addSkill() {
+		skillsDraft = [
+			...skillsDraft,
+			{ name: '', description: '', content: '', pipelines: [], enabled: true }
+		];
+	}
+	function removeSkill(i: number) {
+		skillsDraft = skillsDraft.filter((_, idx) => idx !== i);
+	}
+	function togglePipeline(i: number, pipeline: string) {
+		const s = skillsDraft[i];
+		const has = s.pipelines.includes(pipeline);
+		s.pipelines = has ? s.pipelines.filter((p) => p !== pipeline) : [...s.pipelines, pipeline];
+		skillsDraft = [...skillsDraft];
 	}
 
 	async function openFeaturesModal(slug: string) {
@@ -626,6 +687,7 @@
 		<Tabs.Trigger value="secrets">{$t('settings.tabs.secrets')}</Tabs.Trigger>
 		<Tabs.Trigger value="users">{$t('settings.tabs.users')}</Tabs.Trigger>
 		<Tabs.Trigger value="domains">Domains</Tabs.Trigger>
+		<Tabs.Trigger value="skills">Skills</Tabs.Trigger>
 	</Tabs.List>
 
 	<!-- ========================= REPOSITORIES ========================= -->
@@ -1374,6 +1436,11 @@
 								{$t('settings.secrets.commonKeys')} <code>github_token</code>, <code>anthropic_oauth_token</code>,
 								<code>anthropic_api_key</code>.
 							</p>
+							<p class="text-xs text-muted-foreground mt-1">
+								{$t('settings.secrets.githubAppHint')} <code>github_app_id</code>,
+								<code>github_app_installation_id</code>, <code>github_app_private_key</code>
+								{$t('settings.secrets.githubAppHintSuffix')}
+							</p>
 						</div>
 						<div>
 							<Label for="sec-value" class="text-xs mb-1">{$t('settings.secrets.value')}</Label>
@@ -1386,6 +1453,129 @@
 							{savingSecret ? $t('common.saving') : $t('settings.secrets.save')}
 						</Button>
 					</form>
+				</Card.Content>
+			</Card.Root>
+		</div>
+	</Tabs.Content>
+
+	<!-- ========================= SKILLS ========================= -->
+	<Tabs.Content value="skills" class="mt-2">
+		<div class="w-full space-y-4">
+			<Card.Root>
+				<Card.Header>
+					<Card.Title>Configured skills</Card.Title>
+					<Card.Description class="text-xs">
+						A Skill is a standing instruction the AI follows whenever it applies — appended to the prompt
+						alongside labels and grand domains before triage, PR analysis, or code review runs. Each
+						Skill below can target triage, PR analysis, review, or all three. Disabled skills stay saved
+						but are skipped. Changes take effect on the next pass — no restart needed.
+					</Card.Description>
+				</Card.Header>
+				<Card.Content class="space-y-3">
+					<div>
+						<Label class="text-xs mb-1">Repository</Label>
+						<select
+							class="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+							value={skillsRepo}
+							onchange={(e) => loadSkillsFor((e.currentTarget as HTMLSelectElement).value)}
+						>
+							<option value="" disabled>Select a repository…</option>
+							{#each reposList?.repos ?? [] as r}
+								<option value={r.slug}>{r.slug}</option>
+							{/each}
+						</select>
+					</div>
+
+					{#if skillsMessage}
+						{@render statusAlert(skillsMessage, skillsMessageErr)}
+					{/if}
+
+					{#if skillsRepo}
+						{#if skillsLoading}
+							<p class="text-xs text-muted-foreground">{$t('common.loading')}</p>
+						{:else}
+							<div class="flex items-center justify-between">
+								<h5 class="text-xs uppercase text-muted-foreground font-semibold">Skills</h5>
+								<button type="button" class="text-xs text-primary hover:underline" onclick={addSkill}>
+									+ add
+								</button>
+							</div>
+							{#each skillsDraft as s, i}
+								<div class="rounded-md border p-2 space-y-1.5">
+									<div class="flex items-center gap-1">
+										<input
+											type="checkbox"
+											class="h-4 w-4 shrink-0"
+											checked={s.enabled}
+											onchange={(e) => (s.enabled = (e.currentTarget as HTMLInputElement).checked)}
+											title="enabled → applied on the next review"
+										/>
+										<Input class="h-8 w-1/3" placeholder="name (e.g. rust-error-handling)" bind:value={s.name} />
+										<Input
+											class="h-8 flex-1"
+											placeholder="one-line description (for your own reference — not sent to the AI)"
+											value={s.description ?? ''}
+											oninput={(e) => (s.description = (e.currentTarget as HTMLInputElement).value)}
+										/>
+										<button
+											type="button"
+											class="px-2 text-muted-foreground hover:text-destructive"
+											onclick={() => removeSkill(i)}
+											aria-label="remove skill"
+										>
+											✕
+										</button>
+									</div>
+									<div class="flex items-center gap-3 pl-5 text-[0.7rem] text-muted-foreground">
+										<span>Applies to:</span>
+										<label class="flex items-center gap-1">
+											<input
+												type="checkbox"
+												class="h-3.5 w-3.5"
+												checked={s.pipelines.includes('triage')}
+												onchange={() => togglePipeline(i, 'triage')}
+											/>
+											triage
+										</label>
+										<label class="flex items-center gap-1">
+											<input
+												type="checkbox"
+												class="h-3.5 w-3.5"
+												checked={s.pipelines.includes('pr_review')}
+												onchange={() => togglePipeline(i, 'pr_review')}
+											/>
+											PR analysis
+										</label>
+										<label class="flex items-center gap-1">
+											<input
+												type="checkbox"
+												class="h-3.5 w-3.5"
+												checked={s.pipelines.includes('review')}
+												onchange={() => togglePipeline(i, 'review')}
+											/>
+											Code review (Pro)
+										</label>
+										<span class="italic">(all, if none checked)</span>
+									</div>
+									<textarea
+										class="w-full rounded-md border bg-background px-2 py-1 text-xs min-h-[72px] mono"
+										placeholder="Instructions appended to the prompt verbatim, e.g. &quot;Flag any panic!()/unwrap() in library code as a bug.&quot;"
+										bind:value={s.content}
+									></textarea>
+								</div>
+							{:else}
+								<p class="text-[0.7rem] text-muted-foreground">
+									No skills yet — click <strong>+ add</strong> to write one.
+								</p>
+							{/each}
+
+							<Button size="sm" onclick={saveSkills} disabled={skillsSaving}>
+								{skillsSaving ? $t('common.loading') : $t('common.save')}
+							</Button>
+						{/if}
+					{:else}
+						<p class="text-xs text-muted-foreground">Select a repository to manage its skills.</p>
+					{/if}
 				</Card.Content>
 			</Card.Root>
 		</div>
@@ -1704,6 +1894,14 @@
 								<span class="text-xs text-muted-foreground">{$t('settings.features.ai.review.help')}</span>
 							</span>
 							{@render infoTip('tip-review', 'settings.features.ai.review.tip')}
+						</label>
+						<label class="flex items-center gap-2 text-sm ml-6 pl-3 border-l-2 border-muted" class:opacity-60={!featuresDraft.review_prs}>
+							<input type="checkbox" bind:checked={featuresDraft.review_post_comments} disabled={!featuresDraft.review_prs} class="rounded" />
+							<span>
+								<strong>{$t('settings.features.ai.review.post')}</strong>
+								<span class="text-xs text-muted-foreground">{$t('settings.features.ai.review.post.help')}</span>
+							</span>
+							{@render infoTip('tip-review-post', 'settings.features.ai.review.post.tip')}
 						</label>
 					</div>
 				</div>

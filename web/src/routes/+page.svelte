@@ -6,6 +6,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import * as Card from '$lib/components/ui/card';
 	import * as Table from '$lib/components/ui/table';
+	import ActivitySparkline from '$lib/components/ActivitySparkline.svelte';
 
 	let status: Status | null = $state(null);
 	let error: string | null = $state(null);
@@ -44,31 +45,58 @@
 	</Card.Root>
 {:else}
 	<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-		<Card.Root class="text-center">
-			<Card.Content>
-				<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Open Issues</div>
-				<div class="text-3xl font-bold text-foreground mono">{status?.open_issues ?? '--'}</div>
-			</Card.Content>
-		</Card.Root>
-		<Card.Root class="text-center">
-			<Card.Content>
-				<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Open PRs</div>
-				<div class="text-3xl font-bold text-foreground mono">{status?.open_prs ?? '--'}</div>
-			</Card.Content>
-		</Card.Root>
-		<Card.Root class="text-center">
-			<Card.Content>
-				<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Untriaged</div>
-				<div class="text-3xl font-bold text-foreground mono">{status?.untriaged ?? '--'}</div>
-			</Card.Content>
-		</Card.Root>
-		<Card.Root class="text-center">
-			<Card.Content>
-				<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Conflicts</div>
-				<div class="text-3xl font-bold text-foreground mono">{status?.conflicts ?? '--'}</div>
-			</Card.Content>
-		</Card.Root>
+		<a href="/issues" class="block">
+			<Card.Root class="text-center transition-colors hover:border-primary/50 hover:bg-accent/30">
+				<Card.Content>
+					<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Open Issues</div>
+					<div class="text-3xl font-bold text-foreground mono">{status?.open_issues ?? '--'}</div>
+					{#if status && status.issues_new_7d > 0}
+						<div class="text-xs text-green-600 dark:text-green-400 mt-1">+{status.issues_new_7d} this week</div>
+					{/if}
+				</Card.Content>
+			</Card.Root>
+		</a>
+		<a href="/prs" class="block">
+			<Card.Root class="text-center transition-colors hover:border-primary/50 hover:bg-accent/30">
+				<Card.Content>
+					<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Open PRs</div>
+					<div class="text-3xl font-bold text-foreground mono">{status?.open_prs ?? '--'}</div>
+					{#if status && status.prs_new_7d > 0}
+						<div class="text-xs text-green-600 dark:text-green-400 mt-1">+{status.prs_new_7d} this week</div>
+					{/if}
+				</Card.Content>
+			</Card.Root>
+		</a>
+		<a href="/issues" class="block">
+			<Card.Root class="text-center transition-colors hover:border-primary/50 hover:bg-accent/30">
+				<Card.Content>
+					<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Untriaged</div>
+					<div class="text-3xl font-bold text-foreground mono">{status?.untriaged ?? '--'}</div>
+				</Card.Content>
+			</Card.Root>
+		</a>
+		<a href="/prs?conflicts=yes" class="block">
+			<Card.Root class="text-center transition-colors hover:border-primary/50 hover:bg-accent/30">
+				<Card.Content>
+					<div class="text-xs uppercase tracking-wider text-muted-foreground mb-2">Conflicts</div>
+					<div
+						class="text-3xl font-bold mono {status?.conflicts ? 'text-red-600 dark:text-red-400' : 'text-foreground'}"
+					>{status?.conflicts ?? '--'}</div>
+				</Card.Content>
+			</Card.Root>
+		</a>
 	</div>
+
+	{#if status && status.daily_activity.length > 0}
+		<Card.Root class="mt-6">
+			<Card.Header>
+				<Card.Title class="text-base">Activity — last 14 days</Card.Title>
+			</Card.Header>
+			<Card.Content>
+				<ActivitySparkline data={status.daily_activity} />
+			</Card.Content>
+		</Card.Root>
+	{/if}
 
 	<Card.Root class="mt-6">
 		<Card.Header>
@@ -81,6 +109,7 @@
 		</Card.Header>
 		<Card.Content>
 			{#if status && status.repos.length > 0}
+				<div class="w-full overflow-x-auto">
 				<Table.Root class="w-full">
 					<Table.Header class="text-xs uppercase text-muted-foreground">
 						<Table.Row>
@@ -100,7 +129,9 @@
 								<Table.Cell class="px-2 py-1.5 mono text-right">{repo.open_issues}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5 mono text-right">{repo.open_prs}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5 mono text-right">{repo.untriaged}</Table.Cell>
-								<Table.Cell class="px-2 py-1.5 mono text-right">{repo.conflicts}</Table.Cell>
+								<Table.Cell
+									class="px-2 py-1.5 mono text-right {repo.conflicts ? 'text-red-600 dark:text-red-400' : ''}"
+								>{repo.conflicts}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5 text-muted-foreground" title={exactTime(repo.last_sync)}>{timeAgo(repo.last_sync)}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5">
 									{#if repo.apply}
@@ -113,6 +144,7 @@
 						{/each}
 					</Table.Body>
 				</Table.Root>
+				</div>
 			{:else}
 				<p class="text-sm text-muted-foreground">No repositories configured.</p>
 			{/if}

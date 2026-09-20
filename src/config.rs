@@ -5,6 +5,15 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
 
+/// Resolved GitHub App credentials — never part of `config.toml` (secrets
+/// only live in the encrypted store / env, per [`Config::github_app_auth_optional`]).
+#[derive(Debug, Clone)]
+pub struct GithubAppAuth {
+    pub app_id: u64,
+    pub installation_id: u64,
+    pub private_key_pem: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
@@ -174,6 +183,12 @@ pub struct TriageConfig {
     #[serde(default)]
     pub retriage_interval_hours: u32,
 
+    /// Append AI-generated "Suggested Actions" to triage comments (default: true).
+    /// Set to false to omit the section from comments and CLI output, and to avoid
+    /// asking the AI to generate them (saves tokens).
+    #[serde(default = "default_true")]
+    pub suggested_actions: bool,
+
     /// Override the AI system prompt for triage. If not set, uses the built-in default.
     #[serde(default)]
     pub system_prompt: Option<String>,
@@ -193,6 +208,7 @@ impl Default for TriageConfig {
             labels_wontfix: default_label_wontfix(),
             labels_needs_info: default_label_needs_info(),
             retriage_interval_hours: 0,
+            suggested_actions: true,
             system_prompt: None,
         }
     }
@@ -400,7 +416,11 @@ fn pr_default_mergeable() -> i32 {
     2
 }
 fn pr_default_conflict() -> i32 {
-    -25
+    // Must outweigh every other positive signal a PR can rack up (ci_green
+    // 25 + age_bonus_max 10 = 35) so an old, green-CI PR with a real GitHub
+    // merge conflict can never coast above a clean PR on age alone — a
+    // conflict means it needs a rebase before it's "ready", full stop.
+    -35
 }
 fn pr_default_linked_issue() -> i32 {
     5
@@ -666,6 +686,93 @@ pub fn domains_prompt(domains: &[DomainDef], custom: Option<&str>) -> String {
     }
     out.push_str("\nReturn them in the `domains` array (short lowercase slugs, e.g. \"codex\", \"bun\"). Reuse a known domain whenever it fits; only introduce a NEW domain name if none of the above applies.\n");
     out
+}
+
+/// A named block of standing instructions the AI review should follow when
+/// it applies — the same idea as an Anthropic Agent Skill (a reusable
+/// capability the model loads when relevant), scoped here to wshm's own
+/// triage/PR-review calls rather than a whole Claude session. Users write
+/// these in Settings; `skills_prompt` renders the ones that match the
+/// current pipeline into the user prompt, right after domains.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SkillDef {
+    /// Short human name (e.g. "rust-error-handling").
+    pub name: String,
+
+    /// One-line summary shown in the Settings list — NOT sent to the AI.
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// The actual instructions appended to the prompt verbatim.
+    pub content: String,
+
+    /// Which pipelines this skill applies to: any of "triage", "pr_review",
+    /// "review" (inline code review). Empty means all of them.
+    #[serde(default)]
+    pub pipelines: Vec<String>,
+
+    /// Skills can be authored but temporarily switched off without deleting them.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// Build the AI-prompt fragment listing the skills that apply to `pipeline`
+/// ("triage" or "pr_review"). Mirrors [`domains_prompt`]'s DB-backed,
+/// stateless-pods-safe pattern — see its doc comment for why this isn't TOML.
+/// Returns empty when no enabled skill matches.
+pub fn skills_prompt(skills: &[SkillDef], pipeline: &str) -> String {
+    let matching: Vec<&SkillDef> = skills
+        .iter()
+        .filter(|s| {
+            s.enabled && (s.pipelines.is_empty() || s.pipelines.iter().any(|p| p == pipeline))
+        })
+        .collect();
+    if matching.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n## Skills — standing instructions to apply to this review:\n");
+    for skill in matching {
+        out.push_str(&format!("\n### {}\n{}\n", skill.name, skill.content.trim()));
+    }
+    out
+}
+
+/// Load this repo's configured Skills, falling back to [`default_skills`]
+/// when the repo has never saved its own list (`SKILLS_KEY` unset). Once a
+/// repo saves ANY list via Settings — including an empty one — that becomes
+/// its persisted choice and the default is no longer consulted for it.
+pub fn load_skills(db: &dyn crate::db::backend::DatabaseBackend) -> Vec<SkillDef> {
+    match db
+        .get_app_setting(crate::db::settings::SKILLS_KEY)
+        .ok()
+        .flatten()
+    {
+        Some(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        None => default_skills(),
+    }
+}
+
+/// The single Skill pre-seeded for a repo that has never configured its own
+/// skills list (i.e. the `SKILLS_KEY` app_setting has never been written).
+/// Applies to every pipeline by default; repos disable or edit it like any
+/// other skill via Settings — once a repo saves ANY skills list (even an
+/// empty one), that repo's own choice is persisted and this default is no
+/// longer consulted for it.
+pub fn default_skills() -> Vec<SkillDef> {
+    vec![SkillDef {
+        name: "core-review-checklist".to_string(),
+        description: Some(
+            "Baseline checks applied to every AI review pass by default.".to_string(),
+        ),
+        content: "Flag concrete defects only: real bugs, security issues (injection, auth \
+bypass, leaked secrets, unsafe deserialization), correctness errors, and obvious data \
+races/resource leaks. Do not nitpick style, formatting, or naming that a linter already \
+enforces. Do not suggest speculative refactors or hypothetical future-proofing. If a change \
+looks correct and reasonably simple, say so briefly instead of inventing issues."
+            .to_string(),
+        pipelines: vec![],
+        enabled: true,
+    }]
 }
 
 /// A "grand domain" — a broad area of the codebase/product (e.g. codex, bun,
@@ -1465,6 +1572,14 @@ pub struct RepoFeatures {
     /// Pro-only inline code review.
     #[serde(default)]
     pub review_prs: bool,
+    /// Whether a computed review is also posted to GitHub as inline PR
+    /// comments. Independent of `apply` (the repo's general "write to
+    /// GitHub" mode) so a repo can run review computation silently — shown
+    /// on the dashboard only — even while `apply` is on for other features.
+    /// Defaults true so enabling `review_prs` elsewhere keeps today's
+    /// behavior (compute-and-post) unless explicitly turned off.
+    #[serde(default = "default_true")]
+    pub review_post_comments: bool,
 
     // Mutating actions on the repo
     #[serde(default)]
@@ -1485,6 +1600,7 @@ impl Default for RepoFeatures {
             triage_issues: false,
             analyze_prs: false,
             review_prs: false,
+            review_post_comments: true,
             auto_pr: false,
             auto_merge: false,
             filters: RepoFilters::default(),
@@ -1871,6 +1987,14 @@ impl Config {
 
         let template = r#"[github]
 # Token from env var GITHUB_TOKEN or WSHM_TOKEN, or `gh auth token` (never stored in config)
+#
+# Alternative: authenticate as a GitHub App instead of a personal token.
+# A self-refreshing installation token beats a PAT for an unattended bot —
+# no manual rotation, and it's scoped to only the repos the App is
+# installed on. Set all three (env or Settings -> Secrets), never in this
+# file: WSHM_GITHUB_APP_ID, WSHM_GITHUB_APP_INSTALLATION_ID,
+# WSHM_GITHUB_APP_PRIVATE_KEY (PEM; literal "\n" line breaks are accepted).
+# When present, App auth takes priority over GITHUB_TOKEN/WSHM_TOKEN.
 
 [ai]
 provider = "anthropic"
@@ -1905,6 +2029,7 @@ labels_duplicate = "duplicate"
 labels_wontfix = "wontfix"
 labels_needs_info = "needs-info"
 # retriage_interval_hours = 24   # re-evaluate triaged issues every 24h (0 = disabled)
+# suggested_actions = true        # append "Suggested Actions" to triage comments (set false to disable)
 
 [pr]
 enabled = true
@@ -2141,6 +2266,53 @@ full_sync_interval_hours = 24
             .context("No GitHub token found. Set GITHUB_TOKEN, WSHM_TOKEN, authenticate with `gh auth login`, or add a github_token in Settings → Secrets")
     }
 
+    /// Resolve GitHub App credentials for self-refreshing bot auth, without
+    /// bailing when absent (App auth is opt-in; most installs still use a
+    /// PAT). All three fields must be present and non-empty — a partially
+    /// configured App is treated as "not configured" so callers fall back
+    /// to [`Self::github_token_optional`] instead of failing outright.
+    ///
+    /// Same resolution order as `github_token_optional`: encrypted secret
+    /// store (per-repo override → global) → env var.
+    pub fn github_app_auth_optional(&self) -> Option<GithubAppAuth> {
+        let store = crate::secrets::global();
+        let slug = self.repo_slug();
+        let resolve = |key: &str, env_name: &str| {
+            crate::secrets::resolve(store.as_ref(), Some(&slug), key, env_name)
+                .filter(|v| !v.trim().is_empty())
+        };
+
+        let app_id = resolve("github_app_id", "WSHM_GITHUB_APP_ID")?;
+        let installation_id = resolve(
+            "github_app_installation_id",
+            "WSHM_GITHUB_APP_INSTALLATION_ID",
+        )?;
+        let private_key_pem = resolve("github_app_private_key", "WSHM_GITHUB_APP_PRIVATE_KEY")?;
+
+        let app_id = app_id.trim().parse().ok().or_else(|| {
+            tracing::warn!("github_app_id is not a valid integer — ignoring GitHub App auth");
+            None
+        })?;
+        let installation_id = installation_id.trim().parse().ok().or_else(|| {
+            tracing::warn!(
+                "github_app_installation_id is not a valid integer — ignoring GitHub App auth"
+            );
+            None
+        })?;
+
+        // A PEM pasted into a single-line secret input can't carry real
+        // newlines, so accept the literal two-character sequence `\n` as an
+        // escape and unescape it here — same convention as Firebase/Vercel
+        // service-account env vars.
+        let private_key_pem = private_key_pem.replace("\\n", "\n");
+
+        Some(GithubAppAuth {
+            app_id,
+            installation_id,
+            private_key_pem,
+        })
+    }
+
     /// Resolve a GitHub token without bailing when absent. Returns `None` so
     /// the daemon can run in anonymous read-only mode against public repos
     /// (rate-limited to 60 req/h). Mutating endpoints (post labels/comments,
@@ -2286,5 +2458,93 @@ mod tests {
         let (owner, repo) = parse_github_url("https://github.com/user/project").unwrap();
         assert_eq!(owner, "user");
         assert_eq!(repo, "project");
+    }
+
+    /// Self-contained: sets/clears its own env vars sequentially so it's
+    /// safe alongside other tests running in the same process (no other
+    /// test touches these var names). `secrets::global()` is never
+    /// installed in a unit-test process, so `github_app_auth_optional`
+    /// resolves purely from env — matching production's env-var fallback
+    /// path for a standalone (non-daemon) install.
+    #[test]
+    fn test_github_app_auth_optional_requires_all_three_fields() {
+        const VARS: [&str; 3] = [
+            "WSHM_GITHUB_APP_ID",
+            "WSHM_GITHUB_APP_INSTALLATION_ID",
+            "WSHM_GITHUB_APP_PRIVATE_KEY",
+        ];
+        for v in VARS {
+            std::env::remove_var(v);
+        }
+
+        let config = Config {
+            repo_owner: "acme".to_string(),
+            repo_name: "widgets".to_string(),
+            ..Config::default()
+        };
+
+        assert!(
+            config.github_app_auth_optional().is_none(),
+            "no App fields set — must not report configured"
+        );
+
+        std::env::set_var("WSHM_GITHUB_APP_ID", "123456");
+        assert!(
+            config.github_app_auth_optional().is_none(),
+            "only app_id set — partial config must still be None"
+        );
+
+        std::env::set_var("WSHM_GITHUB_APP_INSTALLATION_ID", "789");
+        std::env::set_var(
+            "WSHM_GITHUB_APP_PRIVATE_KEY",
+            "-----BEGIN RSA PRIVATE KEY-----\\nabc\\n-----END RSA PRIVATE KEY-----",
+        );
+        let auth = config
+            .github_app_auth_optional()
+            .expect("all three fields set — must resolve");
+        assert_eq!(auth.app_id, 123456);
+        assert_eq!(auth.installation_id, 789);
+        assert_eq!(
+            auth.private_key_pem,
+            "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----",
+            "literal \\n must be unescaped to real newlines"
+        );
+
+        for v in VARS {
+            std::env::remove_var(v);
+        }
+    }
+
+    fn skill(name: &str, pipelines: &[&str], enabled: bool) -> SkillDef {
+        SkillDef {
+            name: name.to_string(),
+            description: None,
+            content: format!("do {name} things"),
+            pipelines: pipelines.iter().map(|s| s.to_string()).collect(),
+            enabled,
+        }
+    }
+
+    #[test]
+    fn test_skills_prompt_filters_by_pipeline_and_enabled() {
+        let skills = vec![
+            skill("triage-only", &["triage"], true),
+            skill("pr-only", &["pr_review"], true),
+            skill("both", &[], true),
+            skill("disabled", &["triage"], false),
+        ];
+
+        let triage = skills_prompt(&skills, "triage");
+        assert!(triage.contains("triage-only"));
+        assert!(triage.contains("both"));
+        assert!(!triage.contains("pr-only"));
+        assert!(!triage.contains("disabled"));
+
+        let pr = skills_prompt(&skills, "pr_review");
+        assert!(pr.contains("pr-only"));
+        assert!(pr.contains("both"));
+        assert!(!pr.contains("triage-only"));
+
+        assert_eq!(skills_prompt(&[], "triage"), "");
     }
 }

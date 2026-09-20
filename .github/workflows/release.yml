@@ -206,7 +206,7 @@ jobs:
             desc "AI-powered GitHub agent — triage, PR analysis, merge queue"
             homepage "https://wshm.dev"
             version "VERSION_PLACEHOLDER"
-            license "SSPL-1.0"
+            license "Apache-2.0"
 
             on_macos do
               on_arm do
@@ -303,7 +303,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/wshm-dev/wshm
             org.opencontainers.image.description=wshm — AI-powered GitHub agent
-            org.opencontainers.image.licenses=SSPL-1.0
+            org.opencontainers.image.licenses=Apache-2.0
           outputs: type=image,name=innovtech/wshm,push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest

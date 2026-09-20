@@ -21,6 +21,8 @@ pub const REVIEW_DOMAINS_KEY: &str = "review_domains";
 pub const REVIEW_PROMPT_KEY: &str = "review_prompt";
 /// Setting key: how many top subjects `discover` proposes (stringified usize).
 pub const REVIEW_DOMAINS_LIMIT_KEY: &str = "review_domains_limit";
+/// Setting key: configured AI review skills, as a JSON array of `SkillDef`.
+pub const SKILLS_KEY: &str = "skills";
 
 impl Database {
     /// Read a setting value, or `None` if unset.

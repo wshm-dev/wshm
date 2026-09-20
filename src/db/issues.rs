@@ -343,6 +343,7 @@ mod tests {
             is_simple_fix: false,
             relevant_files: vec![],
             domains: vec![],
+            suggested_actions: vec![],
         }
     }
 

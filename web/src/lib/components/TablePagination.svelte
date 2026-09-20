@@ -8,9 +8,17 @@
 		offset: number;
 		storageKey?: string;
 		onChange: (next: { limit: number; offset: number }) => void;
+		/** Rows actually shown after client-side text/dropdown filters are
+		 * applied to the currently-loaded page. Filtering here only ever
+		 * narrows what's on THIS page — Prev/Next still page through the
+		 * unfiltered server total — so when this differs from the page's
+		 * loaded row count, the summary switches to an honest "N matching
+		 * (of M loaded, T total)" instead of implying the filtered set
+		 * spans the whole T. */
+		filteredCount?: number;
 	}
 
-	let { total, limit, offset, storageKey, onChange }: Props = $props();
+	let { total, limit, offset, storageKey, onChange, filteredCount }: Props = $props();
 
 	const sizes = [25, 50, 100, 250, 500];
 
@@ -38,6 +46,8 @@
 
 	const start = $derived(total === 0 ? 0 : offset + 1);
 	const end = $derived(Math.min(total, offset + limit));
+	const loadedOnPage = $derived(total === 0 ? 0 : end - offset);
+	const isFiltered = $derived(filteredCount !== undefined && filteredCount !== loadedOnPage);
 	const canPrev = $derived(offset > 0);
 	const canNext = $derived(offset + limit < total);
 </script>
@@ -62,6 +72,8 @@
 	<div>
 		{#if total === 0}
 			0 items
+		{:else if isFiltered}
+			{filteredCount} matching (of {loadedOnPage} loaded, {total} total)
 		{:else}
 			{start}–{end} of {total}
 		{/if}

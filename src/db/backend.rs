@@ -6,6 +6,7 @@ use crate::ai::schemas::IssueClassification;
 use crate::db::events::WebhookEventRow;
 use crate::db::issues::Issue;
 use crate::db::pulls::{PrAnalysisRow, PullRequest};
+use crate::db::reviews::PrReviewRow;
 use crate::db::search::SearchHit;
 use crate::db::sync::SyncEntry;
 use crate::db::triage::TriageResultRow;
@@ -104,6 +105,20 @@ pub trait DatabaseBackend: Send + Sync {
     /// against any backend that implements this trait.
     fn upsert_pr_analysis(&self, row: &PrAnalysisRow) -> Result<()>;
 
+    // ── PR inline review (Pro) ──────────────────────────────────
+    //
+    // Distinct from PR analysis above: `pr_reviews` stores the actual
+    // line-anchored inline-comment findings from `pipelines::review`
+    // (a real code review), not the coarse risk/type/summary classification
+    // `pr_analyses` holds. Written whenever a review is computed, regardless
+    // of whether it was also posted to GitHub — `posted_to_github` records
+    // that separately so the web UI can show "reviewed, not posted".
+
+    fn get_pr_review(&self, pr_number: u64) -> Result<Option<PrReviewRow>>;
+    /// Batch loader mirroring `get_all_pr_analyses`.
+    fn get_all_pr_reviews(&self) -> Result<std::collections::HashMap<u64, PrReviewRow>>;
+    fn upsert_pr_review(&self, row: &PrReviewRow) -> Result<()>;
+
     /// Apply freshly-synced GitHub review decisions (PR number → decision)
     /// to open PRs; PRs absent from the map get their decision cleared.
     /// Backs the "To Validate" review-radar view. Default impl is a no-op
@@ -122,6 +137,19 @@ pub trait DatabaseBackend: Send + Sync {
     /// without the column keep compiling — real backends override it.
     fn set_pull_reactions(&self, reactions: &std::collections::HashMap<u64, u32>) -> Result<u64> {
         let _ = reactions;
+        Ok(0)
+    }
+
+    /// Apply freshly-synced CI statuses (PR number → state) to open PRs;
+    /// PRs absent from the map get their status cleared. Backs the CI
+    /// column on the PRs and Merge Queue views. Default no-op returning 0
+    /// so backends without the column keep compiling — real backends
+    /// override it.
+    fn set_ci_statuses(
+        &self,
+        statuses: &std::collections::HashMap<u64, Option<String>>,
+    ) -> Result<u64> {
+        let _ = statuses;
         Ok(0)
     }
 
@@ -283,6 +311,18 @@ impl DatabaseBackend for super::Database {
         self.get_all_pr_analyses()
     }
 
+    fn get_pr_review(&self, pr_number: u64) -> Result<Option<PrReviewRow>> {
+        self.get_pr_review(pr_number)
+    }
+
+    fn get_all_pr_reviews(&self) -> Result<std::collections::HashMap<u64, PrReviewRow>> {
+        self.get_all_pr_reviews()
+    }
+
+    fn upsert_pr_review(&self, row: &PrReviewRow) -> Result<()> {
+        self.upsert_pr_review(row)
+    }
+
     fn get_closed_pulls(&self, limit: usize) -> Result<Vec<PullRequest>> {
         self.get_closed_pulls(limit)
     }
@@ -402,6 +442,13 @@ impl DatabaseBackend for super::Database {
 
     fn set_pull_reactions(&self, reactions: &std::collections::HashMap<u64, u32>) -> Result<u64> {
         self.set_pull_reactions(reactions)
+    }
+
+    fn set_ci_statuses(
+        &self,
+        statuses: &std::collections::HashMap<u64, Option<String>>,
+    ) -> Result<u64> {
+        self.set_ci_statuses(statuses)
     }
 
     fn get_app_setting(&self, key: &str) -> Result<Option<String>> {

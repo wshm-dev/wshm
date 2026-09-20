@@ -224,6 +224,64 @@ impl Client {
         Ok(map)
     }
 
+    /// Fetch combined CI status for every open PR, number → state.
+    ///
+    /// GitHub's `/pulls` list carries no CI info, and there's no per-PR
+    /// combined-status endpoint worth calling N times over — mirrors
+    /// `fetch_review_decisions`: three `status:*` Search API qualifiers,
+    /// same endpoint/retry/1000-result cap, no extra request budget spent
+    /// per PR. A PR matching none of the three (no commit statuses/check
+    /// runs reported yet) is simply absent from the map.
+    pub async fn fetch_ci_statuses(
+        &self,
+    ) -> Result<std::collections::HashMap<u64, Option<String>>> {
+        let mut map = std::collections::HashMap::new();
+        for (qualifier, state) in [
+            ("status:success", "success"),
+            ("status:failure", "failure"),
+            ("status:pending", "pending"),
+        ] {
+            let query = format!(
+                "repo:{}/{} is:pr is:open {qualifier}",
+                self.owner, self.repo
+            );
+            let mut page = 1u32;
+            loop {
+                let url = format!(
+                    "https://api.github.com/search/issues?q={}&per_page=100&page={page}",
+                    urlencoding::encode(&query)
+                );
+                let body = crate::retry::with_retry("github: search ci statuses", || async {
+                    let resp = self
+                        .octocrab
+                        ._get(&url)
+                        .await
+                        .context("Failed to search CI statuses")?;
+                    self.octocrab
+                        .body_to_string(resp)
+                        .await
+                        .context("Failed to read search response body")
+                })
+                .await?;
+                let json: serde_json::Value = serde_json::from_str(&body)
+                    .context("Failed to parse ci-status search response")?;
+                let items = json["items"].as_array().cloned().unwrap_or_default();
+                let n = items.len();
+                for item in &items {
+                    if let Some(number) = item["number"].as_u64() {
+                        map.insert(number, Some(state.to_string()));
+                    }
+                }
+                // The Search API caps results at 1000 (10 pages of 100).
+                if n < 100 || page >= 10 {
+                    break;
+                }
+                page += 1;
+            }
+        }
+        Ok(map)
+    }
+
     /// Fetch pull requests filtered by state ("open", "closed", or "all").
     /// Used by incremental sync to fetch only open PRs (saves bandwidth).
     pub async fn fetch_pulls_by_state(&self, state: &str) -> Result<Vec<PullRequest>> {
@@ -358,27 +416,41 @@ impl Client {
         self.fetch_pr_diff_raw(number).await
     }
 
-    /// Fetch the raw unified diff for a PR
+    /// Fetch the raw unified diff for a PR.
+    ///
+    /// Goes through the authenticated `api.github.com` REST endpoint (content
+    /// negotiation via the diff media type), not the public
+    /// `github.com/.../pull/N.diff` URL — that URL lives on GitHub's main web
+    /// domain rather than its API, which some network paths (this app's own
+    /// production cluster included) reach far less reliably than
+    /// `api.github.com`, and it also bypasses whatever auth/rate-limit
+    /// headroom the GitHub App installation token gives us.
     pub async fn fetch_pr_diff_raw(&self, number: u64) -> Result<String> {
-        // Use the .diff URL which returns raw unified diff
-        let url = format!(
-            "https://github.com/{}/{}/pull/{number}.diff",
-            self.owner, self.repo
+        use http_body_util::BodyExt;
+
+        let route = format!("/repos/{}/{}/pulls/{number}", self.owner, self.repo);
+        let mut headers = http::header::HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT,
+            http::header::HeaderValue::from_static("application/vnd.github.v3.diff"),
         );
 
         crate::retry::with_retry("github: fetch PR diff", || async {
             let response = self
-                .http
-                .get(&url)
-                .send()
+                .octocrab
+                ._get_with_headers(route.as_str(), Some(headers.clone()))
                 .await
-                .with_context(|| format!("Failed to fetch raw diff for PR #{number}"))?;
+                .with_context(|| format!("Failed to fetch diff for PR #{number}"))?;
 
             let status = response.status();
-            let text = response
-                .text()
+            let body = response
+                .into_body()
+                .collect()
                 .await
-                .with_context(|| format!("Failed to read raw diff for PR #{number}"))?;
+                .with_context(|| format!("Failed to read diff body for PR #{number}"))?
+                .to_bytes();
+            let text = String::from_utf8(body.to_vec())
+                .with_context(|| format!("Diff for PR #{number} was not valid UTF-8"))?;
 
             if !status.is_success() {
                 anyhow::bail!("Failed to fetch diff for PR #{number}: HTTP {status}");

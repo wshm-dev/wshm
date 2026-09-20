@@ -3,7 +3,7 @@ name = "wshm-core"
 version = "0.31.7"
 edition = "2021"
 description = "Core library for wshm"
-license = "SSPL-1.0"
+license = "Apache-2.0"
 
 [[bin]]
 name = "wshm"
@@ -40,6 +40,17 @@ vault-all = ["vault-hashicorp", "vault-aws", "vault-gcp"]
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 octocrab = "0.44"
+# Used with octocrab's low-level `_get_with_headers` to fetch a PR diff
+# through the authenticated api.github.com endpoint instead of the public
+# github.com/*.diff URL — see fetch_pr_diff_raw. Versions match what
+# octocrab 0.44 itself resolves to (Cargo.lock already carries both
+# transitively; these just make them directly nameable in our code).
+http = "1"
+http-body-util = "0.1"
+# Pinned to the exact version octocrab 0.44 depends on — its `.app()`
+# builder takes a `jsonwebtoken::EncodingKey` by value, so a mismatched
+# major/minor version would fail to type-check even though both compile.
+jsonwebtoken = "9.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -79,8 +90,8 @@ rand = "0.8"
 aes-gcm = "0.10"
 
 # Optional: Export - Cloud Storage
-aws-sdk-s3 = { version = "1", optional = true }
-aws-config = { version = "1", optional = true }
+aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
+aws-config = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process", "sso"] }
 google-cloud-storage = { version = "1", optional = true }
 
 # Optional: Export - Databases
@@ -91,7 +102,7 @@ mysql_async = { version = "0.36", optional = true }
 
 # Optional: Vault
 vaultrs = { version = "0.7", optional = true }
-aws-sdk-secretsmanager = { version = "1", optional = true }
+aws-sdk-secretsmanager = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio"] }
 google-cloud-secretmanager-v1 = { version = "1", optional = true }
 mime_guess = "2"
 rust-embed = "8"

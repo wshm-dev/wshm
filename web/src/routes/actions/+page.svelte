@@ -7,6 +7,9 @@
 	import * as Alert from '$lib/components/ui/alert';
 	import * as Card from '$lib/components/ui/card';
 	import * as Table from '$lib/components/ui/table';
+	import * as Dialog from '$lib/components/ui/dialog';
+	import IssueDetail from '$lib/components/IssueDetail.svelte';
+	import PrDetail from '$lib/components/PrDetail.svelte';
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 
 	let status: Status | null = $state(null);
@@ -17,6 +20,15 @@
 
 	let aiMissing = $derived(auth !== null && !auth.anthropic);
 	let ghMissing = $derived(auth !== null && !auth.github);
+
+	// Row click opens the same detail modal as /issues and /prs; the Done
+	// button stops propagation so marking a row never also opens it.
+	let issueModalOpen = $state(false);
+	let activeIssue: Issue | null = $state(null);
+	let prModalOpen = $state(false);
+	let activePr: PullRequest | null = $state(null);
+	function openIssue(issue: Issue) { activeIssue = issue; issueModalOpen = true; }
+	function openPr(pr: PullRequest) { activePr = pr; prModalOpen = true; }
 
 	const priorityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
@@ -273,7 +285,7 @@
 					<Table.Body>
 						{#each actionRequiredView as issue}
 							{@const key = issueKey(issue)}
-							<Table.Row class={isDone(key) ? 'opacity-50' : ''}>
+							<Table.Row class="cursor-pointer {isDone(key) ? 'opacity-50' : ''}" onclick={() => openIssue(issue)}>
 								<Table.Cell class="px-2 py-1.5 mono">{issue.number}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5">
 									<Badge
@@ -286,7 +298,7 @@
 								<Table.Cell class="px-2 py-1.5 text-muted-foreground mono">{ageText(issue.created_at)}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5">{issue.title}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5 text-right">
-									<Button size="xs" variant="outline" onclick={() => toggleDone(key)}>
+									<Button size="xs" variant="outline" onclick={(e: MouseEvent) => { e.stopPropagation(); toggleDone(key); }}>
 										{isDone(key) ? 'Undo' : '✓ Done'}
 									</Button>
 								</Table.Cell>
@@ -324,13 +336,13 @@
 					<Table.Body>
 						{#each issuesTodoView as issue}
 							{@const key = issueKey(issue)}
-							<Table.Row class={isDone(key) ? 'opacity-50' : ''}>
+							<Table.Row class="cursor-pointer {isDone(key) ? 'opacity-50' : ''}" onclick={() => openIssue(issue)}>
 								<Table.Cell class="px-2 py-1.5 mono">{issue.number}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5">{issue.priority ?? '-'}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5 text-muted-foreground mono">{ageText(issue.created_at)}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5">{issue.title}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5 text-right">
-									<Button size="xs" variant="outline" onclick={() => toggleDone(key)}>
+									<Button size="xs" variant="outline" onclick={(e: MouseEvent) => { e.stopPropagation(); toggleDone(key); }}>
 										{isDone(key) ? 'Undo' : '✓ Done'}
 									</Button>
 								</Table.Cell>
@@ -368,14 +380,14 @@
 					<Table.Body>
 						{#each prsTodoView as pr}
 							{@const key = prKey(pr)}
-							<Table.Row class={isDone(key) ? 'opacity-50' : ''}>
+							<Table.Row class="cursor-pointer {isDone(key) ? 'opacity-50' : ''}" onclick={() => openPr(pr)}>
 								<Table.Cell class="px-2 py-1.5 mono">{pr.number}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5">
-									{#if pr.risk}
-										{#if riskBadgeClass(pr.risk)}
-											<Badge variant="outline" class={riskBadgeClass(pr.risk)}>{pr.risk}</Badge>
+									{#if pr.risk_level}
+										{#if riskBadgeClass(pr.risk_level)}
+											<Badge variant="outline" class={riskBadgeClass(pr.risk_level)}>{pr.risk_level}</Badge>
 										{:else}
-											<Badge variant="secondary">{pr.risk}</Badge>
+											<Badge variant="secondary">{pr.risk_level}</Badge>
 										{/if}
 									{:else}
 										<span class="text-muted-foreground">-</span>
@@ -384,7 +396,7 @@
 								<Table.Cell class="px-2 py-1.5 text-muted-foreground mono">{ageText(pr.created_at)}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5">{pr.title}</Table.Cell>
 								<Table.Cell class="px-2 py-1.5 text-right">
-									<Button size="xs" variant="outline" onclick={() => toggleDone(key)}>
+									<Button size="xs" variant="outline" onclick={(e: MouseEvent) => { e.stopPropagation(); toggleDone(key); }}>
 										{isDone(key) ? 'Undo' : '✓ Done'}
 									</Button>
 								</Table.Cell>
@@ -396,3 +408,37 @@
 		{/if}
 	</div>
 {/if}
+
+<Dialog.Root bind:open={issueModalOpen}>
+	<Dialog.Content class="sm:max-w-[80vw] max-h-[85vh] overflow-y-auto">
+		<Dialog.Header>
+			<Dialog.Title class="flex w-full items-center gap-3 pr-2 text-base font-semibold">
+				<span class="mono text-muted-foreground text-sm font-normal">#{activeIssue?.number}</span>
+				<span class="truncate">{activeIssue?.title}</span>
+			</Dialog.Title>
+		</Dialog.Header>
+		{#if activeIssue}
+			<IssueDetail issue={activeIssue} />
+			<div class="text-right pt-2">
+				<a href="/issues/{activeIssue.number}" class="text-xs text-primary hover:underline">Open full page →</a>
+			</div>
+		{/if}
+	</Dialog.Content>
+</Dialog.Root>
+
+<Dialog.Root bind:open={prModalOpen}>
+	<Dialog.Content class="sm:max-w-[80vw] max-h-[85vh] overflow-y-auto">
+		<Dialog.Header>
+			<Dialog.Title class="flex w-full items-center gap-3 pr-2 text-base font-semibold">
+				<span class="mono text-muted-foreground text-sm font-normal">#{activePr?.number}</span>
+				<span class="truncate">{activePr?.title}</span>
+			</Dialog.Title>
+		</Dialog.Header>
+		{#if activePr}
+			<PrDetail pr={activePr} />
+			<div class="text-right pt-2">
+				<a href="/prs/{activePr.number}" class="text-xs text-primary hover:underline">Open full page →</a>
+			</div>
+		{/if}
+	</Dialog.Content>
+</Dialog.Root>

@@ -14,7 +14,7 @@ Works with GitHub, GitLab, Gitea, and Azure DevOps. Plug in Claude Max, OpenAI, 
 
 > 🧪 Built and battle-tested at **[RTK-ai Labs](https://rtk-ai.app)** — born out of the daily backlog pain on [**rtk-ai/rtk**](https://github.com/rtk-ai/rtk) (Rust Token Killer), now used in production by the team to run its own repos.
 
-[![License: SSPL](https://img.shields.io/badge/License-SSPL--1.0-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 ![Linux](https://img.shields.io/badge/Linux-x64%20%7C%20ARM-yellow?logo=linux)
 ![Windows](https://img.shields.io/badge/Windows-x64-blue?logo=windows)
@@ -716,27 +716,14 @@ See [CLAUDE.md](CLAUDE.md) for the full architecture document.
 
 ## License
 
-This project is licensed under the **[Server Side Public License (SSPL v1)](LICENSE)**.
+wshm is open source under the **[Apache License 2.0](LICENSE)**.
 
-### What you CAN do
+- Use it for any purpose (personal, commercial, enterprise), self-host it, modify it, redistribute it
+- Read, study, and audit every line of code that touches your repositories
+- Contributions are accepted under the same license (Apache 2.0, section 5) — no CLA required
+- The **wshm** name and logo are trademarks of wshm-dev and are not covered by the license (section 6): forks are welcome, but please don't pass them off as wshm
 
-- Use wshm for any purpose (personal, commercial, enterprise)
-- Read, study, and audit every line of code
-- Modify the code for your own internal use
-- Contribute back to the project
-
-### What you CANNOT do
-
-- Offer wshm (or a modified version) as a managed/hosted service to third parties without releasing your entire service stack under the SSPL
-- Build a competing commercial service based on this code
-
-### Why SSPL?
-
-We believe in transparency. You should be able to audit the tool that manages your repositories. But we also need to sustain development — the SSPL ensures that no one can take this work and sell it as their own service without contributing back.
-
-This is the same model used by **MongoDB**, **Elastic**, and **Graylog**.
-
-For enterprise licensing or questions: [contact@wshm.dev](mailto:contact@wshm.dev)
+**Pro features** (PostgreSQL backend, RBAC, AI review, insights, hosted service at [wshm.cloud](https://wshm.cloud)) live in the separate, proprietary `wshm-pro` crate. Commercial questions: [contact@wshm.dev](mailto:contact@wshm.dev)
 
 ## Disclaimer
 
@@ -819,12 +806,6 @@ Full guides in [`docs/`](./docs):
 
 **Pro features** live in a separate crate (`wshm-pro`, not open source) and attach via runtime hooks.
 
-## Why SSPL?
-
-Like MongoDB and Elastic, wshm uses the [Server Side Public License v1](./LICENSE). You can use, modify, and self-host freely. The only restriction: if you offer wshm as a **hosted SaaS service** to third parties, you must open-source your entire service stack.
-
-This protects the business model while keeping the core truly open for self-hosted use. 99% of users will never hit the SSPL restriction.
-
 ## Contributing
 
 Issues and PRs welcome. For substantial changes, please open an issue first to discuss.
@@ -845,4 +826,4 @@ By using wshm you acknowledge that you have read, understood, and agreed to thes
 
 ## License
 
-[SSPL-1.0](./LICENSE) — Copyright © 2025-2026 wshm-dev
+[Apache-2.0](./LICENSE) — Copyright © 2025-2026 wshm-dev

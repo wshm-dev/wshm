@@ -13,11 +13,13 @@
 	const badgeGreen = 'border-green-500/30 bg-green-500/15 text-green-600 dark:text-green-400';
 	const badgeRed = 'border-red-500/30 bg-red-500/15 text-red-600 dark:text-red-400';
 	const badgeYellow = 'border-yellow-500/30 bg-yellow-500/15 text-yellow-600 dark:text-yellow-400';
+	const badgeGray = 'border-transparent bg-secondary text-secondary-foreground';
 
 	function riskClass(risk: string | null): string {
 		if (risk === 'high') return badgeRed;
 		if (risk === 'medium') return badgeYellow;
-		return badgeGreen;
+		if (risk === 'low') return badgeGreen;
+		return badgeGray;
 	}
 
 	// `pr.url` is built server-side from the configured forge — no

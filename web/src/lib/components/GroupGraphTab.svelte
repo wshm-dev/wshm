@@ -2,8 +2,8 @@
 	/**
 	 * One tab of the Graphs page: the group → subgroup network graph for either
 	 * pull requests or issues, driven by the server-side hierarchy over the whole
-	 * DB. Owns its own fetch, "grands groupes" slider, selection, and the
-	 * side-panel that lists the selected group/subgroup's items.
+	 * DB. Owns its own fetch, top-level-group-count slider, selection, and
+	 * the side-panel that lists the selected group/subgroup's items.
 	 */
 	import PrGroupGraph from '$lib/components/PrGroupGraph.svelte';
 	import {
@@ -82,7 +82,7 @@
 </script>
 
 <div class="mb-3 flex flex-wrap items-center gap-3">
-	<span class="text-xs font-medium text-muted-foreground">Grands groupes</span>
+	<span class="text-xs font-medium text-muted-foreground">Top-level groups</span>
 	<input
 		type="range"
 		min="5"
@@ -94,20 +94,20 @@
 	/>
 	<span class="tabular-nums text-xs">{count}</span>
 	{#if loading}
-		<span class="text-xs text-muted-foreground">chargement…</span>
+		<span class="text-xs text-muted-foreground">loading…</span>
 	{/if}
 	<span class="text-xs text-muted-foreground">
-		· molette = zoom · glisser = déplacer
+		· scroll = zoom · drag = pan
 	</span>
 </div>
 
 {#if error}
 	<p class="text-sm text-destructive">{error}</p>
 {:else if loading && groups.length === 0}
-	<p class="py-10 text-center text-sm text-muted-foreground">Chargement…</p>
+	<p class="py-10 text-center text-sm text-muted-foreground">Loading…</p>
 {:else if groups.length === 0}
 	<p class="py-10 text-center text-sm text-muted-foreground">
-		Aucun groupe — pas encore de {noun}s synchronisées.
+		No groups yet — no {noun}s synced.
 	</p>
 {:else}
 	<!-- The side panel only appears once something is selected, so the graph

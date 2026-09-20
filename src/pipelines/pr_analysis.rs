@@ -190,6 +190,13 @@ async fn analyze_pr(
         user_prompt.push_str(&domains_prompt);
     }
 
+    // Inject configured Skills that apply to PR review (see config::skills_prompt).
+    let skills = crate::config::load_skills(db);
+    let skills_prompt = crate::config::skills_prompt(&skills, "pr_review");
+    if !skills_prompt.is_empty() {
+        user_prompt.push_str(&skills_prompt);
+    }
+
     if !icm_context.is_empty() {
         user_prompt.push_str(&format!(
             "\n\n## Past PR analysis context (from memory)\n{icm_context}"

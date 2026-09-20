@@ -47,12 +47,22 @@ export interface RepoInfo {
 	apply: boolean;
 }
 
+export interface DailyCount {
+	date: string;
+	repo: string;
+	issues: number;
+	prs: number;
+}
+
 export interface Status {
 	open_issues: number;
 	untriaged: number;
 	open_prs: number;
 	unanalyzed: number;
 	conflicts: number;
+	issues_new_7d: number;
+	prs_new_7d: number;
+	daily_activity: DailyCount[];
 	last_sync: string | null;
 	repos: RepoInfo[];
 }
@@ -506,6 +516,7 @@ export interface RepoFeatures {
 	triage_issues: boolean;
 	analyze_prs: boolean;
 	review_prs: boolean;
+	review_post_comments: boolean;
 	auto_pr: boolean;
 	auto_merge: boolean;
 	filters: RepoFilters;
@@ -587,6 +598,40 @@ export async function discoverRepoDomains(slug: string, limit?: number): Promise
 	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/domains/discover${qs}`, {
 		method: 'POST',
 		headers: CSRF_HEADERS
+	});
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.error ?? `HTTP ${res.status}`);
+	}
+	return res.json();
+}
+
+/** A standing instruction block the AI review loads when it applies —
+ *  the same idea as an Anthropic Agent Skill, scoped to wshm's own
+ *  triage/PR-review prompts. Stored in the DB (works on stateless pods). */
+export interface Skill {
+	name: string;
+	description?: string | null;
+	content: string;
+	/** Which pipelines this applies to: "triage" and/or "pr_review". Empty = both. */
+	pipelines: string[];
+	enabled: boolean;
+}
+
+export async function fetchRepoSkills(slug: string): Promise<{ skills: Skill[] }> {
+	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/skills`);
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.error ?? `HTTP ${res.status}`);
+	}
+	return res.json();
+}
+
+export async function updateRepoSkills(slug: string, skills: Skill[]): Promise<{ skills: Skill[] }> {
+	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/skills`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json', ...CSRF_HEADERS },
+		body: JSON.stringify({ skills })
 	});
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({}));

@@ -45,10 +45,13 @@ function detectInitial(): Locale {
 		const saved = localStorage.getItem('wshm-locale') as Locale | null;
 		if (saved && KNOWN.includes(saved)) return saved;
 	} catch { /* ignore */ }
-	if (typeof navigator !== 'undefined' && navigator.language) {
-		const tag = navigator.language.toLowerCase().split('-')[0] as Locale;
-		if (KNOWN.includes(tag)) return tag;
-	}
+	// No language picker exists in the UI yet, and only a handful of routes
+	// (Settings, Login, and — via the wshm-pro overlay — PR/Issue Insights)
+	// are wired to `t()` while the rest of the app is hardcoded English —
+	// so auto-switching those few pages off a browser/OS locale produced a
+	// jarring mixed-language UI with no way to opt back out. Default to
+	// English until a real language switcher lands; an explicit choice
+	// (saved above) still always wins.
 	return 'en';
 }
 

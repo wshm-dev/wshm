@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { page } from '$app/stores';
 	import { selectedRepo } from '$lib/stores';
 	import { fetchPulls, type PullRequest } from '$lib/api';
 	import { multiSort, toggleSort as toggle, sortArrow, sortIndex, sortArrowClass, type SortColumn } from '$lib/sort';
@@ -8,9 +9,12 @@
 	import { Input } from '$lib/components/ui/input';
 	import * as Table from '$lib/components/ui/table';
 	import * as Dialog from '$lib/components/ui/dialog';
+	import * as Tooltip from '$lib/components/ui/tooltip';
 	import PrDetail from '$lib/components/PrDetail.svelte';
 	import TablePagination from '$lib/components/TablePagination.svelte';
 	import FilterSelect from '$lib/components/FilterSelect.svelte';
+	import QuickFilters from '$lib/components/QuickFilters.svelte';
+	import type { QuickChip } from '$lib/filter';
 
 	const PAGE_KEY = 'wshm.pageSize.pulls';
 	function readStoredLimit(): number {
@@ -30,7 +34,8 @@
 	let loading = $state(true);
 	let sortColumns: SortColumn[] = $state([{ key: 'risk_level', asc: true }, { key: 'age', asc: false }]);
 	let filters: Record<string, string> = $state({
-		number: '', title: '', state: '', base_ref: '', risk: '', ci_status: '', conflicts: '', age: ''
+		number: '', title: '', state: '', base_ref: '', risk_level: '', ci_status: '',
+		conflicts: $page.url.searchParams.get('conflicts') ?? '', age: ''
 	});
 
 	function timeAgo(dateStr: string): string {
@@ -59,7 +64,7 @@
 		number: filters.number,
 		title: filters.title,
 		state: filters.state,
-		risk: filters.risk,
+		risk_level: filters.risk_level,
 		ci_status: filters.ci_status,
 		conflicts: filters.conflicts,
 		age: filters.age
@@ -67,8 +72,21 @@
 
 	let sorted = $derived(multiSort(filtered, sortColumns));
 
+	// One-click presets over the same filter keys the header row uses.
+	// Counts are per loaded page, like every other client-side filter here.
+	const chip = (label: string, patch: Record<string, string>): QuickChip =>
+		({ label, patch, count: applyFilters(enriched, patch).length });
+	let chips: QuickChip[] = $derived([
+		chip('Conflicts', { conflicts: '=yes' }),
+		chip('Failing CI', { ci_status: '=failure' }),
+		chip('High risk', { risk_level: '=high' }),
+		chip('Unanalyzed', { risk_level: '!' }),
+		chip('New < 7d', { age: '<7' }),
+		chip('Stale > 30d', { age: '>30' })
+	]);
+
 	let stateOptions = $derived(distinctValues(enriched, 'state'));
-	let riskOptions = $derived(distinctValues(enriched, 'risk'));
+	let riskOptions = $derived(distinctValues(enriched, 'risk_level'));
 	let ciOptions = $derived(distinctValues(enriched, 'ci_status'));
 	let conflictsOptions = $derived(distinctValues(enriched, 'conflicts'));
 	let pageLimit = $state(readStoredLimit());
@@ -148,8 +166,9 @@
 		<p class="text-red-600 dark:text-red-400">{error}</p>
 	</div>
 {:else}
+	<QuickFilters {chips} bind:filters />
 	<div class="rounded-lg border">
-		<Table.Root class="w-full">
+		<Table.Root class="w-full table-fixed">
 			<Table.Header class="text-xs uppercase text-muted-foreground">
 				<Table.Row>
 					<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[60px]" onclick={(e: MouseEvent) => handleSort('number', e)}>
@@ -164,8 +183,8 @@
 					<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[90px]" onclick={(e: MouseEvent) => handleSort('base_ref', e)}>
 						Base <span class={sortArrowClass(sortColumns, 'base_ref')}>{sortArrow(sortColumns, 'base_ref')}</span>{#if sortIndex(sortColumns, 'base_ref') > 0}<span class="text-[0.625rem] text-primary ml-0.5">{sortIndex(sortColumns, 'base_ref')}</span>{/if}
 					</Table.Head>
-					<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[80px]" onclick={(e: MouseEvent) => handleSort('risk', e)}>
-						Risk <span class={sortArrowClass(sortColumns, 'risk')}>{sortArrow(sortColumns, 'risk')}</span>{#if sortIndex(sortColumns, 'risk') > 0}<span class="text-[0.625rem] text-primary ml-0.5">{sortIndex(sortColumns, 'risk')}</span>{/if}
+					<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[80px]" onclick={(e: MouseEvent) => handleSort('risk_level', e)}>
+						Risk <span class={sortArrowClass(sortColumns, 'risk_level')}>{sortArrow(sortColumns, 'risk_level')}</span>{#if sortIndex(sortColumns, 'risk_level') > 0}<span class="text-[0.625rem] text-primary ml-0.5">{sortIndex(sortColumns, 'risk_level')}</span>{/if}
 					</Table.Head>
 					<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[80px]" onclick={(e: MouseEvent) => handleSort('ci_status', e)}>
 						CI <span class={sortArrowClass(sortColumns, 'ci_status')}>{sortArrow(sortColumns, 'ci_status')}</span>{#if sortIndex(sortColumns, 'ci_status') > 0}<span class="text-[0.625rem] text-primary ml-0.5">{sortIndex(sortColumns, 'ci_status')}</span>{/if}
@@ -184,7 +203,7 @@
 					<Table.Cell class="px-2 py-1"><Input type="text" bind:value={filters.title} placeholder="filter..." class="h-8 px-2 text-xs" /></Table.Cell>
 					<Table.Cell class="px-2 py-1"><FilterSelect bind:value={filters.state} options={stateOptions} /></Table.Cell>
 					<Table.Cell class="px-2 py-1"><Input type="text" bind:value={filters.base_ref} placeholder="main..." class="h-8 px-2 text-xs" /></Table.Cell>
-					<Table.Cell class="px-2 py-1"><FilterSelect bind:value={filters.risk} options={riskOptions} /></Table.Cell>
+					<Table.Cell class="px-2 py-1"><FilterSelect bind:value={filters.risk_level} options={riskOptions} /></Table.Cell>
 					<Table.Cell class="px-2 py-1"><FilterSelect bind:value={filters.ci_status} options={ciOptions} /></Table.Cell>
 					<Table.Cell class="px-2 py-1"><FilterSelect bind:value={filters.conflicts} options={conflictsOptions} /></Table.Cell>
 					<Table.Cell class="px-2 py-1"><Input type="text" bind:value={filters.age} placeholder=">N" class="h-8 px-2 text-xs" /></Table.Cell>
@@ -192,14 +211,25 @@
 				{#each sorted as pr}
 					<Table.Row class="cursor-pointer" onclick={() => openPr(pr)}>
 						<Table.Cell class="px-2 py-1.5 mono">{pr.number}</Table.Cell>
-						<Table.Cell class="px-2 py-1.5 truncate">{pr.title}</Table.Cell>
+						<Table.Cell class="px-2 py-1.5">
+							<Tooltip.Provider>
+								<Tooltip.Root>
+									<Tooltip.Trigger>
+										{#snippet child({ props })}
+											<span {...props} class="block truncate">{pr.title}</span>
+										{/snippet}
+									</Tooltip.Trigger>
+									<Tooltip.Content class="max-w-sm text-xs leading-snug">{pr.title}</Tooltip.Content>
+								</Tooltip.Root>
+							</Tooltip.Provider>
+						</Table.Cell>
 						<Table.Cell class="px-2 py-1.5">
 							<Badge variant="outline" class={pr.state === 'open' ? GREEN_BADGE : RED_BADGE}>{pr.state}</Badge>
 						</Table.Cell>
 						<Table.Cell class="px-2 py-1.5 text-xs mono text-muted-foreground">{pr.base_ref ?? '-'}</Table.Cell>
 						<Table.Cell class="px-2 py-1.5">
-							{#if pr.risk}
-								<Badge variant="outline" class={riskBadgeClass(pr.risk)}>{pr.risk}</Badge>
+							{#if pr.risk_level}
+								<Badge variant="outline" class={riskBadgeClass(pr.risk_level)}>{pr.risk_level}</Badge>
 							{:else}
 								<span class="text-muted-foreground">-</span>
 							{/if}
@@ -252,5 +282,5 @@
 		</Dialog.Content>
 	</Dialog.Root>
 
-	<TablePagination {total} limit={pageLimit} offset={pageOffset} storageKey={PAGE_KEY} onChange={onPageChange} />
+	<TablePagination {total} limit={pageLimit} offset={pageOffset} storageKey={PAGE_KEY} onChange={onPageChange} filteredCount={sorted.length} />
 {/if}

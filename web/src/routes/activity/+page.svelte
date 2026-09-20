@@ -252,5 +252,5 @@
 		</Dialog.Content>
 	</Dialog.Root>
 
-	<TablePagination {total} limit={pageLimit} offset={pageOffset} storageKey={PAGE_KEY} onChange={onPageChange} />
+	<TablePagination {total} limit={pageLimit} offset={pageOffset} storageKey={PAGE_KEY} onChange={onPageChange} filteredCount={sorted.length} />
 {/if}

@@ -9,10 +9,13 @@
 	import * as Card from '$lib/components/ui/card';
 	import * as Table from '$lib/components/ui/table';
 	import * as Dialog from '$lib/components/ui/dialog';
+	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { colorConfig, prStatusBorder, priorityColor, categoryColor, type ColorConfig } from '$lib/colors';
 	import IssueDetail from '$lib/components/IssueDetail.svelte';
 	import TablePagination from '$lib/components/TablePagination.svelte';
 	import FilterSelect from '$lib/components/FilterSelect.svelte';
+	import QuickFilters from '$lib/components/QuickFilters.svelte';
+	import type { QuickChip } from '$lib/filter';
 
 	const PAGE_KEY = 'wshm.pageSize.issues';
 	function readStoredLimit(): number {
@@ -74,6 +77,19 @@
 	}));
 
 	let sorted = $derived(multiSort(filtered, sortColumns));
+
+	// One-click presets over the same filter keys the header row uses.
+	// Counts are per loaded page, like every other client-side filter here.
+	const chip = (label: string, patch: Record<string, string>): QuickChip =>
+		({ label, patch, count: applyFilters(enriched, patch).length });
+	let chips: QuickChip[] = $derived([
+		chip('Untriaged', { priority: '!' }),
+		chip('Critical', { priority: '=critical' }),
+		chip('High', { priority: '=high' }),
+		chip('Bugs', { category: '=bug' }),
+		chip('No PR', { pr_status: '=no_pr' }),
+		chip('Stale > 30d', { age: '>30' })
+	]);
 
 	let prStatusOptions = $derived(distinctValues(issues, 'pr_status'));
 	let priorityOptions = $derived(distinctValues(issues, 'priority'));
@@ -139,8 +155,9 @@
 		</Card.Content>
 	</Card.Root>
 {:else}
+	<QuickFilters {chips} bind:filters />
 	<div class="rounded-lg border">
-		<Table.Root class="w-full">
+		<Table.Root class="w-full table-fixed">
 			<Table.Header class="text-xs uppercase text-muted-foreground">
 				<Table.Row>
 					<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[60px]" onclick={(e: MouseEvent) => handleSort('number', e)}>
@@ -181,14 +198,43 @@
 						onclick={() => openIssue(issue)}
 					>
 						<Table.Cell class="px-2 py-1.5 mono text-foreground">{issue.number}</Table.Cell>
-						<Table.Cell class="px-2 py-1.5 truncate text-foreground">{issue.title}</Table.Cell>
+						<Table.Cell class="px-2 py-1.5 text-foreground">
+							<Tooltip.Provider>
+								<Tooltip.Root>
+									<Tooltip.Trigger>
+										{#snippet child({ props })}
+											<span {...props} class="block truncate">{issue.title}</span>
+										{/snippet}
+									</Tooltip.Trigger>
+									<Tooltip.Content class="max-w-sm text-xs leading-snug">{issue.title}</Tooltip.Content>
+								</Tooltip.Root>
+							</Tooltip.Provider>
+						</Table.Cell>
 						<Table.Cell class="px-2 py-1.5 text-foreground text-xs">
 							{issue.pr_status === 'pr_ready' ? 'PR ready' : issue.pr_status === 'has_pr' ? 'PR open' : 'No PR'}
 						</Table.Cell>
-						<Table.Cell class="px-2 py-1.5">
-							{#each issue.labels as label}
-								<Badge variant="outline" class="bg-primary/15 text-primary mr-1">{label}</Badge>
-							{/each}
+						<Table.Cell class="px-2 py-1.5 overflow-hidden">
+							{#if issue.labels.length > 0}
+								<Tooltip.Provider>
+									<Tooltip.Root>
+										<Tooltip.Trigger>
+											{#snippet child({ props })}
+												<span {...props} class="flex items-center gap-1 min-w-0">
+													{#each issue.labels.slice(0, 2) as label}
+														<Badge variant="outline" class="bg-primary/15 text-primary min-w-0 shrink">
+															<span class="truncate min-w-0">{label}</span>
+														</Badge>
+													{/each}
+													{#if issue.labels.length > 2}
+														<Badge variant="outline" class="text-muted-foreground shrink-0">+{issue.labels.length - 2}</Badge>
+													{/if}
+												</span>
+											{/snippet}
+										</Tooltip.Trigger>
+										<Tooltip.Content class="max-w-sm text-xs leading-snug">{issue.labels.join(', ')}</Tooltip.Content>
+									</Tooltip.Root>
+								</Tooltip.Provider>
+							{/if}
 						</Table.Cell>
 						<Table.Cell class="px-2 py-1.5 text-foreground">{issue.priority ?? '-'}</Table.Cell>
 						<Table.Cell class="px-2 py-1.5 text-foreground">{issue.category ?? '-'}</Table.Cell>
@@ -221,5 +267,5 @@
 		</Dialog.Content>
 	</Dialog.Root>
 
-	<TablePagination {total} limit={pageLimit} offset={pageOffset} storageKey={PAGE_KEY} onChange={onPageChange} />
+	<TablePagination {total} limit={pageLimit} offset={pageOffset} storageKey={PAGE_KEY} onChange={onPageChange} filteredCount={sorted.length} />
 {/if}
