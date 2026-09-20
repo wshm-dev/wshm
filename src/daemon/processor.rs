@@ -157,15 +157,20 @@ async fn process_event(state: &DaemonState, event: &WebhookEvent) {
         return;
     }
 
-    let result = match event.event_type.as_str() {
-        "issues" => handle_issue(state, event).await,
-        "pull_request" => handle_pull_request(state, event).await,
-        "issue_comment" => handle_comment(state, event).await,
-        _ => {
-            info!("Unknown event type: {}", event.event_type);
-            Ok(())
+    // Every cache write below (direct fetch or the sync it triggers) is
+    // attributed to the webhook in the change history.
+    let result = crate::db::history::scoped(crate::db::history::SOURCE_WEBHOOK, async {
+        match event.event_type.as_str() {
+            "issues" => handle_issue(state, event).await,
+            "pull_request" => handle_pull_request(state, event).await,
+            "issue_comment" => handle_comment(state, event).await,
+            _ => {
+                info!("Unknown event type: {}", event.event_type);
+                Ok(())
+            }
         }
-    };
+    })
+    .await;
 
     match result {
         Ok(()) => {

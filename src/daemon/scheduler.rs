@@ -214,6 +214,13 @@ pub async fn run(state: Arc<DaemonState>) {
         if let Err(e) = state.db.cleanup_old_events(7) {
             error!("Event cleanup failed: {e:#}");
         }
+        // Cleanup the issue/PR change history (default 90 days, 0 = keep forever)
+        let retention = state.config.daemon.history_retention_days;
+        if retention > 0 {
+            if let Err(e) = state.db.cleanup_old_change_events(retention) {
+                error!("Change history cleanup failed: {e:#}");
+            }
+        }
 
         // Auto-update check — gated on a process-global atomic so only
         // one repo's scheduler triggers the download per interval, even

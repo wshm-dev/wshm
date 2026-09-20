@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use crate::ai::schemas::IssueClassification;
 use crate::db::events::WebhookEventRow;
+use crate::db::history::{ChangeEvent, ChangeEventFilter};
 use crate::db::issues::Issue;
 use crate::db::pulls::{PrAnalysisRow, PullRequest};
 use crate::db::reviews::PrReviewRow;
@@ -194,6 +195,31 @@ pub trait DatabaseBackend: Send + Sync {
     fn update_event_status(&self, id: i64, status: &str, error: Option<&str>) -> Result<()>;
     fn pending_event_count(&self) -> Result<u64>;
     fn cleanup_old_events(&self, days: u32) -> Result<u64>;
+
+    // ── Change history (see `db::history`) ──────────────────────
+    //
+    // Defaults are no-ops so a backend that has not wired the table yet
+    // keeps compiling; the SQLite backend and Pro's Postgres backend
+    // implement all three.
+
+    fn append_change_events(&self, events: &[ChangeEvent]) -> Result<()> {
+        let _ = events;
+        Ok(())
+    }
+    /// Newest first; returns `(page, total_matching)`.
+    fn list_change_events(
+        &self,
+        filter: &ChangeEventFilter,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<ChangeEvent>, u64)> {
+        let _ = (filter, limit, offset);
+        Ok((Vec::new(), 0))
+    }
+    fn cleanup_old_change_events(&self, days: u32) -> Result<u64> {
+        let _ = days;
+        Ok(0)
+    }
     fn get_pending_events(&self) -> Result<Vec<WebhookEventRow>>;
 
     // ── Search ──────────────────────────────────────────────────
@@ -409,6 +435,23 @@ impl DatabaseBackend for super::Database {
 
     fn cleanup_old_events(&self, days: u32) -> Result<u64> {
         self.cleanup_old_events(days)
+    }
+
+    fn append_change_events(&self, events: &[ChangeEvent]) -> Result<()> {
+        self.with_conn(|conn| crate::db::history::append_change_events(conn, events))
+    }
+
+    fn list_change_events(
+        &self,
+        filter: &ChangeEventFilter,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<ChangeEvent>, u64)> {
+        self.with_conn(|conn| crate::db::history::list_change_events(conn, filter, limit, offset))
+    }
+
+    fn cleanup_old_change_events(&self, days: u32) -> Result<u64> {
+        self.with_conn(|conn| crate::db::history::cleanup_old_change_events(conn, days))
     }
 
     fn get_pending_events(&self) -> Result<Vec<WebhookEventRow>> {

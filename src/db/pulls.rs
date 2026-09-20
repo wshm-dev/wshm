@@ -299,6 +299,8 @@ impl Database {
 /// this upsert - they are maintained by the dedicated review-decision sync
 /// pass (set_review_decisions), so a regular PR sync never wipes them.
 pub fn upsert_pull(conn: &Connection, pr: &PullRequest) -> Result<()> {
+    // Snapshot the cached row first so the history captures what changed.
+    let before = get_pull(conn, pr.number)?;
     let labels_json = serde_json::to_string(&pr.labels)?;
     conn.execute(
         "INSERT INTO pull_requests (number, title, body, state, labels, author, head_sha, base_sha, head_ref, base_ref, mergeable, ci_status, created_at, updated_at)
@@ -333,6 +335,8 @@ pub fn upsert_pull(conn: &Connection, pr: &PullRequest) -> Result<()> {
             pr.updated_at,
         ],
     )?;
+    let events = crate::db::history::diff_pull(before.as_ref(), pr);
+    crate::db::history::append_change_events(conn, &events)?;
     Ok(())
 }
 
