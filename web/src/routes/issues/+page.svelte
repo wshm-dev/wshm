@@ -14,6 +14,8 @@
 	import IssueDetail from '$lib/components/IssueDetail.svelte';
 	import TablePagination from '$lib/components/TablePagination.svelte';
 	import FilterSelect from '$lib/components/FilterSelect.svelte';
+	import QuickFilters from '$lib/components/QuickFilters.svelte';
+	import type { QuickChip } from '$lib/filter';
 
 	const PAGE_KEY = 'wshm.pageSize.issues';
 	function readStoredLimit(): number {
@@ -75,6 +77,19 @@
 	}));
 
 	let sorted = $derived(multiSort(filtered, sortColumns));
+
+	// One-click presets over the same filter keys the header row uses.
+	// Counts are per loaded page, like every other client-side filter here.
+	const chip = (label: string, patch: Record<string, string>): QuickChip =>
+		({ label, patch, count: applyFilters(enriched, patch).length });
+	let chips: QuickChip[] = $derived([
+		chip('Untriaged', { priority: '!' }),
+		chip('Critical', { priority: '=critical' }),
+		chip('High', { priority: '=high' }),
+		chip('Bugs', { category: '=bug' }),
+		chip('No PR', { pr_status: '=no_pr' }),
+		chip('Stale > 30d', { age: '>30' })
+	]);
 
 	let prStatusOptions = $derived(distinctValues(issues, 'pr_status'));
 	let priorityOptions = $derived(distinctValues(issues, 'priority'));
@@ -140,6 +155,7 @@
 		</Card.Content>
 	</Card.Root>
 {:else}
+	<QuickFilters {chips} bind:filters />
 	<div class="rounded-lg border">
 		<Table.Root class="w-full table-fixed">
 			<Table.Header class="text-xs uppercase text-muted-foreground">
