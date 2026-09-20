@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod events;
+pub mod history;
 pub mod issues;
 pub mod licenses;
 pub mod pulls;

@@ -96,12 +96,20 @@ impl Database {
                 "UPDATE issues SET labels = ?1 WHERE number = ?2",
                 params![labels_json, number],
             )?;
+            // This is wshm rewriting the label set itself → source = "wshm".
+            let before: Vec<String> = serde_json::from_str(&current).unwrap_or_default();
+            if let Some(ev) = crate::db::history::label_merge_event(number, &before, &labels) {
+                crate::db::history::append_change_events(conn, &[ev])?;
+            }
             Ok(())
         })
     }
 }
 
 pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
+    // Snapshot the cached row first so the history captures what changed
+    // (nothing is recorded on first sighting, see `db::history`).
+    let before = get_issue(conn, issue.number)?;
     let labels_json = serde_json::to_string(&issue.labels)?;
     conn.execute(
         "INSERT INTO issues (number, title, body, state, labels, author, created_at, updated_at, reactions_plus1, reactions_total)
@@ -128,6 +136,8 @@ pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.reactions_total,
         ],
     )?;
+    let events = crate::db::history::diff_issue(before.as_ref(), issue);
+    crate::db::history::append_change_events(conn, &events)?;
     Ok(())
 }
 

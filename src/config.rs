@@ -967,6 +967,11 @@ pub struct DaemonConfig {
 
     #[serde(default = "default_icm_prefix")]
     pub icm_topic_prefix: String,
+
+    /// Days to keep rows in `change_events` (the issue/PR change history
+    /// shown on `/history`). `0` disables the purge. Default: 90.
+    #[serde(default = "default_history_retention_days")]
+    pub history_retention_days: u32,
 }
 
 impl Default for DaemonConfig {
@@ -977,8 +982,13 @@ impl Default for DaemonConfig {
             apply: false,
             icm_enabled: false,
             icm_topic_prefix: default_icm_prefix(),
+            history_retention_days: default_history_retention_days(),
         }
     }
+}
+
+fn default_history_retention_days() -> u32 {
+    90
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

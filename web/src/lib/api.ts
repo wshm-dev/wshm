@@ -233,6 +233,40 @@ export function fetchActivity(opts?: PageOpts): Promise<Page<ActivityEntry>> {
 	return apiGet<Page<ActivityEntry>>('/activity', pageParams(opts));
 }
 
+/** One observed mutation of an issue / PR field (see `db::history`). */
+export interface HistoryEvent {
+	id: number;
+	repo: string;
+	kind: 'issue' | 'pr' | string;
+	number: number;
+	field: string;
+	/** JSON array for `labels`, raw value otherwise; null when unknown. */
+	old_value: string | null;
+	new_value: string | null;
+	source: 'sync' | 'webhook' | 'wshm' | string;
+	actor: string | null;
+	observed_at: string;
+}
+
+export interface HistoryOpts extends PageOpts {
+	kind?: string;
+	source?: string;
+	field?: string;
+	number?: number;
+	since?: string;
+	until?: string;
+}
+
+export function fetchHistory(opts?: HistoryOpts): Promise<Page<HistoryEvent>> {
+	const p: Record<string, string | number> = pageParams(opts);
+	for (const k of ['kind', 'source', 'field', 'since', 'until'] as const) {
+		const v = opts?.[k];
+		if (v) p[k] = v;
+	}
+	if (opts?.number !== undefined) p.number = opts.number;
+	return apiGet<Page<HistoryEvent>>('/history', p);
+}
+
 // ---------------------------------------------------------------------------
 // Changelog
 // ---------------------------------------------------------------------------
