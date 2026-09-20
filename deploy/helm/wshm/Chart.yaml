@@ -24,4 +24,4 @@ maintainers:
 icon: https://raw.githubusercontent.com/wshm-dev/wshm/main/assets/logo.png
 annotations:
   category: DevOps
-  licenses: SSPL-1.0
+  licenses: Apache-2.0
