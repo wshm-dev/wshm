@@ -1,6 +1,6 @@
 [package]
 name = "wshm-core"
-version = "0.31.7"
+version = "0.31.8"
 edition = "2021"
 description = "Core library for wshm"
 license = "Apache-2.0"
