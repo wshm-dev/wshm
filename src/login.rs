@@ -519,8 +519,17 @@ fn show_status() -> Result<()> {
     let creds = load_credentials();
     let creds_gh = creds.get("GITHUB_TOKEN");
 
+    // Encrypted secret store, when the process installed one (Pro CLI /
+    // daemon). Checked first: Pro hydrates GITHUB_TOKEN from this store at
+    // startup, so the env var alone cannot tell where the token really
+    // came from and used to print a misleading "env var".
+    let store_source =
+        crate::secrets::global().and_then(|s| crate::secrets::github_token_source(&s));
+
     print!("GitHub: ");
-    if gh_token.is_some() {
+    if let Some(source) = store_source {
+        println!("authenticated ({source})");
+    } else if gh_token.is_some() {
         println!("authenticated (env var)");
     } else if gh_cli.is_some() {
         println!("authenticated (gh CLI)");
