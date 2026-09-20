@@ -195,7 +195,12 @@ pub async fn run_with_filters(
         {
             Ok(classification) => {
                 if !json {
-                    print_classification(issue, &classification, args.apply);
+                    print_classification(
+                        issue,
+                        &classification,
+                        args.apply,
+                        config.triage.suggested_actions,
+                    );
                 }
                 // After a successful applied triage, strip the force-relabel
                 // markers so the next batch doesn't re-trigger on this issue
@@ -345,6 +350,7 @@ async fn triage_issue(
                 is_simple_fix: existing.is_simple_fix,
                 relevant_files: Vec::new(),
                 domains: existing.domains,
+                suggested_actions: existing.suggested_actions,
             });
         }
     }
@@ -397,13 +403,16 @@ async fn triage_issue(
         ));
     }
 
-    let system_prompt = config
-        .triage
-        .system_prompt
-        .as_deref()
-        .unwrap_or(issue_classify::SYSTEM);
+    // Only build the default prompt when no override is configured
+    // (review note on #115: avoid the allocation on the override path).
+    let system_prompt: std::borrow::Cow<'_, str> = match config.triage.system_prompt.as_deref() {
+        Some(custom) => std::borrow::Cow::Borrowed(custom),
+        None => std::borrow::Cow::Owned(issue_classify::system_prompt(
+            config.triage.suggested_actions,
+        )),
+    };
 
-    let classification: IssueClassification = ai.complete(system_prompt, &user_prompt).await?;
+    let classification: IssueClassification = ai.complete(&system_prompt, &user_prompt).await?;
 
     // Accumulate newly-seen domains into the DB known set (best-effort) so
     // future reviews reuse them — the stateless-safe replacement for ICM.
@@ -701,11 +710,28 @@ fn format_triage_comment(c: &IssueClassification, config: &Config) -> String {
         comment.push_str(&format!("\n{relevant_files}\n"));
     }
 
+    if config.triage.suggested_actions && !c.suggested_actions.is_empty() {
+        let actions: Vec<String> = c
+            .suggested_actions
+            .iter()
+            .map(|a| format!("1. {}", crate::pipelines::truncate(a, 120)))
+            .collect();
+        comment.push_str(&format!(
+            "\n### Suggested Actions\n\n{}\n",
+            actions.join("\n")
+        ));
+    }
+
     comment.push_str(&format!("\n{footer}"));
     comment
 }
 
-fn print_classification(issue: &Issue, c: &IssueClassification, applied: bool) {
+fn print_classification(
+    issue: &Issue,
+    c: &IssueClassification,
+    applied: bool,
+    show_suggested_actions: bool,
+) {
     let status = if applied {
         "\x1b[32mAPPLIED\x1b[0m"
     } else {
@@ -748,4 +774,63 @@ fn print_classification(issue: &Issue, c: &IssueClassification, applied: bool) {
         c.confidence * 100.0,
         c.priority.as_deref().unwrap_or("unset"),
     );
+
+    if show_suggested_actions && !c.suggested_actions.is_empty() {
+        for action in &c.suggested_actions {
+            println!("         → {}", crate::pipelines::truncate(action, 120));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn classification(actions: Vec<&str>) -> IssueClassification {
+        IssueClassification {
+            category: "bug".into(),
+            confidence: 0.9,
+            priority: Some("high".into()),
+            summary: "Panics on empty input.".into(),
+            suggested_labels: vec![],
+            is_duplicate_of: None,
+            is_simple_fix: false,
+            relevant_files: vec![],
+            domains: vec![],
+            suggested_actions: actions.into_iter().map(String::from).collect(),
+        }
+    }
+
+    #[test]
+    fn triage_comment_lists_suggested_actions_when_enabled() {
+        let mut config = Config::default();
+        config.triage.suggested_actions = true;
+        let long = "x".repeat(200);
+        let c = classification(vec!["Request a minimal reproduction case", long.as_str()]);
+        let comment = format_triage_comment(&c, &config);
+        assert!(comment.contains("### Suggested Actions"), "{comment}");
+        assert!(
+            comment.contains("1. Request a minimal reproduction case"),
+            "{comment}"
+        );
+        // Entries are capped at 120 chars so the comment stays scannable.
+        assert!(!comment.contains(&long), "{comment}");
+        let capped = comment
+            .lines()
+            .find(|l| l.starts_with("1. xxx"))
+            .expect("truncated action line present");
+        assert!(capped.len() <= "1. ".len() + 120 + 3, "{capped}");
+    }
+
+    #[test]
+    fn triage_comment_omits_suggested_actions_when_disabled_or_empty() {
+        let mut config = Config::default();
+        config.triage.suggested_actions = false;
+        let c = classification(vec!["Request a minimal reproduction case"]);
+        assert!(!format_triage_comment(&c, &config).contains("Suggested Actions"));
+
+        config.triage.suggested_actions = true;
+        let empty = classification(vec![]);
+        assert!(!format_triage_comment(&empty, &config).contains("Suggested Actions"));
+    }
 }
