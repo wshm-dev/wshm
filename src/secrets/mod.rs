@@ -116,6 +116,55 @@ pub fn resolve(
     std::env::var(env_name).ok().filter(|v| !v.is_empty())
 }
 
+/// Synchronous [`SecretStore::list`] for non-async callers (`wshm login
+/// --status`, `wshm doctor`). Only valid on a multi-thread Tokio runtime
+/// (`#[tokio::main]` default): `block_in_place` would panic on a
+/// current-thread runtime, so we bail instead of guessing.
+pub fn list_blocking(store: &Arc<dyn SecretStore>) -> Result<Vec<SecretRecord>> {
+    let handle = tokio::runtime::Handle::try_current().context("no Tokio runtime")?;
+    if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+        bail!("secret store listing needs a multi-thread runtime");
+    }
+    tokio::task::block_in_place(|| handle.block_on(store.list()))
+}
+
+/// Human-readable description of where a GitHub token would come from in
+/// the encrypted store, or `None` when the store holds no `github_token`
+/// at all. Used by `login --status` so the label reflects the real source
+/// instead of the env var the token may have been hydrated into.
+pub fn github_token_source(store: &Arc<dyn SecretStore>) -> Option<String> {
+    let global = store
+        .get_blocking(Scope::Global, None, "github_token")
+        .ok()
+        .flatten()
+        .filter(|v| !v.trim().is_empty());
+    let repo_scoped: Vec<String> = list_blocking(store)
+        .map(|recs| {
+            recs.into_iter()
+                .filter(|r| r.key == "github_token" && r.scope == Scope::Repo.as_str())
+                .filter_map(|r| r.slug)
+                .collect()
+        })
+        .unwrap_or_default();
+    let overrides = |slugs: &[String]| {
+        let shown: Vec<&str> = slugs.iter().take(5).map(String::as_str).collect();
+        let more = if slugs.len() > 5 { ", …" } else { "" };
+        format!("{}{more}", shown.join(", "))
+    };
+    match (global.is_some(), repo_scoped.len()) {
+        (false, 0) => None,
+        (true, 0) => Some("secret store, scope=global".to_string()),
+        (true, n) => Some(format!(
+            "secret store, scope=global + {n} repo override(s): {}",
+            overrides(&repo_scoped)
+        )),
+        (false, n) => Some(format!(
+            "secret store, repo-scoped only ({n}): {}",
+            overrides(&repo_scoped)
+        )),
+    }
+}
+
 /// Process-wide secret store handle, populated by the daemon at startup so
 /// non-async callers (e.g. `Config::github_token`) can resolve secrets
 /// without threading the store through every signature.
