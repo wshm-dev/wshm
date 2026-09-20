@@ -1129,6 +1129,29 @@ struct ActivityEntry {
     at: String,
 }
 
+/// `GET /api/v1/history` query. Everything optional; `repo` narrows to one
+/// tracked repo, the rest maps onto `db::history::ChangeEventFilter`.
+#[derive(Deserialize)]
+struct HistoryQuery {
+    repo: Option<String>,
+    kind: Option<String>,
+    number: Option<u64>,
+    field: Option<String>,
+    source: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+/// One row of the cross-repo change feed.
+#[derive(Serialize)]
+struct HistoryEntry {
+    repo: String,
+    #[serde(flatten)]
+    event: crate::db::history::ChangeEvent,
+}
+
 // ---------------------------------------------------------------------------
 // API handlers
 // ---------------------------------------------------------------------------
@@ -1590,6 +1613,66 @@ async fn api_activity(
     entries.sort_by(|a, b| b.at.cmp(&a.at));
 
     Json(paginate(entries, q.limit, q.offset))
+}
+
+/// Issue/PR change history (`change_events`), newest first, merged across
+/// tracked repos. Each repo is asked for `offset + limit` rows so the
+/// cross-repo cut is exact; `total` is the sum of per-repo matches.
+async fn api_history(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<HistoryQuery>,
+) -> impl IntoResponse {
+    let limit = q
+        .limit
+        .unwrap_or(PAGE_DEFAULT_LIMIT)
+        .clamp(1, PAGE_MAX_LIMIT);
+    let offset = q.offset.unwrap_or(0);
+    let filter = crate::db::history::ChangeEventFilter {
+        kind: q.kind.clone().filter(|k| !k.is_empty()),
+        number: q.number,
+        field: q.field.clone().filter(|f| !f.is_empty()),
+        source: q.source.clone().filter(|s| !s.is_empty()),
+        since: q.since.clone().filter(|s| !s.is_empty()),
+        until: q.until.clone().filter(|s| !s.is_empty()),
+    };
+
+    let repos_snapshot: Vec<(String, Arc<super::DaemonState>)> = {
+        let g = state.multi.repos.read().await;
+        g.iter().map(|(s, d)| (s.clone(), Arc::clone(d))).collect()
+    };
+
+    let mut entries: Vec<HistoryEntry> = Vec::new();
+    let mut total: u64 = 0;
+    for (slug, ds) in repos_snapshot.iter() {
+        if let Some(ref f) = q.repo {
+            if f != slug {
+                continue;
+            }
+        }
+        match ds.db.list_change_events(&filter, offset + limit, 0) {
+            Ok((events, n)) => {
+                total += n;
+                entries.extend(events.into_iter().map(|event| HistoryEntry {
+                    repo: slug.clone(),
+                    event,
+                }));
+            }
+            Err(e) => tracing::warn!("history: {slug}: {e:#}"),
+        }
+    }
+    entries.sort_by(|a, b| {
+        b.event
+            .observed_at
+            .cmp(&a.event.observed_at)
+            .then(b.event.id.cmp(&a.event.id))
+    });
+    let items: Vec<HistoryEntry> = entries.into_iter().skip(offset).take(limit).collect();
+    Json(json!({
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -3884,6 +3967,7 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         .route("/api/v1/triage", get(api_triage))
         .route("/api/v1/queue", get(api_queue))
         .route("/api/v1/activity", get(api_activity))
+        .route("/api/v1/history", get(api_history))
         .route("/api/v1/changelog", get(api_changelog))
         .route("/api/v1/revert/preview", get(api_revert_preview))
         .route("/api/v1/backups", get(api_list_backups))

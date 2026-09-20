@@ -100,6 +100,7 @@
 		{ href: '/usage', label: 'Usage', icon: 'activity', section: 'Insights', feature: 'usage-dashboard' },
 		{ href: '/changelog', label: 'Changelog', icon: 'changelog', section: 'Insights' },
 		{ href: '/activity', label: 'Activity', icon: 'activity', section: 'Insights' },
+		{ href: '/history', label: 'History', icon: 'activity', section: 'Insights' },
 		{ href: '/logs', label: 'Logs', icon: 'logs', section: 'System' },
 		{ href: '/revert', label: 'Revert', icon: 'revert', section: 'System' },
 		{ href: '/backups', label: 'Backups', icon: 'backups', section: 'System' },

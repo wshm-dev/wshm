@@ -107,6 +107,25 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         ",
     )?;
 
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS change_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind        TEXT NOT NULL,
+            number      INTEGER NOT NULL,
+            field       TEXT NOT NULL,
+            old_value   TEXT,
+            new_value   TEXT,
+            source      TEXT NOT NULL,
+            actor       TEXT,
+            observed_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_change_events_lookup ON change_events(kind, number, observed_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_change_events_source ON change_events(source, observed_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_change_events_time ON change_events(observed_at DESC);
+        ",
+    )?;
+
     // Migration: add reactions columns to issues
     let has_reactions: bool = conn
         .prepare("SELECT reactions_plus1 FROM issues LIMIT 0")
