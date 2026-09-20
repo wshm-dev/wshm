@@ -523,7 +523,8 @@ fn show_status() -> Result<()> {
     // daemon). Checked first: Pro hydrates GITHUB_TOKEN from this store at
     // startup, so the env var alone cannot tell where the token really
     // came from and used to print a misleading "env var".
-    let store_source = crate::secrets::global().and_then(|s| crate::secrets::github_token_source(&s));
+    let store_source =
+        crate::secrets::global().and_then(|s| crate::secrets::github_token_source(&s));
 
     print!("GitHub: ");
     if let Some(source) = store_source {
