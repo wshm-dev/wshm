@@ -90,8 +90,8 @@ rand = "0.8"
 aes-gcm = "0.10"
 
 # Optional: Export - Cloud Storage
-aws-sdk-s3 = { version = "1", optional = true }
-aws-config = { version = "1", optional = true }
+aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
+aws-config = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process", "sso"] }
 google-cloud-storage = { version = "1", optional = true }
 
 # Optional: Export - Databases
@@ -102,7 +102,7 @@ mysql_async = { version = "0.36", optional = true }
 
 # Optional: Vault
 vaultrs = { version = "0.7", optional = true }
-aws-sdk-secretsmanager = { version = "1", optional = true }
+aws-sdk-secretsmanager = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio"] }
 google-cloud-secretmanager-v1 = { version = "1", optional = true }
 mime_guess = "2"
 rust-embed = "8"
