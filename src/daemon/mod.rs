@@ -75,6 +75,7 @@ impl DaemonState {
         apply: bool,
         features: crate::config::RepoFeatures,
     ) -> Self {
+        crate::ai::related::set_repo_enabled(&config.repo_slug(), features.related_history);
         Self {
             db,
             gh: std::sync::RwLock::new(gh),
@@ -167,6 +168,7 @@ impl DaemonState {
     /// Replace the in-memory feature flags. The API handler is responsible
     /// for also persisting them to global.toml so they survive restart.
     pub fn set_features(&self, new: crate::config::RepoFeatures) {
+        crate::ai::related::set_repo_enabled(&self.config.repo_slug(), new.related_history);
         *self.features.write().expect("features RwLock poisoned") = new;
     }
 }

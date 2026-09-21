@@ -2412,6 +2412,7 @@ async fn api_repo_features_patch(
     patch_bool!(collect_prs);
     patch_bool!(triage_issues);
     patch_bool!(analyze_prs);
+    patch_bool!(related_history);
     patch_bool!(review_prs);
     patch_bool!(review_post_comments);
     patch_bool!(auto_pr);
