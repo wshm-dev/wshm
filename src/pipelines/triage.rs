@@ -367,6 +367,17 @@ async fn triage_issue(
 
     let mut user_prompt = issue_classify::build_user_prompt(issue, existing_issues, open_prs);
 
+    // Related history (closed issues / merged PRs) from the full-text
+    // index — see ai::related and `[ai.rag]`.
+    user_prompt.push_str(&crate::ai::related::prompt_block(
+        db,
+        "issue",
+        issue.number,
+        &issue.title,
+        issue.body.as_deref(),
+        &config.ai.rag,
+    ));
+
     // Inject custom label definitions if configured
     let labels_prompt = config.labels_prompt();
     if !labels_prompt.is_empty() {

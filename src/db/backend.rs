@@ -234,6 +234,15 @@ pub trait DatabaseBackend: Send + Sync {
     /// handler paginates the merged result set across repos.
     fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>>;
 
+    /// Same index as [`Self::search_fts`] but ANY of `terms` may match
+    /// (OR semantics) — the recall-oriented variant used by
+    /// `ai::related` to find history for a prompt, where a long title
+    /// AND-ed together would match nothing. Default falls back to the
+    /// AND search on the joined terms.
+    fn search_related(&self, terms: &[String], limit: usize) -> Result<Vec<SearchHit>> {
+        self.search_fts(&terms.join(" "), limit)
+    }
+
     // ── LLM accounting ──────────────────────────────────────────
 
     /// Record one successful LLM invocation so the Pro usage dashboard
@@ -466,6 +475,19 @@ impl DatabaseBackend for super::Database {
             Some(match_expr) => self.search_fts(&match_expr, limit),
             None => Ok(Vec::new()),
         }
+    }
+
+    fn search_related(&self, terms: &[String], limit: usize) -> Result<Vec<SearchHit>> {
+        // Each term is sanitised on its own (operators stripped, prefix
+        // match) and the pieces are OR-ed into one MATCH expression.
+        let parts: Vec<String> = terms
+            .iter()
+            .filter_map(|t| super::search::sanitize_query(t))
+            .collect();
+        if parts.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.search_fts(&parts.join(" OR "), limit)
     }
 
     fn get_pulls_needing_analysis(&self) -> Result<Vec<PullRequest>> {
