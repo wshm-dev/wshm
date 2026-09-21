@@ -173,6 +173,48 @@ impl Default for RagConfig {
     }
 }
 
+impl RagConfig {
+    /// Environment overrides, applied after the TOML is parsed (env beats
+    /// file, per the documented precedence). Stateless deployments have no
+    /// per-repo `config.toml` to edit, so these are the practical knobs:
+    ///
+    /// - `WSHM_RAG_ENABLED`   true/false (also 1/0, yes/no, on/off)
+    /// - `WSHM_RAG_TOP_K`     items kept in the prompt
+    /// - `WSHM_RAG_MAX_TERMS` search terms extracted
+    /// - `WSHM_RAG_MAX_CHARS` size cap of the block
+    ///
+    /// Unset or unparsable values leave the TOML/default value untouched
+    /// (a warning is logged for unparsable ones).
+    pub fn apply_env_overrides(&mut self) {
+        if let Some(v) = env_non_empty("WSHM_RAG_ENABLED") {
+            match v.to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => self.enabled = true,
+                "0" | "false" | "no" | "off" => self.enabled = false,
+                other => tracing::warn!("WSHM_RAG_ENABLED={other:?} is not a boolean; ignored"),
+            }
+        }
+        for (name, slot) in [
+            ("WSHM_RAG_TOP_K", &mut self.top_k),
+            ("WSHM_RAG_MAX_TERMS", &mut self.max_terms),
+            ("WSHM_RAG_MAX_CHARS", &mut self.max_chars),
+        ] {
+            if let Some(v) = env_non_empty(name) {
+                match v.parse::<usize>() {
+                    Ok(n) => *slot = n,
+                    Err(_) => tracing::warn!("{name}={v:?} is not an integer; ignored"),
+                }
+            }
+        }
+    }
+}
+
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 fn default_rag_top_k() -> usize {
     5
 }
@@ -1909,6 +1951,7 @@ impl Config {
         config.repo_owner = parts[0].to_string();
         config.repo_name = parts[1].to_string();
 
+        config.ai.rag.apply_env_overrides();
         Ok(config)
     }
 
@@ -2029,6 +2072,7 @@ impl Config {
             }
         }
 
+        config.ai.rag.apply_env_overrides();
         Ok(config)
     }
 
@@ -2602,5 +2646,32 @@ mod tests {
         assert!(!pr.contains("triage-only"));
 
         assert_eq!(skills_prompt(&[], "triage"), "");
+    }
+}
+
+#[cfg(test)]
+mod rag_env_tests {
+    use super::RagConfig;
+
+    #[test]
+    fn env_overrides_beat_toml_and_ignore_garbage() {
+        let mut cfg: RagConfig = toml::from_str("enabled = true\ntop_k = 3\n").unwrap();
+        assert_eq!(
+            (cfg.enabled, cfg.top_k, cfg.max_terms, cfg.max_chars),
+            (true, 3, 8, 3000)
+        );
+        std::env::set_var("WSHM_RAG_ENABLED", "off");
+        std::env::set_var("WSHM_RAG_TOP_K", "9");
+        std::env::set_var("WSHM_RAG_MAX_TERMS", "not-a-number");
+        std::env::set_var("WSHM_RAG_MAX_CHARS", " 1200 ");
+        cfg.apply_env_overrides();
+        std::env::remove_var("WSHM_RAG_ENABLED");
+        std::env::remove_var("WSHM_RAG_TOP_K");
+        std::env::remove_var("WSHM_RAG_MAX_TERMS");
+        std::env::remove_var("WSHM_RAG_MAX_CHARS");
+        assert_eq!(
+            (cfg.enabled, cfg.top_k, cfg.max_terms, cfg.max_chars),
+            (false, 9, 8, 1200)
+        );
     }
 }
