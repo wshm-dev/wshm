@@ -125,6 +125,12 @@ pub struct AiConfig {
     /// Optional base URL override (for custom endpoints, proxies, etc.)
     #[serde(default)]
     pub base_url: Option<String>,
+
+    /// "Related history" retrieval (`[ai.rag]`): closed issues and merged
+    /// PRs found by full-text search are appended to the triage and
+    /// PR-analysis prompts. Lexical only (FTS5 / tsvector), no embeddings.
+    #[serde(default)]
+    pub rag: RagConfig,
 }
 
 impl Default for AiConfig {
@@ -133,8 +139,48 @@ impl Default for AiConfig {
             provider: default_ai_provider(),
             model: default_ai_model(),
             base_url: None,
+            rag: RagConfig::default(),
         }
     }
+}
+
+/// `[ai.rag]` — see `ai::related`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RagConfig {
+    /// Master switch (default: true). Set to false to get the pre-#108
+    /// prompts back.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Related items kept in the prompt (default: 5).
+    #[serde(default = "default_rag_top_k")]
+    pub top_k: usize,
+    /// Search terms extracted from title + body (default: 8).
+    #[serde(default = "default_rag_max_terms")]
+    pub max_terms: usize,
+    /// Size cap of the rendered block, in characters (default: 3000).
+    #[serde(default = "default_rag_max_chars")]
+    pub max_chars: usize,
+}
+
+impl Default for RagConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            top_k: default_rag_top_k(),
+            max_terms: default_rag_max_terms(),
+            max_chars: default_rag_max_chars(),
+        }
+    }
+}
+
+fn default_rag_top_k() -> usize {
+    5
+}
+fn default_rag_max_terms() -> usize {
+    8
+}
+fn default_rag_max_chars() -> usize {
+    3000
 }
 
 fn default_ai_provider() -> String {

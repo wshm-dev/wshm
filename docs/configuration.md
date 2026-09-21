@@ -19,6 +19,12 @@ provider = "anthropic"            # anthropic, openai, google, mistral, groq, de
 model = "claude-sonnet-4-20250514"
 # base_url = "https://custom-proxy.com/v1"  # optional: custom API endpoint
 
+[ai.rag]                          # "Related history" in triage / PR-analysis prompts
+enabled = true                    # closed issues & merged PRs found by full-text search
+top_k = 5                         # items kept in the prompt
+max_terms = 8                     # search terms extracted from title + body
+max_chars = 3000                  # size cap of the block
+
 [triage]
 enabled = true
 auto_fix = false                  # attempt auto-fix for simple bugs (Pro)
