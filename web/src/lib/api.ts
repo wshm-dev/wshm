@@ -549,6 +549,7 @@ export interface RepoFeatures {
 	collect_prs: boolean;
 	triage_issues: boolean;
 	analyze_prs: boolean;
+	related_history: boolean;
 	review_prs: boolean;
 	review_post_comments: boolean;
 	auto_pr: boolean;

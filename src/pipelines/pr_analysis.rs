@@ -171,6 +171,7 @@ async fn analyze_pr(
     // index — see ai::related and `[ai.rag]`.
     user_prompt.push_str(&crate::ai::related::prompt_block(
         db,
+        &config.repo_slug(),
         "pull",
         pr.number,
         &pr.title,

@@ -371,6 +371,7 @@ async fn triage_issue(
     // index — see ai::related and `[ai.rag]`.
     user_prompt.push_str(&crate::ai::related::prompt_block(
         db,
+        &config.repo_slug(),
         "issue",
         issue.number,
         &issue.title,

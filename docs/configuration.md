@@ -26,6 +26,10 @@ max_terms = 8                     # search terms extracted from title + body
 max_chars = 3000                  # size cap of the block
 # Env overrides (beat the file): WSHM_RAG_ENABLED, WSHM_RAG_TOP_K,
 # WSHM_RAG_MAX_TERMS, WSHM_RAG_MAX_CHARS
+# Per-repo switch: Settings → Repos → "Related history in prompts"
+# (features.related_history, default true); both switches must be on.
+# Logs: one INFO line per triage/analysis listing the retrieved items,
+# the full block at RUST_LOG=debug.
 
 [triage]
 enabled = true

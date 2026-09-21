@@ -1888,6 +1888,11 @@
 							{@render infoTip('tip-analyze', 'settings.features.ai.analyze.tip')}
 						</label>
 						<label class="flex items-center gap-2 text-sm">
+							<input type="checkbox" bind:checked={featuresDraft.related_history} class="rounded" />
+							<span><strong>{$t('settings.features.ai.related')}</strong> <span class="text-xs text-muted-foreground">{$t('settings.features.ai.related.help')}</span></span>
+							{@render infoTip('tip-related', 'settings.features.ai.related.tip')}
+						</label>
+						<label class="flex items-center gap-2 text-sm">
 							<input type="checkbox" bind:checked={featuresDraft.review_prs} class="rounded" />
 							<span>
 								<strong>{$t('settings.features.ai.review')}</strong>
