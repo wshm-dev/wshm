@@ -17,7 +17,8 @@
 //! search index adds, capped in size, and framed as untrusted context so
 //! an old issue cannot steer the classification.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{OnceLock, RwLock};
 
 use crate::ai::prompts::issue_classify::sanitize_user_content;
 use crate::config::RagConfig;
@@ -236,10 +237,40 @@ pub fn render_block(items: &[RelatedItem], max_chars: usize) -> String {
     out
 }
 
-/// Convenience for the pipelines: retrieval + rendering, honouring
-/// `cfg.enabled`.
+/// Per-repo switches (`RepoFeatures::related_history`), registered by the
+/// daemon when a repo is loaded or its features are patched from the web
+/// UI. Absent entry (CLI runs, unknown repo) means "no per-repo opinion":
+/// only the global `[ai.rag] enabled` / `WSHM_RAG_ENABLED` applies.
+static REPO_SWITCH: OnceLock<RwLock<HashMap<String, bool>>> = OnceLock::new();
+
+fn repo_switch() -> &'static RwLock<HashMap<String, bool>> {
+    REPO_SWITCH.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Record the per-repo switch for `repo_slug` (`owner/name`).
+pub fn set_repo_enabled(repo_slug: &str, enabled: bool) {
+    repo_switch()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(repo_slug.to_string(), enabled);
+}
+
+/// Per-repo switch for `repo_slug`, if the daemon registered one.
+pub fn repo_enabled(repo_slug: &str) -> Option<bool> {
+    repo_switch()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(repo_slug)
+        .copied()
+}
+
+/// Convenience for the pipelines: retrieval + rendering, honouring the
+/// global `cfg.enabled` and the per-repo switch. Logs one INFO line per
+/// call (what was retrieved, or why nothing was added), the full block at
+/// DEBUG.
 pub fn prompt_block(
     db: &dyn DatabaseBackend,
+    repo_slug: &str,
     kind: &str,
     number: u64,
     title: &str,
@@ -247,16 +278,40 @@ pub fn prompt_block(
     cfg: &RagConfig,
 ) -> String {
     if !cfg.enabled {
+        tracing::debug!(
+            "[{repo_slug}] related history off ([ai.rag] enabled=false / WSHM_RAG_ENABLED)"
+        );
+        return String::new();
+    }
+    if repo_enabled(repo_slug) == Some(false) {
+        tracing::info!(
+            "[{repo_slug}] related history off for this repo (features.related_history)"
+        );
         return String::new();
     }
     let items = find_related(db, kind, number, title, body, cfg);
     let block = render_block(&items, cfg.max_chars);
-    if !block.is_empty() {
-        tracing::debug!(
-            "related history for {kind} #{number}: {} item(s), {} chars",
+    if block.is_empty() {
+        tracing::info!("[{repo_slug}] related history for {kind} #{number}: no match");
+    } else {
+        let listed: Vec<String> = items
+            .iter()
+            .map(|it| {
+                format!(
+                    "{} #{} ({})",
+                    if it.kind == "pull" { "PR" } else { "issue" },
+                    it.number,
+                    it.state
+                )
+            })
+            .collect();
+        tracing::info!(
+            "[{repo_slug}] related history for {kind} #{number}: {} item(s), {} chars → {}",
             items.len(),
-            block.len()
+            block.chars().count(),
+            listed.join(", ")
         );
+        tracing::debug!("[{repo_slug}] related history block for {kind} #{number}:\n{block}");
     }
     block
 }
@@ -363,12 +418,23 @@ mod tests {
 
         let off = RagConfig {
             enabled: false,
-            ..cfg
+            ..cfg.clone()
         };
         assert_eq!(
-            prompt_block(&db, "issue", 1, "Scheduler crashes", None, &off),
+            prompt_block(&db, "o/r", "issue", 1, "Scheduler crashes", None, &off),
             ""
         );
+        // Global on, per-repo switch off → nothing; other repos unaffected.
+        set_repo_enabled("o/r", false);
+        assert_eq!(
+            prompt_block(&db, "o/r", "issue", 1, "Scheduler crashes", None, &cfg),
+            ""
+        );
+        assert!(
+            !prompt_block(&db, "o/other", "issue", 1, "Scheduler crashes", None, &cfg).is_empty()
+        );
+        set_repo_enabled("o/r", true);
+        assert!(!prompt_block(&db, "o/r", "issue", 1, "Scheduler crashes", None, &cfg).is_empty());
     }
 
     #[test]

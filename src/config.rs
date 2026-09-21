@@ -1667,6 +1667,12 @@ pub struct RepoFeatures {
     pub triage_issues: bool,
     #[serde(default)]
     pub analyze_prs: bool,
+    /// Append the "Related history" block (closed issues / merged PRs found
+    /// by full-text search, see `ai::related`) to this repo's triage and
+    /// PR-analysis prompts. Per-repo switch on top of the global
+    /// `[ai.rag] enabled` / `WSHM_RAG_ENABLED`; both must be on.
+    #[serde(default = "default_true")]
+    pub related_history: bool,
     /// Pro-only inline code review.
     #[serde(default)]
     pub review_prs: bool,
@@ -1697,6 +1703,7 @@ impl Default for RepoFeatures {
             collect_prs: true,
             triage_issues: false,
             analyze_prs: false,
+            related_history: true,
             review_prs: false,
             review_post_comments: true,
             auto_pr: false,
