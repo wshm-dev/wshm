@@ -167,6 +167,17 @@ async fn analyze_pr(
 
     let mut user_prompt = pr_analyze::build_user_prompt(pr, diff.as_deref());
 
+    // Related history (closed issues / merged PRs) from the full-text
+    // index — see ai::related and `[ai.rag]`.
+    user_prompt.push_str(&crate::ai::related::prompt_block(
+        db,
+        "pull",
+        pr.number,
+        &pr.title,
+        pr.body.as_deref(),
+        &config.ai.rag,
+    ));
+
     // Inject custom label definitions if configured
     let labels_prompt = config.labels_prompt();
     if !labels_prompt.is_empty() {

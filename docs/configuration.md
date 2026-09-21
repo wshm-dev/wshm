@@ -19,6 +19,14 @@ provider = "anthropic"            # anthropic, openai, google, mistral, groq, de
 model = "claude-sonnet-4-20250514"
 # base_url = "https://custom-proxy.com/v1"  # optional: custom API endpoint
 
+[ai.rag]                          # "Related history" in triage / PR-analysis prompts
+enabled = true                    # closed issues & merged PRs found by full-text search
+top_k = 5                         # items kept in the prompt
+max_terms = 8                     # search terms extracted from title + body
+max_chars = 3000                  # size cap of the block
+# Env overrides (beat the file): WSHM_RAG_ENABLED, WSHM_RAG_TOP_K,
+# WSHM_RAG_MAX_TERMS, WSHM_RAG_MAX_CHARS
+
 [triage]
 enabled = true
 auto_fix = false                  # attempt auto-fix for simple bugs (Pro)
@@ -125,6 +133,10 @@ full_sync_interval_hours = 24
 | `OPENAI_API_KEY` | OpenAI API key (if using OpenAI) |
 | `WSHM_LICENSE_KEY` | License key (alternative to vault/config) |
 | `WSHM_TOKEN` | Alternative to GITHUB_TOKEN |
+| `WSHM_RAG_ENABLED` | Override `[ai.rag] enabled` (true/false) |
+| `WSHM_RAG_TOP_K` | Override `[ai.rag] top_k` |
+| `WSHM_RAG_MAX_TERMS` | Override `[ai.rag] max_terms` |
+| `WSHM_RAG_MAX_CHARS` | Override `[ai.rag] max_chars` |
 | `VAULT_TOKEN` | HashiCorp Vault token |
 | `VAULT_ROLE_ID` | HashiCorp AppRole role ID |
 | `VAULT_SECRET_ID` | HashiCorp AppRole secret ID |
