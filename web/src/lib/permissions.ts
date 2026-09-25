@@ -18,7 +18,8 @@ const PAGE_REQUIREMENTS: Partial<Record<string, Role>> = {
 	'/actions': 'member',
 	'/revert': 'operator',
 	'/backups': 'operator',
-	'/settings': 'admin'
+	'/settings': 'admin',
+	'/users': 'admin'
 };
 
 /** Capability → minimum role required. */
