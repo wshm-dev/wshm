@@ -70,6 +70,10 @@
 		section: NavSection;
 		/** When set, hide the item unless `license.features[id].enabled === true`. */
 		feature?: string;
+		/** Hide the item unless the daemon reports `is_pro`. For Pro-only
+		 *  pages that have no licence feature id of their own (the route
+		 *  does not exist at all in an OSS build, so the link would 404). */
+		proOnly?: boolean;
 	};
 
 	const allNavItems: NavItem[] = [
@@ -80,6 +84,9 @@
 		{ href: '/prs', label: 'Pull Requests', icon: 'prs', section: 'Work' },
 		{ href: '/review', label: 'Code Review', icon: 'review', section: 'Work' },
 		{ href: '/triage', label: 'Triage', icon: 'triage', section: 'Work' },
+		{ href: '/autofix', label: 'Auto-fix', icon: 'actions', section: 'Work', feature: 'auto-fix' },
+		{ href: '/conflicts', label: 'Conflicts', icon: 'queue', section: 'Work', feature: 'conflicts' },
+		{ href: '/improve', label: 'Improvements', icon: 'insights', section: 'Work', feature: 'improve' },
 		{ href: '/queue', label: 'Merge Queue', icon: 'queue', section: 'Work' },
 		{ href: '/actions', label: 'Actions', icon: 'actions', section: 'Work' },
 		{ href: '/graphs', label: 'Graphs', icon: 'prGraph', section: 'Insights' },
@@ -98,12 +105,14 @@
 			feature: 'issue-insights'
 		},
 		{ href: '/usage', label: 'Usage', icon: 'activity', section: 'Insights', feature: 'usage-dashboard' },
+		{ href: '/reports', label: 'Reports', icon: 'changelog', section: 'Insights', feature: 'reports' },
 		{ href: '/changelog', label: 'Changelog', icon: 'changelog', section: 'Insights' },
 		{ href: '/activity', label: 'Activity', icon: 'activity', section: 'Insights' },
 		{ href: '/history', label: 'History', icon: 'activity', section: 'Insights' },
 		{ href: '/logs', label: 'Logs', icon: 'logs', section: 'System' },
 		{ href: '/revert', label: 'Revert', icon: 'revert', section: 'System' },
 		{ href: '/backups', label: 'Backups', icon: 'backups', section: 'System' },
+		{ href: '/users', label: 'Users', icon: 'settings', section: 'System', proOnly: true },
 		{ href: '/settings', label: 'Settings', icon: 'settings', section: 'System' }
 	];
 	function isFeatureLicensed(featureId: string | undefined): boolean {
@@ -115,6 +124,7 @@
 		allNavItems
 			.filter((i) => canAccessRoute(me?.role, i.href))
 			.filter((i) => isFeatureLicensed(i.feature))
+			.filter((i) => !i.proOnly || license?.is_pro === true)
 	);
 	const sectionOrder: NavSection[] = ['Overview', 'Work', 'Insights', 'System'];
 	let navSections = $derived(
