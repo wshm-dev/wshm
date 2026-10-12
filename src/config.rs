@@ -345,6 +345,12 @@ pub struct PrConfig {
     /// Override the AI system prompt for PR analysis.
     #[serde(default)]
     pub system_prompt: Option<String>,
+
+    /// Pro inline review: prepend a walkthrough (one line per changed file
+    /// plus a Mermaid sequence diagram when the change touches a flow) to the
+    /// review summary. Costs one extra AI call per review. Off by default.
+    #[serde(default)]
+    pub review_walkthrough: bool,
 }
 
 impl Default for PrConfig {
@@ -355,6 +361,7 @@ impl Default for PrConfig {
             risk_labels: true,
             model: None,
             system_prompt: None,
+            review_walkthrough: false,
         }
     }
 }
@@ -2143,6 +2150,7 @@ enabled = true
 auto_label = true
 risk_labels = true
 # model = "claude-sonnet-4-20250514"    # override: default model for PR analysis
+# review_walkthrough = false   # Pro review: add a per-file walkthrough + Mermaid diagram to the review summary
 
 [queue]
 enabled = true

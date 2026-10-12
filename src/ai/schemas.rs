@@ -90,6 +90,31 @@ pub struct InlineReviewResult {
     pub summary: String,
     #[serde(default)]
     pub stats: ReviewStats,
+    /// Optional PR walkthrough (`[pr].review_walkthrough`). Produced by a
+    /// separate AI pass, never by the inline-review prompt itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub walkthrough: Option<ReviewWalkthrough>,
+}
+
+/// AI output of the walkthrough pass: what the PR changes, file by file,
+/// plus an optional Mermaid sequence diagram of the affected flow.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReviewWalkthrough {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub overview: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub files: Vec<WalkthroughFile>,
+    /// Mermaid source (no fences), or None when the change has no flow worth drawing.
+    #[serde(default)]
+    pub diagram: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WalkthroughFile {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub path: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub change: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -22,12 +22,7 @@ pub struct PrReviewRow {
 
 fn row_to_pr_review(row: &rusqlite::Row) -> rusqlite::Result<PrReviewRow> {
     let result_json: String = row.get(1)?;
-    let result: InlineReviewResult =
-        serde_json::from_str(&result_json).unwrap_or(InlineReviewResult {
-            comments: Vec::new(),
-            summary: String::new(),
-            stats: Default::default(),
-        });
+    let result: InlineReviewResult = serde_json::from_str(&result_json).unwrap_or_default();
     Ok(PrReviewRow {
         pr_number: row.get(0)?,
         result,
