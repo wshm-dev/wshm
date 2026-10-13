@@ -3,6 +3,7 @@
 use anyhow::Result;
 
 use crate::ai::schemas::IssueClassification;
+use crate::db::diagrams::PrDiagramRow;
 use crate::db::events::WebhookEventRow;
 use crate::db::history::{ChangeEvent, ChangeEventFilter};
 use crate::db::issues::Issue;
@@ -164,6 +165,31 @@ pub trait DatabaseBackend: Send + Sync {
     /// Upsert a runtime K/V setting. Default no-op; real backends override.
     fn set_app_setting(&self, key: &str, value: &str) -> Result<()> {
         let _ = (key, value);
+        Ok(())
+    }
+
+    // ── PR diagrams (see `db::diagrams`) ────────────────────────
+    //
+    // Default impls keep backends without the table compiling: no cache,
+    // nothing to clean up. SQLite and Postgres (Pro) override them.
+
+    fn get_pr_diagram(&self, pr_number: u64) -> Result<Option<PrDiagramRow>> {
+        let _ = pr_number;
+        Ok(None)
+    }
+
+    /// Every cached diagram, without the page HTML (cleanup sweeps).
+    fn list_pr_diagrams(&self) -> Result<Vec<PrDiagramRow>> {
+        Ok(Vec::new())
+    }
+
+    fn upsert_pr_diagram(&self, row: &PrDiagramRow) -> Result<()> {
+        let _ = row;
+        Ok(())
+    }
+
+    fn delete_pr_diagram(&self, pr_number: u64) -> Result<()> {
+        let _ = pr_number;
         Ok(())
     }
 
@@ -526,6 +552,22 @@ impl DatabaseBackend for super::Database {
 
     fn clear_triage_and_analyses(&self) -> Result<()> {
         self.clear_triage_and_analyses()
+    }
+
+    fn get_pr_diagram(&self, pr_number: u64) -> Result<Option<PrDiagramRow>> {
+        self.get_pr_diagram(pr_number)
+    }
+
+    fn list_pr_diagrams(&self) -> Result<Vec<PrDiagramRow>> {
+        self.list_pr_diagrams()
+    }
+
+    fn upsert_pr_diagram(&self, row: &PrDiagramRow) -> Result<()> {
+        self.upsert_pr_diagram(row)
+    }
+
+    fn delete_pr_diagram(&self, pr_number: u64) -> Result<()> {
+        self.delete_pr_diagram(pr_number)
     }
 
     fn as_sqlite_db(&self) -> Option<&super::Database> {

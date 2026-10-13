@@ -48,6 +48,28 @@ enabled = true
 auto_label = true
 risk_labels = true                # add risk:low / risk:medium / risk:high
 
+# Architecture diagram in the PR analysis comment (Mermaid, inserted before
+# the review checklist). One extra AI call per new diff, cached per PR.
+# Every key can be overridden per repo in Settings → Diagrams (stored in
+# the DB, so all pods share it): DB > this file > defaults.
+[pr.review_diagrams]
+enabled = true
+kinds = ["architecture"]          # only "architecture" is implemented
+text = "short"                    # short | normal | full
+language = "en"                   # language of the diagram texts
+comment = "mermaid"               # mermaid | none (link to the page only)
+diff_viewer = true                # embed the diff in the interactive page
+
+# Interactive page (React Flow viewer), deleted when the PR is closed.
+[pr.review_diagrams.publish]
+target = "off"                    # off | local | github-pages | wshm (Pro) | s3 | gcs | azure (pending)
+# prefix = "wshm-diagrams"
+# public_url = "https://diagrams.example.com"  # link = public_url/<key>; for wshm: the daemon URL
+# dir = "/var/www/diagrams"       # local
+# pages_repo = "owner/diagrams"   # github-pages: commits to its gh-pages branch
+# retention_days = 0              # 0 = keep until the PR is closed
+# allow_private = false           # public targets are refused for private repos
+
 [queue]
 enabled = true
 merge_threshold = 15              # minimum score to auto-merge

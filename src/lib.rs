@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod db;
+pub mod diagrams;
 pub mod export;
 pub mod git_provider;
 pub mod github;

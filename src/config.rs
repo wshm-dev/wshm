@@ -346,11 +346,11 @@ pub struct PrConfig {
     #[serde(default)]
     pub system_prompt: Option<String>,
 
-    /// Pro inline review: prepend a walkthrough (one line per changed file
-    /// plus a Mermaid sequence diagram when the change touches a flow) to the
-    /// review summary. Costs one extra AI call per review. Off by default.
+    /// `[pr.review_diagrams]`: architecture diagram added to the PR analysis
+    /// comment, plus an optional interactive page. Can be overridden per repo
+    /// in the DB, see [`load_review_diagrams`].
     #[serde(default)]
-    pub review_walkthrough: bool,
+    pub review_diagrams: ReviewDiagramsConfig,
 }
 
 impl Default for PrConfig {
@@ -361,7 +361,195 @@ impl Default for PrConfig {
             risk_labels: true,
             model: None,
             system_prompt: None,
-            review_walkthrough: false,
+            review_diagrams: ReviewDiagramsConfig::default(),
+        }
+    }
+}
+
+/// How much prose the diagram carries (story, captions, node details).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagramText {
+    #[default]
+    Short,
+    Normal,
+    Full,
+}
+
+/// What the PR comment shows of the diagram.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagramComment {
+    /// Mermaid flowchart + story + walkthrough in the comment.
+    #[default]
+    Mermaid,
+    /// Nothing but a link to the interactive page (when one is published).
+    None,
+}
+
+/// Where the interactive HTML page is published.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiagramPublishTarget {
+    #[default]
+    Off,
+    Local,
+    GithubPages,
+    Wshm,
+    S3,
+    Gcs,
+    Azure,
+}
+
+/// `[pr.review_diagrams.publish]`. No secret here: GitHub Pages uses the
+/// repo's GitHub credentials, object stores their own credential chain.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DiagramPublishConfig {
+    pub target: DiagramPublishTarget,
+    /// Key prefix (directory) of the published pages.
+    pub prefix: String,
+    /// Base URL the pages are served from; the link is `public_url/key`.
+    /// For `wshm` it is the daemon's external URL. Without it (local) the
+    /// page is written but no link is added to the comment.
+    pub public_url: Option<String>,
+    /// `local`: directory the pages are written to.
+    pub dir: Option<String>,
+    /// `github-pages`: `owner/repo` whose `gh-pages` branch receives the pages.
+    pub pages_repo: Option<String>,
+    pub bucket: Option<String>,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+    pub container: Option<String>,
+    pub account: Option<String>,
+    /// Delete pages older than this many days (0 = keep until the PR closes).
+    pub retention_days: u32,
+    /// Allow a public target (github-pages, object stores, local with a
+    /// public_url) for a private repo. Off by default: the page embeds the diff.
+    pub allow_private: bool,
+}
+
+impl Default for DiagramPublishConfig {
+    fn default() -> Self {
+        Self {
+            target: DiagramPublishTarget::Off,
+            prefix: "wshm-diagrams".to_string(),
+            public_url: None,
+            dir: None,
+            pages_repo: None,
+            bucket: None,
+            region: None,
+            endpoint: None,
+            container: None,
+            account: None,
+            retention_days: 0,
+            allow_private: false,
+        }
+    }
+}
+
+/// `[pr.review_diagrams]`. Resolution: DB (per repo) > TOML > these defaults.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ReviewDiagramsConfig {
+    pub enabled: bool,
+    /// Diagram kinds. Only "architecture" is implemented; "flow", "changes",
+    /// "delta" and "dependency" are accepted and ignored with a warning.
+    pub kinds: Vec<String>,
+    pub text: DiagramText,
+    /// Language of every human-readable text (ISO code, e.g. "en", "fr").
+    pub language: String,
+    pub comment: DiagramComment,
+    /// Embed the PR diff in the interactive page (per-component diff drawer).
+    pub diff_viewer: bool,
+    pub publish: DiagramPublishConfig,
+}
+
+impl Default for ReviewDiagramsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            kinds: vec!["architecture".to_string()],
+            text: DiagramText::Short,
+            language: "en".to_string(),
+            comment: DiagramComment::Mermaid,
+            diff_viewer: true,
+            publish: DiagramPublishConfig::default(),
+        }
+    }
+}
+
+/// Diagram kinds the config accepts. Only the first one is implemented.
+pub const DIAGRAM_KINDS: &[&str] = &["architecture", "flow", "changes", "delta", "dependency"];
+
+/// Recursively overlay `over` onto `base` (objects merged key by key, any
+/// other value replaced).
+fn merge_json(base: &mut serde_json::Value, over: &serde_json::Value) {
+    match (base, over) {
+        (serde_json::Value::Object(b), serde_json::Value::Object(o)) => {
+            for (k, v) in o {
+                merge_json(b.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+            }
+        }
+        (b, o) => *b = o.clone(),
+    }
+}
+
+/// Keys of `over` that `reference` does not know (dotted paths). Used to
+/// reject typos in a per-repo override instead of silently ignoring them.
+pub fn unknown_json_keys(reference: &serde_json::Value, over: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let (Some(r), Some(o)) = (reference.as_object(), over.as_object()) {
+        for (k, v) in o {
+            match r.get(k) {
+                None => out.push(k.clone()),
+                Some(rv) if rv.is_object() => out.extend(
+                    unknown_json_keys(rv, v)
+                        .into_iter()
+                        .map(|s| format!("{k}.{s}")),
+                ),
+                Some(_) => {}
+            }
+        }
+    }
+    out
+}
+
+/// Apply a per-repo override (JSON object, possibly partial) on top of the
+/// TOML value. Errors when the merged value is not a valid config.
+pub fn apply_review_diagrams_override(
+    toml: &ReviewDiagramsConfig,
+    over: &serde_json::Value,
+) -> Result<ReviewDiagramsConfig> {
+    let mut base = serde_json::to_value(toml)?;
+    merge_json(&mut base, over);
+    Ok(serde_json::from_value(base)?)
+}
+
+/// The repo's effective `[pr.review_diagrams]`: the DB override (Settings →
+/// Diagrams, shared by every pod since it is read on each pass) merged over
+/// the TOML value. A corrupt override is logged and ignored.
+pub fn load_review_diagrams(
+    config: &Config,
+    db: &dyn crate::db::backend::DatabaseBackend,
+) -> ReviewDiagramsConfig {
+    let toml = &config.pr.review_diagrams;
+    let raw = db
+        .get_app_setting(crate::db::settings::REVIEW_DIAGRAMS_KEY)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty() && s.trim() != "null");
+    let Some(raw) = raw else {
+        return toml.clone();
+    };
+    match serde_json::from_str::<serde_json::Value>(&raw)
+        .map_err(anyhow::Error::from)
+        .and_then(|v| apply_review_diagrams_override(toml, &v))
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Ignoring invalid review_diagrams override in the DB: {e:#}");
+            toml.clone()
         }
     }
 }
@@ -802,7 +990,8 @@ pub struct SkillDef {
     pub content: String,
 
     /// Which pipelines this skill applies to: any of "triage", "pr_review",
-    /// "review" (inline code review). Empty means all of them.
+    /// "review" (inline code review), "diagrams" (PR diagrams). Empty means
+    /// all of them.
     #[serde(default)]
     pub pipelines: Vec<String>,
 
@@ -1291,6 +1480,7 @@ pub struct BrandingConfig {
     /// Custom PR analysis comment template (markdown/HTML).
     /// Placeholders: {type}, {risk}, {summary}, {type_emoji}, {risk_emoji},
     /// {tests_present}, {breaking_change}, {docs_updated}, {linked_issues},
+    /// {diagram} (architecture section, see `[pr.review_diagrams]`),
     /// {header}, {footer}
     #[serde(default)]
     pub pr_template: Option<String>,
@@ -2150,7 +2340,27 @@ enabled = true
 auto_label = true
 risk_labels = true
 # model = "claude-sonnet-4-20250514"    # override: default model for PR analysis
-# review_walkthrough = false   # Pro review: add a per-file walkthrough + Mermaid diagram to the review summary
+
+# Architecture diagram in the PR analysis comment (one extra AI call per new
+# diff, cached per head). Every key can be overridden per repo in
+# Settings → Diagrams (stored in the DB; DB > this file > defaults).
+# [pr.review_diagrams]
+# enabled = true
+# kinds = ["architecture"]       # only "architecture" for now
+# text = "short"                 # "short" | "normal" | "full"
+# language = "en"                # language of the diagram texts
+# comment = "mermaid"            # "mermaid" (diagram in the comment) | "none" (link only)
+# diff_viewer = true             # embed the diff in the interactive page
+#
+# Interactive page (React Flow viewer). Off by default.
+# [pr.review_diagrams.publish]
+# target = "off"                 # "off" | "local" | "github-pages" | "wshm" | "s3" | "gcs" | "azure"
+# prefix = "wshm-diagrams"
+# public_url = "https://diagrams.example.com"   # link = public_url/prefix/...
+# dir = "/var/www/diagrams"      # local
+# pages_repo = "owner/diagrams"  # github-pages (gh-pages branch, repo token)
+# retention_days = 0             # 0 = delete when the PR is closed
+# allow_private = false          # allow public targets for a private repo
 
 [queue]
 enabled = true
@@ -2295,7 +2505,7 @@ full_sync_interval_hours = 24
 #
 # PR analysis placeholders: {header}, {footer}, {type}, {risk}, {summary},
 #   {type_emoji}, {risk_emoji}, {tests_present}, {breaking_change},
-#   {docs_updated}, {linked_issues}
+#   {docs_updated}, {linked_issues}, {diagram}
 # pr_template = """
 # {header}
 # ## PR Review
@@ -2688,5 +2898,71 @@ mod rag_env_tests {
             (cfg.enabled, cfg.top_k, cfg.max_terms, cfg.max_chars),
             (false, 9, 8, 1200)
         );
+    }
+}
+
+#[cfg(test)]
+mod review_diagrams_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_on_short_english_mermaid_unpublished() {
+        let c = Config::default();
+        let d = &c.pr.review_diagrams;
+        assert!(d.enabled);
+        assert_eq!(d.kinds, vec!["architecture"]);
+        assert_eq!(d.text, DiagramText::Short);
+        assert_eq!(d.language, "en");
+        assert_eq!(d.comment, DiagramComment::Mermaid);
+        assert!(d.diff_viewer);
+        assert_eq!(d.publish.target, DiagramPublishTarget::Off);
+        assert!(!d.publish.allow_private);
+    }
+
+    #[test]
+    fn toml_is_parsed() {
+        let pr: PrConfig = toml::from_str(
+            "[review_diagrams]\ntext = \"full\"\nlanguage = \"fr\"\n[review_diagrams.publish]\ntarget = \"github-pages\"\npages_repo = \"o/p\"\n",
+        )
+        .unwrap();
+        assert_eq!(pr.review_diagrams.text, DiagramText::Full);
+        assert_eq!(
+            pr.review_diagrams.publish.target,
+            DiagramPublishTarget::GithubPages
+        );
+        assert_eq!(
+            pr.review_diagrams.publish.pages_repo.as_deref(),
+            Some("o/p")
+        );
+        assert!(pr.review_diagrams.enabled, "unset keys keep their defaults");
+    }
+
+    #[test]
+    fn db_override_is_merged_over_toml() {
+        let mut toml = ReviewDiagramsConfig::default();
+        toml.language = "fr".into();
+        toml.publish.dir = Some("/srv".into());
+        let over = serde_json::json!({"text": "normal", "publish": {"target": "local"}});
+        let eff = apply_review_diagrams_override(&toml, &over).unwrap();
+        assert_eq!(eff.text, DiagramText::Normal);
+        assert_eq!(eff.language, "fr", "TOML value kept");
+        assert_eq!(eff.publish.target, DiagramPublishTarget::Local);
+        assert_eq!(
+            eff.publish.dir.as_deref(),
+            Some("/srv"),
+            "nested TOML value kept"
+        );
+        assert!(
+            apply_review_diagrams_override(&toml, &serde_json::json!({"text": "huge"})).is_err()
+        );
+    }
+
+    #[test]
+    fn unknown_override_keys_are_reported() {
+        let reference = serde_json::to_value(ReviewDiagramsConfig::default()).unwrap();
+        let over = serde_json::json!({"txt": "x", "publish": {"target": "off", "secret_key": "k"}});
+        let mut keys = unknown_json_keys(&reference, &over);
+        keys.sort();
+        assert_eq!(keys, vec!["publish.secret_key", "txt"]);
     }
 }

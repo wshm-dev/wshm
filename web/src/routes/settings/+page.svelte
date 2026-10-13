@@ -44,10 +44,14 @@
 		discoverRepoDomains,
 		fetchRepoSkills,
 		updateRepoSkills,
+		fetchRepoDiagrams,
+		updateRepoDiagrams,
 		fetchRetrySettings,
 		updateRetrySettings,
 		type ReviewDomain,
 		type Skill,
+		type DiagramSettings,
+		type RepoDiagramsResponse,
 		type RepoFeatures,
 		type RetrySettings,
 		type LicenseInfo,
@@ -374,6 +378,65 @@
 		skillsDraft = [...skillsDraft];
 	}
 
+	// PR diagrams ([pr.review_diagrams]): TOML default, per-repo override in
+	// the DB (shared by every pod). Managed in the "Diagrams" tab.
+	const DIAGRAM_KINDS = ['architecture', 'flow', 'changes', 'delta', 'dependency'];
+	let diagramsRepo: string = $state('');
+	let diagramsInfo: RepoDiagramsResponse | null = $state(null);
+	let diagramsDraft: DiagramSettings | null = $state(null);
+	let diagramsLoading: boolean = $state(false);
+	let diagramsSaving: boolean = $state(false);
+	let diagramsMessage: string | null = $state(null);
+	let diagramsMessageErr: boolean = $state(false);
+
+	function setDiagramsInfo(r: RepoDiagramsResponse) {
+		diagramsInfo = r;
+		diagramsDraft = JSON.parse(JSON.stringify(r.effective));
+	}
+	async function loadDiagramsFor(slug: string) {
+		diagramsRepo = slug;
+		diagramsInfo = null;
+		diagramsDraft = null;
+		diagramsMessage = null;
+		if (!slug) return;
+		diagramsLoading = true;
+		try {
+			setDiagramsInfo(await fetchRepoDiagrams(slug));
+		} catch (e) {
+			diagramsMessage = e instanceof Error ? e.message : 'Failed to load diagram settings';
+			diagramsMessageErr = true;
+		}
+		diagramsLoading = false;
+	}
+	async function saveDiagrams(reset: boolean) {
+		if (!diagramsRepo || !diagramsDraft) return;
+		diagramsSaving = true;
+		diagramsMessage = null;
+		try {
+			let body: DiagramSettings | null = null;
+			if (!reset) {
+				body = JSON.parse(JSON.stringify(diagramsDraft)) as DiagramSettings;
+				const p = body.publish as unknown as Record<string, unknown>;
+				for (const k of ['public_url', 'dir', 'pages_repo', 'bucket', 'region', 'endpoint', 'container', 'account']) {
+					if (typeof p[k] === 'string' && (p[k] as string).trim() === '') p[k] = null;
+				}
+				body.publish.retention_days = Math.max(0, Math.floor(Number(body.publish.retention_days) || 0));
+			}
+			setDiagramsInfo(await updateRepoDiagrams(diagramsRepo, body));
+			diagramsMessage = reset ? 'Override removed: the TOML settings apply.' : 'Saved.';
+			diagramsMessageErr = false;
+		} catch (e) {
+			diagramsMessage = e instanceof Error ? e.message : 'save failed';
+			diagramsMessageErr = true;
+		}
+		diagramsSaving = false;
+	}
+	function toggleDiagramKind(kind: string) {
+		if (!diagramsDraft) return;
+		const has = diagramsDraft.kinds.includes(kind);
+		diagramsDraft.kinds = has ? diagramsDraft.kinds.filter((k) => k !== kind) : [...diagramsDraft.kinds, kind];
+	}
+
 	async function openFeaturesModal(slug: string) {
 		featuresSlug = slug;
 		featuresDraft = null;
@@ -688,6 +751,7 @@
 		<Tabs.Trigger value="users">{$t('settings.tabs.users')}</Tabs.Trigger>
 		<Tabs.Trigger value="domains">Domains</Tabs.Trigger>
 		<Tabs.Trigger value="skills">Skills</Tabs.Trigger>
+		<Tabs.Trigger value="diagrams">Diagrams</Tabs.Trigger>
 	</Tabs.List>
 
 	<!-- ========================= REPOSITORIES ========================= -->
@@ -1555,6 +1619,15 @@
 											/>
 											Code review (Pro)
 										</label>
+										<label class="flex items-center gap-1">
+											<input
+												type="checkbox"
+												class="h-3.5 w-3.5"
+												checked={s.pipelines.includes('diagrams')}
+												onchange={() => togglePipeline(i, 'diagrams')}
+											/>
+											Diagrams
+										</label>
 										<span class="italic">(all, if none checked)</span>
 									</div>
 									<textarea
@@ -1575,6 +1648,190 @@
 						{/if}
 					{:else}
 						<p class="text-xs text-muted-foreground">Select a repository to manage its skills.</p>
+					{/if}
+				</Card.Content>
+			</Card.Root>
+		</div>
+	</Tabs.Content>
+
+	<!-- ========================= DIAGRAMS ========================= -->
+	<Tabs.Content value="diagrams" class="mt-2">
+		<div class="w-full space-y-4">
+			<Card.Root>
+				<Card.Header>
+					<Card.Title>PR diagrams</Card.Title>
+					<Card.Description class="text-xs">
+						Architecture diagram added to the PR analysis comment (Mermaid), plus an optional
+						interactive page. Defaults come from <code>[pr.review_diagrams]</code> in the TOML; what you
+						save here overrides them for this repository only (stored in the database, shared by every
+						pod). Takes effect on the next PR pass — no restart needed.
+					</Card.Description>
+				</Card.Header>
+				<Card.Content class="space-y-3">
+					<div>
+						<Label class="text-xs mb-1">Repository</Label>
+						<select
+							class="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+							value={diagramsRepo}
+							onchange={(e) => loadDiagramsFor((e.currentTarget as HTMLSelectElement).value)}
+						>
+							<option value="" disabled>Select a repository…</option>
+							{#each reposList?.repos ?? [] as r}
+								<option value={r.slug}>{r.slug}</option>
+							{/each}
+						</select>
+					</div>
+
+					{#if diagramsMessage}
+						{@render statusAlert(diagramsMessage, diagramsMessageErr)}
+					{/if}
+
+					{#if diagramsRepo}
+						{#if diagramsLoading}
+							<p class="text-xs text-muted-foreground">{$t('common.loading')}</p>
+						{:else if diagramsDraft}
+							<p class="text-[0.7rem] text-muted-foreground">
+								{#if diagramsInfo?.override}
+									<Badge variant="secondary">per-repo override</Badge> saved in the database.
+								{:else}
+									Using the TOML settings (no per-repo override).
+								{/if}
+							</p>
+
+							<div class="grid gap-3 sm:grid-cols-2">
+								<label class="flex items-center gap-2 text-xs">
+									<input type="checkbox" class="h-4 w-4" bind:checked={diagramsDraft.enabled} />
+									Enabled
+								</label>
+								<label class="flex items-center gap-2 text-xs">
+									<input type="checkbox" class="h-4 w-4" bind:checked={diagramsDraft.diff_viewer} />
+									Embed the diff in the interactive page
+								</label>
+								<div>
+									<Label class="text-xs mb-1">Text</Label>
+									<select class="w-full rounded-md border bg-background px-2 py-1.5 text-xs" bind:value={diagramsDraft.text}>
+										<option value="short">short — 1-sentence story, short captions</option>
+										<option value="normal">normal — + component details and table</option>
+										<option value="full">full — 2-3 sentences per step</option>
+									</select>
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Language</Label>
+									<Input class="h-8" placeholder="en" bind:value={diagramsDraft.language} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">In the comment</Label>
+									<select class="w-full rounded-md border bg-background px-2 py-1.5 text-xs" bind:value={diagramsDraft.comment}>
+										<option value="mermaid">mermaid — diagram, story and walkthrough</option>
+										<option value="none">none — link to the page only</option>
+									</select>
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Kinds</Label>
+									<div class="flex flex-wrap gap-3 text-[0.7rem] text-muted-foreground">
+										{#each DIAGRAM_KINDS as k}
+											<label class="flex items-center gap-1">
+												<input
+													type="checkbox"
+													class="h-3.5 w-3.5"
+													checked={diagramsDraft.kinds.includes(k)}
+													onchange={() => toggleDiagramKind(k)}
+												/>
+												{k}{k === 'architecture' ? '' : ' (soon)'}
+											</label>
+										{/each}
+									</div>
+								</div>
+							</div>
+
+							<h5 class="text-xs uppercase text-muted-foreground font-semibold pt-2">Interactive page</h5>
+							<div class="grid gap-3 sm:grid-cols-2">
+								<div>
+									<Label class="text-xs mb-1">Publish to</Label>
+									<select class="w-full rounded-md border bg-background px-2 py-1.5 text-xs" bind:value={diagramsDraft.publish.target}>
+										<option value="off">off</option>
+										<option value="local">local directory</option>
+										<option value="github-pages">GitHub Pages (gh-pages branch)</option>
+										<option value="wshm">hosted by wshm (Pro){diagramsInfo?.hosting_available ? '' : ' — not licensed'}</option>
+										<option value="s3">S3 (pending)</option>
+										<option value="gcs">GCS (pending)</option>
+										<option value="azure">Azure Blob (pending)</option>
+									</select>
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Public URL</Label>
+									<Input
+										class="h-8"
+										placeholder={diagramsDraft.publish.target === 'wshm' ? 'https://wshm.example.com (daemon URL)' : 'https://diagrams.example.com'}
+										value={diagramsDraft.publish.public_url ?? ''}
+										oninput={(e) => diagramsDraft && (diagramsDraft.publish.public_url = (e.currentTarget as HTMLInputElement).value)}
+									/>
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Key prefix</Label>
+									<Input class="h-8" bind:value={diagramsDraft.publish.prefix} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Retention (days, 0 = until the PR closes)</Label>
+									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.publish.retention_days} />
+								</div>
+								{#if diagramsDraft.publish.target === 'local'}
+									<div>
+										<Label class="text-xs mb-1">Directory</Label>
+										<Input
+											class="h-8"
+											placeholder="/var/www/diagrams"
+											value={diagramsDraft.publish.dir ?? ''}
+											oninput={(e) => diagramsDraft && (diagramsDraft.publish.dir = (e.currentTarget as HTMLInputElement).value)}
+										/>
+									</div>
+								{/if}
+								{#if diagramsDraft.publish.target === 'github-pages'}
+									<div>
+										<Label class="text-xs mb-1">Pages repository (owner/repo)</Label>
+										<Input
+											class="h-8"
+											placeholder="owner/diagrams"
+											value={diagramsDraft.publish.pages_repo ?? ''}
+											oninput={(e) => diagramsDraft && (diagramsDraft.publish.pages_repo = (e.currentTarget as HTMLInputElement).value)}
+										/>
+									</div>
+								{/if}
+								{#if ['s3', 'gcs', 'azure'].includes(diagramsDraft.publish.target)}
+									{#each (diagramsDraft.publish.target === 'azure' ? ['account', 'container'] : ['bucket', 'region', 'endpoint']) as field}
+										<div>
+											<Label class="text-xs mb-1">{field}</Label>
+											<Input
+												class="h-8"
+												value={(diagramsDraft.publish as unknown as Record<string, string | null>)[field] ?? ''}
+												oninput={(e) => diagramsDraft && ((diagramsDraft.publish as unknown as Record<string, string | null>)[field] = (e.currentTarget as HTMLInputElement).value)}
+											/>
+										</div>
+									{/each}
+									<p class="text-[0.7rem] text-muted-foreground sm:col-span-2">
+										Object storage publishing is not available yet: the page is skipped with a warning.
+										Credentials come from the provider's usual chain, never from these settings.
+									</p>
+								{/if}
+								<label class="flex items-center gap-2 text-xs sm:col-span-2">
+									<input type="checkbox" class="h-4 w-4" bind:checked={diagramsDraft.publish.allow_private} />
+									Allow a public target for a private repository (the page embeds the diff)
+								</label>
+							</div>
+
+							<div class="flex gap-2">
+								<Button size="sm" onclick={() => saveDiagrams(false)} disabled={diagramsSaving}>
+									{diagramsSaving ? $t('common.loading') : $t('common.save')}
+								</Button>
+								{#if diagramsInfo?.override}
+									<Button size="sm" variant="outline" onclick={() => saveDiagrams(true)} disabled={diagramsSaving}>
+										Reset to TOML
+									</Button>
+								{/if}
+							</div>
+						{/if}
+					{:else}
+						<p class="text-xs text-muted-foreground">Select a repository to manage its diagram settings.</p>
 					{/if}
 				</Card.Content>
 			</Card.Root>

@@ -60,6 +60,13 @@ pub async fn run(
         return Ok(());
     }
 
+    // Polling mode has no `closed` webhook: drop diagrams of closed PRs here.
+    if args.pr.is_none() && args.apply {
+        crate::diagrams::sweep(config, db, gh).await;
+    }
+
+    // A single-PR dry-run prints the comment it would post.
+    let preview = args.pr.is_some() && !args.apply && !json;
     let mut results: Vec<PrAnalysisOutput> = Vec::with_capacity(pulls.len());
 
     for pr in &pulls {
@@ -69,7 +76,7 @@ pub async fn run(
         }
 
         info!("Analyzing PR #{}: {}", pr.number, pr.title);
-        match analyze_pr(config, &ai, db, gh, pr, args.apply, exporter).await {
+        match analyze_pr(config, &ai, db, gh, pr, args.apply, preview, exporter).await {
             Ok(analysis) => {
                 if !json {
                     print_analysis(pr, &analysis, args.apply);
@@ -104,6 +111,7 @@ pub async fn run(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn analyze_pr(
     config: &Config,
     ai: &AiBackend,
@@ -111,6 +119,7 @@ async fn analyze_pr(
     gh: &GhClient,
     pr: &PullRequest,
     apply: bool,
+    preview: bool,
     exporter: Option<&ExportManager>,
 ) -> Result<PrAnalysis> {
     // Content hash cache: skip LLM call if content hasn't changed since last
@@ -253,6 +262,10 @@ async fn analyze_pr(
     // Account for the LLM call — advisory, never fail the pipeline.
     let _ = db.record_llm_invocation("pr_analysis", None);
 
+    // Architecture diagram (`[pr.review_diagrams]`), fail-soft.
+    let diagram =
+        crate::diagrams::comment_section(config, ai, db, gh, pr, diff.as_deref(), apply).await;
+
     // Store in DB
     let now = chrono::Utc::now().to_rfc3339();
     db.upsert_pr_analysis(&PrAnalysisRow {
@@ -310,7 +323,7 @@ async fn analyze_pr(
             }
         }
 
-        let comment = format_analysis_comment(&analysis, config);
+        let comment = format_analysis_comment(&analysis, config, diagram.as_deref());
         gh.comment_pr(pr.number, &comment).await?;
 
         info!("Applied analysis to PR #{}", pr.number);
@@ -325,12 +338,19 @@ async fn analyze_pr(
             })
             .await?;
         }
+    } else if preview {
+        println!(
+            "--- comment preview (dry-run, not posted) ---\n{}\n--- end of preview ---",
+            format_analysis_comment(&analysis, config, diagram.as_deref())
+        );
     }
 
     Ok(analysis)
 }
 
-fn format_analysis_comment(a: &PrAnalysis, config: &Config) -> String {
+/// `diagram`: the "Architecture" section, inserted before the checklist (or
+/// at `{diagram}` in a custom `pr_template`).
+fn format_analysis_comment(a: &PrAnalysis, config: &Config, diagram: Option<&str>) -> String {
     let risk_emoji = match a.risk_level.as_str() {
         "high" => "🔴",
         "medium" => "🟡",
@@ -372,6 +392,7 @@ fn format_analysis_comment(a: &PrAnalysis, config: &Config) -> String {
             )
             .replace("{docs_updated}", check(a.review_checklist.docs_updated))
             .replace("{linked_issues}", &linked_issues)
+            .replace("{diagram}", diagram.unwrap_or(""))
             .replace("{header}", &header)
             .replace("{footer}", &footer);
     }
@@ -386,6 +407,7 @@ fn format_analysis_comment(a: &PrAnalysis, config: &Config) -> String {
          | {risk_emoji} **Risk** | `{}` |\n\n\
          ### Summary\n\n\
          {}\n\n\
+         {}\
          ### Review Checklist\n\
          - [{}] Tests present\n\
          - [{}] Breaking change\n\
@@ -393,6 +415,9 @@ fn format_analysis_comment(a: &PrAnalysis, config: &Config) -> String {
         a.pr_type,
         a.risk_level,
         crate::pipelines::truncate(&a.summary, 500),
+        diagram
+            .map(|d| format!("{}\n\n", d.trim_end()))
+            .unwrap_or_default(),
         check(a.review_checklist.tests_present),
         check(a.review_checklist.breaking_change),
         check(a.review_checklist.docs_updated),
@@ -412,4 +437,48 @@ fn print_analysis(pr: &PullRequest, a: &PrAnalysis, applied: bool) {
         "[{status}] #{} {} → {} (risk: {}, type: {})",
         pr.number, pr.title, a.summary, a.risk_level, a.pr_type,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn analysis() -> PrAnalysis {
+        PrAnalysis {
+            summary: "Adds X.".into(),
+            risk_level: "low".into(),
+            pr_type: "feature".into(),
+            linked_issues: Vec::new(),
+            review_checklist: Default::default(),
+            suggested_labels: Vec::new(),
+            domains: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn diagram_section_goes_before_the_checklist() {
+        let config = Config::default();
+        let c = format_analysis_comment(&analysis(), &config, Some("### 🗺️ Architecture\n\nS\n"));
+        let arch = c.find("### 🗺️ Architecture").unwrap();
+        let summary = c.find("### Summary").unwrap();
+        let checklist = c.find("### Review Checklist").unwrap();
+        assert!(summary < arch && arch < checklist);
+        assert!(c.contains("Adds X.\n\n### 🗺️ Architecture\n\nS\n\n### Review Checklist\n"));
+        let without = format_analysis_comment(&analysis(), &config, None);
+        assert!(without.contains("Adds X.\n\n### Review Checklist\n"));
+    }
+
+    #[test]
+    fn custom_template_places_the_diagram_at_its_placeholder() {
+        let mut config = Config::default();
+        config.branding.pr_template = Some("{summary}|{diagram}".into());
+        assert_eq!(
+            format_analysis_comment(&analysis(), &config, Some("D")),
+            "Adds X.|D"
+        );
+        assert_eq!(
+            format_analysis_comment(&analysis(), &config, None),
+            "Adds X.|"
+        );
+    }
 }

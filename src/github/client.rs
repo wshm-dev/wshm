@@ -267,6 +267,115 @@ impl Client {
         Ok(out)
     }
 
+    /// Whether the repo is private. Errors (no access, network) are returned
+    /// as is: callers that gate publication must treat them as "private".
+    pub async fn fetch_repo_private(&self) -> Result<bool> {
+        let route = format!("/repos/{}/{}", self.owner, self.repo);
+        let resp = self
+            .octocrab
+            ._get(route.as_str())
+            .await
+            .context("github: repo metadata")?;
+        let status = resp.status();
+        let body = self.octocrab.body_to_string(resp).await?;
+        if !status.is_success() {
+            anyhow::bail!("github: repo metadata: HTTP {status}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&body)?;
+        v.get("private")
+            .and_then(|p| p.as_bool())
+            .context("github: repo metadata has no 'private' field")
+    }
+
+    /// Blob sha of `path` on `branch` of `repo_full` (`owner/name`), or None
+    /// when the file does not exist.
+    async fn content_sha(
+        &self,
+        repo_full: &str,
+        branch: &str,
+        path: &str,
+    ) -> Result<Option<String>> {
+        let route = format!("/repos/{repo_full}/contents/{path}?ref={branch}");
+        let resp = self
+            .octocrab
+            ._get(route.as_str())
+            .await
+            .context("github: get contents")?;
+        let status = resp.status();
+        let body = self.octocrab.body_to_string(resp).await?;
+        if status == http::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            anyhow::bail!("github: get {repo_full}/{path}@{branch}: HTTP {status}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&body)?;
+        Ok(v.get("sha").and_then(|s| s.as_str()).map(String::from))
+    }
+
+    /// Create or update a file through the contents API (one commit).
+    pub async fn put_file_content(
+        &self,
+        repo_full: &str,
+        branch: &str,
+        path: &str,
+        content: &[u8],
+        message: &str,
+    ) -> Result<()> {
+        use base64::Engine as _;
+        self.require_auth("publish file")?;
+        let sha = self.content_sha(repo_full, branch, path).await?;
+        let mut body = serde_json::json!({
+            "message": message,
+            "content": base64::engine::general_purpose::STANDARD.encode(content),
+            "branch": branch,
+        });
+        if let Some(sha) = sha {
+            body["sha"] = serde_json::Value::String(sha);
+        }
+        let route = format!("/repos/{repo_full}/contents/{path}");
+        let resp = self
+            .octocrab
+            ._put(route.as_str(), Some(&body))
+            .await
+            .context("github: put contents")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = self.octocrab.body_to_string(resp).await.unwrap_or_default();
+            anyhow::bail!(
+                "github: put {repo_full}/{path}@{branch}: HTTP {status}: {}",
+                crate::pipelines::truncate(&detail, 200)
+            );
+        }
+        Ok(())
+    }
+
+    /// Delete a file through the contents API. `Ok(false)` if it was absent.
+    pub async fn delete_file_content(
+        &self,
+        repo_full: &str,
+        branch: &str,
+        path: &str,
+        message: &str,
+    ) -> Result<bool> {
+        self.require_auth("delete file")?;
+        let Some(sha) = self.content_sha(repo_full, branch, path).await? else {
+            return Ok(false);
+        };
+        let body = serde_json::json!({ "message": message, "sha": sha, "branch": branch });
+        let route = format!("/repos/{repo_full}/contents/{path}");
+        let resp = self
+            .octocrab
+            ._delete(route.as_str(), Some(&body))
+            .await
+            .context("github: delete contents")?;
+        let status = resp.status();
+        if !status.is_success() {
+            anyhow::bail!("github: delete {repo_full}/{path}@{branch}: HTTP {status}");
+        }
+        Ok(true)
+    }
+
     /// Small helper: GET a URL and parse the JSON body.
     async fn _get_json(&self, url: &str, what: &'static str) -> Result<serde_json::Value> {
         let body = crate::retry::with_retry(what, || async {

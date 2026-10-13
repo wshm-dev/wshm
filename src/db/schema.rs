@@ -99,6 +99,22 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS pr_diagrams (
+            pr_number   INTEGER PRIMARY KEY,
+            diff_hash   TEXT NOT NULL,
+            head_sha    TEXT,
+            gen_hash    TEXT NOT NULL,
+            graph_json  TEXT NOT NULL,
+            page_target TEXT,
+            page_key    TEXT,
+            page_url    TEXT,
+            page_token  TEXT,
+            page_html   TEXT,
+            is_private  INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(state);
         CREATE INDEX IF NOT EXISTS idx_pulls_state ON pull_requests(state);
         CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_number);

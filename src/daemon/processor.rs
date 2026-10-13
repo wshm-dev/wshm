@@ -333,6 +333,13 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
     let number = event.number;
     info!("Handling pull_request event: number={number:?}");
 
+    // Closed or merged: remove its diagram page (`[pr.review_diagrams]`).
+    if event.action == "closed" {
+        if let Some(n) = number {
+            crate::diagrams::cleanup_pr(&state.config, state.db.as_ref(), &state.gh(), n).await;
+        }
+    }
+
     // Skip if blacklisted or already analyzed (prevent AI credit exhaustion)
     if let Some(n) = number {
         if state.config.prs_blacklist.contains(&n) {

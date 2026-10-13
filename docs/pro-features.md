@@ -27,6 +27,15 @@ wshm review --pr 42 --apply
 
 ---
 
+## Hosted PR Diagrams
+
+With `[pr.review_diagrams.publish] target = "wshm"` (license feature
+`diagram_hosting`), the daemon stores the interactive architecture page of
+each PR in its database and serves it at
+`<public_url>/diagrams/<owner>/<repo>/<pr>?k=<token>`. The token is random
+per PR; pages of private repos also require a dashboard session. Pages are
+deleted when the PR is closed or merged. See `docs/configuration.md`.
+
 ## Auto-Fix
 
 Automatically generate fix PRs from issue descriptions.

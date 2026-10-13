@@ -675,6 +675,69 @@ export async function updateRepoSkills(slug: string, skills: Skill[]): Promise<{
 	return res.json();
 }
 
+/** `[pr.review_diagrams.publish]` — where the interactive page goes. */
+export interface DiagramPublishSettings {
+	target: 'off' | 'local' | 'github-pages' | 'wshm' | 's3' | 'gcs' | 'azure';
+	prefix: string;
+	public_url: string | null;
+	dir: string | null;
+	pages_repo: string | null;
+	bucket: string | null;
+	region: string | null;
+	endpoint: string | null;
+	container: string | null;
+	account: string | null;
+	retention_days: number;
+	allow_private: boolean;
+}
+
+/** `[pr.review_diagrams]` — architecture diagram of the PR analysis comment. */
+export interface DiagramSettings {
+	enabled: boolean;
+	kinds: string[];
+	text: 'short' | 'normal' | 'full';
+	language: string;
+	comment: 'mermaid' | 'none';
+	diff_viewer: boolean;
+	publish: DiagramPublishSettings;
+}
+
+export interface RepoDiagramsResponse {
+	/** What the next PR pass uses: DB override merged over the TOML. */
+	effective: DiagramSettings;
+	/** The per-repo DB override, null when the TOML applies as is. */
+	override: Partial<DiagramSettings> | null;
+	toml: DiagramSettings;
+	/** Pro feature `diagram_hosting` (publish target "wshm"). */
+	hosting_available: boolean;
+}
+
+export async function fetchRepoDiagrams(slug: string): Promise<RepoDiagramsResponse> {
+	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/diagrams`);
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.error ?? `HTTP ${res.status}`);
+	}
+	return res.json();
+}
+
+/** Save the per-repo override (`null` drops it and falls back to the TOML). */
+export async function updateRepoDiagrams(
+	slug: string,
+	settings: DiagramSettings | null
+): Promise<RepoDiagramsResponse> {
+	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/diagrams`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json', ...CSRF_HEADERS },
+		body: JSON.stringify(settings)
+	});
+	if (!res.ok) {
+		const body = await res.json().catch(() => ({}));
+		throw new Error(body.error ?? `HTTP ${res.status}`);
+	}
+	return res.json();
+}
+
 /** A pull request referenced by a subgroup in the PR network graph. */
 export interface PrGroupPr {
 	number: number;

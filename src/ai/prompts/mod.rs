@@ -4,7 +4,7 @@ pub mod inline_review;
 pub mod issue_classify;
 pub mod issue_fix;
 pub mod pr_analyze;
-pub mod review_walkthrough;
+pub mod pr_diagram;
 
 /// Find the largest byte offset <= `max_bytes` that falls on a UTF-8 char boundary.
 pub fn truncate_utf8(s: &str, max_bytes: usize) -> usize {
