@@ -227,7 +227,7 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
         return Ok(());
     }
     // Force sync issues (bypass throttle — we know there's a new event)
-    gh_sync::sync_issues_now(&state.gh(), state.db.as_ref()).await?;
+    gh_sync::sync_issues_now(&*state.gh(), state.db.as_ref()).await?;
 
     // The list endpoint lags issue creation by a few seconds (replicated
     // index), so a sync right after `issues.opened` can miss the brand-new
@@ -303,7 +303,7 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
     pipelines::triage::run(
         &state.config,
         state.db.as_ref(),
-        &state.gh(),
+        &*state.gh(),
         &args,
         pipelines::triage::OutputFormat::Text,
         None,
@@ -370,7 +370,7 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
         return Ok(());
     }
     // Force sync pulls (bypass throttle — we know there's a new event)
-    gh_sync::sync_pulls_now(&state.gh(), state.db.as_ref()).await?;
+    gh_sync::sync_pulls_now(&*state.gh(), state.db.as_ref()).await?;
 
     // The list endpoint lags PR creation by a few seconds (replicated index),
     // so a sync right after `pull_request.opened` can miss the brand-new PR,
@@ -408,7 +408,7 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
             if let Err(e) = pro_hooks::run_review(
                 &state.config,
                 state.db.as_ref(),
-                &state.gh(),
+                &*state.gh(),
                 n,
                 should_post,
             )
@@ -461,7 +461,7 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
     pipelines::pr_analysis::run(
         &state.config,
         state.db.as_ref(),
-        &state.gh(),
+        &*state.gh(),
         &args,
         false,
         None,
@@ -542,7 +542,7 @@ async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Re
         is_pr,
         &state.config,
         state.db.as_ref(),
-        &state.gh(),
+        &*state.gh(),
         state.apply(),
         Some(triggered_by),
     )
@@ -550,7 +550,11 @@ async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Re
 
     // Post response as a comment
     if state.apply() {
-        state.gh().comment_issue(number, &response).await?;
+        if is_pr {
+            state.gh().comment_pr(number, &response).await?;
+        } else {
+            state.gh().comment_issue(number, &response).await?;
+        }
         info!("Posted slash command response on #{number}");
     } else {
         info!("Dry-run slash command response for #{number}: {response}");

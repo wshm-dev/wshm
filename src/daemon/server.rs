@@ -139,6 +139,7 @@ async fn handle_webhook(
         .get("x-github-delivery")
         .or_else(|| headers.get("x-gitea-delivery"))
         .or_else(|| headers.get("x-forgejo-delivery"))
+        .or_else(|| headers.get("x-gitlab-event-uuid"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     // When a webhook secret is configured the HMAC already proved authenticity,
@@ -403,6 +404,7 @@ async fn handle_webhook_multi(
         .get("x-github-delivery")
         .or_else(|| headers.get("x-gitea-delivery"))
         .or_else(|| headers.get("x-forgejo-delivery"))
+        .or_else(|| headers.get("x-gitlab-event-uuid"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     // When a webhook secret is configured the HMAC already proved authenticity,
@@ -540,6 +542,13 @@ fn validate_webhook(
             .into_response());
     }
 
+    // GitLab authenticates with a shared token header instead of an HMAC
+    // and has its own event names/payloads: translated to the GitHub shapes
+    // the rest of the pipeline expects.
+    if let Some(gl_event) = headers.get("x-gitlab-event").and_then(|v| v.to_str().ok()) {
+        return validate_gitlab_webhook(secret, gl_event, headers, body);
+    }
+
     // Validate HMAC signature. Without a configured secret the endpoint
     // cannot authenticate the sender, so we refuse to process the delivery
     // rather than silently accepting forged issues/PRs/comments into the
@@ -611,8 +620,137 @@ fn validate_webhook(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // Gitea/Forgejo send GitHub-compatible headers and payloads, but name a
+    // PR push `synchronized`.
+    let action = if action == "synchronized" {
+        "synchronize".to_string()
+    } else {
+        action
+    };
 
     Ok((event_type, action, payload))
+}
+
+/// Validate and translate a GitLab webhook (`X-Gitlab-Event`,
+/// `X-Gitlab-Token`): https://docs.gitlab.com/user/project/integrations/webhooks/
+#[allow(clippy::result_large_err)]
+fn validate_gitlab_webhook(
+    secret: Option<&str>,
+    gl_event: &str,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<(String, String, Value), axum::response::Response> {
+    match secret {
+        Some(secret) => {
+            let token = headers
+                .get("x-gitlab-token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if !constant_time_eq(secret, token) {
+                warn!("Invalid GitLab webhook token");
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "invalid token"})),
+                )
+                    .into_response());
+            }
+        }
+        None => {
+            let allow_unsigned = std::env::var("WSHM_ALLOW_UNSIGNED_WEBHOOKS")
+                .ok()
+                .filter(|v| v == "1" || v == "true")
+                .is_some();
+            if !allow_unsigned {
+                warn!("Rejecting GitLab webhook: no secret configured (set WSHM_WEBHOOK_SECRET)");
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error": "webhook secret not configured"})),
+                )
+                    .into_response());
+            }
+        }
+    }
+    let payload: Value = serde_json::from_slice(body).map_err(|e| {
+        warn!("Failed to parse GitLab webhook payload: {e}");
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid JSON"})),
+        )
+            .into_response()
+    })?;
+    Ok(translate_gitlab(gl_event, &payload)
+        .unwrap_or_else(|| (format!("gitlab:{gl_event}"), String::new(), payload)))
+}
+
+/// Constant-time string comparison (via HMAC verification).
+fn constant_time_eq(expected: &str, given: &str) -> bool {
+    let Ok(mut a) = Hmac::<Sha256>::new_from_slice(b"wshm-token-compare") else {
+        return false;
+    };
+    a.update(expected.as_bytes());
+    let tag = a.finalize().into_bytes();
+    let Ok(mut b) = Hmac::<Sha256>::new_from_slice(b"wshm-token-compare") else {
+        return false;
+    };
+    b.update(given.as_bytes());
+    b.verify_slice(&tag).is_ok()
+}
+
+/// Map a GitLab Issue / Merge Request / Note hook to the GitHub event the
+/// processor handles (`issues.opened`, `pull_request.opened|synchronize`,
+/// `issue_comment.created`). `None` for everything else.
+fn translate_gitlab(gl_event: &str, p: &Value) -> Option<(String, String, Value)> {
+    let full_name = p["project"]["path_with_namespace"].as_str()?.to_string();
+    let attrs = &p["object_attributes"];
+    let repo = json!({ "full_name": full_name });
+    match gl_event {
+        "Issue Hook" if attrs["action"] == "open" => {
+            let iid = attrs["iid"].as_u64()?;
+            Some((
+                "issues".into(),
+                "opened".into(),
+                json!({"action": "opened", "issue": {"number": iid}, "repository": repo}),
+            ))
+        }
+        "Merge Request Hook" => {
+            let iid = attrs["iid"].as_u64()?;
+            let action = match attrs["action"].as_str()? {
+                "open" | "reopen" => "opened",
+                // `oldrev` is only present when the update pushed commits.
+                "update" if attrs.get("oldrev").is_some_and(|v| !v.is_null()) => "synchronize",
+                _ => return None,
+            };
+            Some((
+                "pull_request".into(),
+                action.into(),
+                json!({"action": action, "pull_request": {"number": iid}, "repository": repo}),
+            ))
+        }
+        "Note Hook" => {
+            let (number, is_pr) = match attrs["noteable_type"].as_str()? {
+                "Issue" => (p["issue"]["iid"].as_u64()?, false),
+                "MergeRequest" => (p["merge_request"]["iid"].as_u64()?, true),
+                _ => return None,
+            };
+            let user = p["user"]["username"].as_str().unwrap_or("").to_string();
+            let mut issue = json!({ "number": number });
+            if is_pr {
+                issue["pull_request"] = json!({});
+            }
+            Some((
+                "issue_comment".into(),
+                "created".into(),
+                json!({
+                    "action": "created",
+                    "issue": issue,
+                    "comment": {"id": attrs["id"], "body": attrs["note"], "user": {"login": user}},
+                    "sender": {"login": user},
+                    "repository": repo,
+                }),
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn should_process_event(event_type: &str, action: &str) -> bool {
@@ -658,4 +796,93 @@ fn verify_signature(secret: &str, body: &[u8], sig_header: &str) -> bool {
     mac.update(body);
     // Constant-time comparison via hmac::Mac::verify_slice
     mac.verify_slice(&expected_bytes).is_ok()
+}
+
+#[cfg(test)]
+mod forge_webhook_tests {
+    use super::*;
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn gitlab_token_is_checked() {
+        let body = Bytes::from(
+            json!({"project": {"path_with_namespace": "g/p"},
+                   "object_attributes": {"action": "open", "iid": 3}})
+            .to_string(),
+        );
+        let ok = headers(&[
+            ("x-gitlab-event", "Issue Hook"),
+            ("x-gitlab-token", "s3cret"),
+        ]);
+        let (ev, action, payload) = validate_webhook(Some("s3cret"), &ok, &body).unwrap();
+        assert_eq!((ev.as_str(), action.as_str()), ("issues", "opened"));
+        assert_eq!(extract_number(&ev, &payload), Some(3));
+        assert_eq!(payload["repository"]["full_name"], "g/p");
+
+        let bad = headers(&[("x-gitlab-event", "Issue Hook"), ("x-gitlab-token", "nope")]);
+        assert!(validate_webhook(Some("s3cret"), &bad, &body).is_err());
+        let missing = headers(&[("x-gitlab-event", "Issue Hook")]);
+        assert!(validate_webhook(Some("s3cret"), &missing, &body).is_err());
+    }
+
+    #[test]
+    fn gitlab_mr_and_note_translation() {
+        let project = json!({"path_with_namespace": "g/p"});
+        let (ev, action, _) = translate_gitlab(
+            "Merge Request Hook",
+            &json!({"project": project, "object_attributes": {"action": "update", "iid": 5, "oldrev": "abc"}}),
+        )
+        .unwrap();
+        assert_eq!(
+            (ev.as_str(), action.as_str()),
+            ("pull_request", "synchronize")
+        );
+        // A title edit (no oldrev) is not a push.
+        assert!(translate_gitlab(
+            "Merge Request Hook",
+            &json!({"project": project, "object_attributes": {"action": "update", "iid": 5}}),
+        )
+        .is_none());
+
+        let (ev, action, payload) = translate_gitlab(
+            "Note Hook",
+            &json!({"project": project, "user": {"username": "bob"},
+                    "object_attributes": {"id": 9, "note": "/wshm analyze", "noteable_type": "MergeRequest"},
+                    "merge_request": {"iid": 5}}),
+        )
+        .unwrap();
+        assert_eq!((ev.as_str(), action.as_str()), ("issue_comment", "created"));
+        assert_eq!(payload["issue"]["number"], 5);
+        assert!(payload["issue"].get("pull_request").is_some());
+        assert_eq!(payload["comment"]["user"]["login"], "bob");
+        assert_eq!(payload["comment"]["body"], "/wshm analyze");
+    }
+
+    #[test]
+    fn gitea_synchronized_is_normalized() {
+        let secret = "k";
+        let body = Bytes::from(
+            json!({"action": "synchronized", "pull_request": {"number": 2}}).to_string(),
+        );
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(&body);
+        let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        let h = headers(&[
+            ("x-github-event", "pull_request"),
+            ("x-hub-signature-256", &sig),
+        ]);
+        let (ev, action, _) = validate_webhook(Some(secret), &h, &body).unwrap();
+        assert_eq!(
+            (ev.as_str(), action.as_str()),
+            ("pull_request", "synchronize")
+        );
+        assert!(should_process_event(&ev, &action));
+    }
 }

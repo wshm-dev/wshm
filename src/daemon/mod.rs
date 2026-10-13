@@ -22,7 +22,7 @@ use crate::cli::DaemonArgs;
 use crate::config::{Config, GlobalConfig};
 use crate::db::backend::DatabaseBackend;
 use crate::db::Database;
-use crate::github::Client as GhClient;
+use crate::git_provider::Forge as GhClient;
 
 use self::processor::WebhookEvent;
 
@@ -136,10 +136,10 @@ impl DaemonState {
     /// secret store) and atomically swap the inner Arc. Called after a
     /// `github_token` secret is added or removed via the web UI.
     pub fn reload_github_client(&self) -> anyhow::Result<()> {
-        let new_client = GhClient::new(&self.config)?;
-        let was_authenticated = self.gh().authenticated;
-        let now_authenticated = new_client.authenticated;
-        *self.gh.write().expect("gh RwLock poisoned") = Arc::new(new_client);
+        let new_client = crate::git_provider::build_provider(&self.config)?;
+        let was_authenticated = self.gh().is_authenticated();
+        let now_authenticated = new_client.is_authenticated();
+        *self.gh.write().expect("gh RwLock poisoned") = new_client;
         info!(
             "[{}] GitHub client reloaded ({} → {})",
             self.config.repo_slug(),
@@ -295,7 +295,7 @@ impl MultiDaemonState {
             Some(factory) => factory(&config)?,
             None => Arc::new(Database::open(&config)?) as Arc<dyn DatabaseBackend>,
         };
-        let gh = Arc::new(GhClient::new(&config)?);
+        let gh = crate::git_provider::build_provider(&config)?;
         let state = Arc::new(DaemonState::new(
             db,
             gh,
@@ -413,7 +413,7 @@ pub async fn run(mut config: Config, args: DaemonArgs) -> Result<()> {
         });
 
     let db = Arc::new(Database::open(&config)?) as Arc<dyn DatabaseBackend>;
-    let gh = Arc::new(GhClient::new(&config)?);
+    let gh = crate::git_provider::build_provider(&config)?;
     let config = Arc::new(config);
 
     let (tx, rx) = mpsc::channel::<WebhookEvent>(WEBHOOK_CHANNEL_CAPACITY);
@@ -725,7 +725,7 @@ pub async fn run_multi_with_extensions(
             Some(factory) => factory(&config)?,
             None => Arc::new(Database::open(&config)?) as Arc<dyn DatabaseBackend>,
         };
-        let gh = Arc::new(GhClient::new(&config)?);
+        let gh = crate::git_provider::build_provider(&config)?;
         let apply = entry.apply.unwrap_or(global_apply);
 
         // If features section was present in global.toml, use it; else

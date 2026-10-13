@@ -19,7 +19,12 @@ pub struct Config {
     #[serde(default)]
     pub github: GitHubConfig,
 
-    /// Git provider: "github" (default), "gitlab", "gitea", "azure-devops"
+    /// Git provider: "github" (default), "gitlab", "gitea", "forgejo",
+    /// "azure-devops". Non-GitHub tokens come from the secret store
+    /// (`gitlab_token`, `gitea_token`, `forgejo_token`, `azure_devops_token`)
+    /// or env (`GITLAB_TOKEN`, `GITEA_TOKEN`, `FORGEJO_TOKEN`,
+    /// `AZURE_DEVOPS_TOKEN`), never from this file. Azure DevOps repo slug:
+    /// `org/project/repo`.
     #[serde(default)]
     pub git_provider: Option<String>,
 
