@@ -128,6 +128,38 @@ pub fn mermaid(g: &Graph) -> String {
     out
 }
 
+/// [`mermaid`] within `max_chars` (0 = no limit), degrading step by step:
+/// edge labels dropped (step numbers kept), then unchanged nodes and their
+/// edges, then both. `None` when even that is too long: the caller shows a
+/// link instead.
+pub fn mermaid_capped(g: &Graph, max_chars: usize) -> Option<String> {
+    let fits = |m: &String| max_chars == 0 || m.chars().count() <= max_chars;
+    let full = mermaid(g);
+    if fits(&full) {
+        return Some(full);
+    }
+    let mut no_labels = g.clone();
+    for e in no_labels.edges.iter_mut() {
+        e.label.clear();
+    }
+    let mut changed_only = g.clone();
+    changed_only.nodes.retain(|n| n.is_changed());
+    let kept: Vec<String> = changed_only.nodes.iter().map(|n| n.id.clone()).collect();
+    changed_only
+        .edges
+        .retain(|e| kept.contains(&e.source) && kept.contains(&e.target));
+    let mut both = changed_only.clone();
+    for e in both.edges.iter_mut() {
+        e.label.clear();
+    }
+    let mut candidates = vec![no_labels];
+    if !changed_only.edges.is_empty() {
+        candidates.push(changed_only);
+        candidates.push(both);
+    }
+    candidates.iter().map(mermaid).find(fits)
+}
+
 fn status_class(s: &str) -> &'static str {
     match s {
         "new" => "new",
@@ -199,6 +231,11 @@ pub struct SectionOptions<'a> {
     pub page_url: Option<&'a str>,
     /// The page embeds the diff.
     pub page_has_diff: bool,
+    /// Size cap of the Mermaid block (chars, 0 = none), see [`mermaid_capped`].
+    pub max_mermaid_chars: usize,
+    /// The forge renders Mermaid in comments. When false the diagram is
+    /// replaced by the page link (see `diagrams::forge_supports_mermaid`).
+    pub supports_mermaid: bool,
 }
 
 /// The "Architecture" section inserted in the PR analysis comment (before
@@ -216,9 +253,17 @@ pub fn comment_section(g: &Graph, o: &SectionOptions) -> Option<String> {
         out.push_str(&clean_text(&g.story, 1000));
         out.push_str("\n\n");
     }
-    out.push_str("```mermaid\n");
-    out.push_str(&mermaid(g));
-    out.push_str("```\n\n");
+    // Link-only fallback: forge without Mermaid, or a graph too big for the cap.
+    let diagram = if o.supports_mermaid {
+        mermaid_capped(g, o.max_mermaid_chars)
+    } else {
+        None
+    };
+    if let Some(m) = diagram {
+        out.push_str("```mermaid\n");
+        out.push_str(&m);
+        out.push_str("```\n\n");
+    }
     if let Some(b) = badge {
         out.push_str(&b);
         out.push_str("\n\n");
@@ -405,6 +450,8 @@ mod tests {
                 comment: DiagramComment::Mermaid,
                 page_url: Some("https://x.example/p/a b?k=1"),
                 page_has_diff: true,
+                max_mermaid_chars: 5000,
+                supports_mermaid: true,
             },
         )
         .unwrap();
@@ -431,6 +478,8 @@ mod tests {
                 comment: DiagramComment::Mermaid,
                 page_url: None,
                 page_has_diff: false,
+                max_mermaid_chars: 5000,
+                supports_mermaid: true,
             },
         )
         .unwrap();
@@ -451,6 +500,8 @@ mod tests {
             comment: DiagramComment::None,
             page_url: url,
             page_has_diff: false,
+            max_mermaid_chars: 5000,
+            supports_mermaid: true,
         };
         assert!(comment_section(&graph(), &opts(None)).is_none());
         let s = comment_section(&graph(), &opts(Some("https://e.x/p"))).unwrap();
@@ -469,10 +520,54 @@ mod tests {
                 comment: DiagramComment::Mermaid,
                 page_url: Some("javascript:alert(1)"),
                 page_has_diff: false,
+                max_mermaid_chars: 5000,
+                supports_mermaid: true,
             },
         )
         .unwrap();
         assert!(!s.contains("javascript"));
         assert!(!s.contains("shields.io"));
+    }
+
+    #[test]
+    fn mermaid_cap_degrades_then_gives_up() {
+        let g = graph();
+        let full = mermaid(&g);
+        let n = full.chars().count();
+        assert_eq!(mermaid_capped(&g, 0).unwrap(), full);
+        assert_eq!(mermaid_capped(&g, n).unwrap(), full);
+        // One char short: edge labels go first, step numbers stay.
+        let m = mermaid_capped(&g, n - 1).unwrap();
+        assert!(!m.contains("free args") && m.contains("|\"1\"|"));
+        assert!(m.contains("n_end"), "unchanged node still there");
+        // Smaller: unchanged node and its edge dropped as well.
+        let no_labels = m.chars().count();
+        let m = mermaid_capped(&g, no_labels - 1).unwrap();
+        assert!(!m.contains("n_end"));
+        assert!(m.chars().count() < no_labels);
+        assert!(mermaid_capped(&g, 50).is_none());
+    }
+
+    #[test]
+    fn link_replaces_mermaid_when_unsupported_or_too_big() {
+        for (supports, cap) in [(false, 5000), (true, 50)] {
+            let s = comment_section(
+                &graph(),
+                &SectionOptions {
+                    language: "en",
+                    text: DiagramText::Short,
+                    comment: DiagramComment::Mermaid,
+                    page_url: Some("https://e.x/p"),
+                    page_has_diff: false,
+                    max_mermaid_chars: cap,
+                    supports_mermaid: supports,
+                },
+            )
+            .unwrap();
+            assert!(!s.contains("```mermaid"));
+            assert!(s.contains("](https://e.x/p)"));
+            assert!(s.contains("The story."));
+            assert!(s.contains("<b>Walkthrough</b>"));
+        }
     }
 }

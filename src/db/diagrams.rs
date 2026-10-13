@@ -24,8 +24,12 @@ pub struct PrDiagramRow {
     pub page_url: Option<String>,
     /// Unguessable token of the `wshm` hosted page.
     pub page_token: Option<String>,
-    /// Page HTML, stored only for the `wshm` target (served by the daemon).
-    pub page_html: Option<String>,
+    /// Size of the last rendered page (bytes), for the dashboard. The page
+    /// itself is never stored: `wshm` renders it on request from the graph.
+    pub page_bytes: u64,
+    /// Fingerprint of the page-rendering settings of a static page (viewer
+    /// version, language, diff cap): a change republishes the file.
+    pub page_hash: Option<String>,
     /// The repo was private when the page was published.
     pub is_private: bool,
     pub created_at: String,
@@ -33,10 +37,7 @@ pub struct PrDiagramRow {
 }
 
 const COLUMNS: &str = "pr_number, diff_hash, head_sha, gen_hash, graph_json, page_target, \
-     page_key, page_url, page_token, page_html, is_private, created_at, updated_at";
-/// Same as `COLUMNS` without the (large) page HTML.
-const LIGHT_COLUMNS: &str = "pr_number, diff_hash, head_sha, gen_hash, graph_json, page_target, \
-     page_key, page_url, page_token, NULL, is_private, created_at, updated_at";
+     page_key, page_url, page_token, page_bytes, is_private, created_at, updated_at, page_hash";
 
 fn row_to_diagram(row: &rusqlite::Row) -> rusqlite::Result<PrDiagramRow> {
     Ok(PrDiagramRow {
@@ -49,10 +50,11 @@ fn row_to_diagram(row: &rusqlite::Row) -> rusqlite::Result<PrDiagramRow> {
         page_key: row.get(6)?,
         page_url: row.get(7)?,
         page_token: row.get(8)?,
-        page_html: row.get(9)?,
+        page_bytes: row.get::<_, i64>(9)?.max(0) as u64,
         is_private: row.get::<_, i64>(10)? != 0,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
+        page_hash: row.get(13)?,
     })
 }
 
@@ -71,7 +73,7 @@ impl Database {
 
     pub fn list_pr_diagrams(&self) -> Result<Vec<PrDiagramRow>> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(&format!("SELECT {LIGHT_COLUMNS} FROM pr_diagrams"))?;
+            let mut stmt = conn.prepare(&format!("SELECT {COLUMNS} FROM pr_diagrams"))?;
             let rows = stmt
                 .query_map([], row_to_diagram)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -83,9 +85,9 @@ impl Database {
         self.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO pr_diagrams (pr_number, diff_hash, head_sha, gen_hash, graph_json,
-                    page_target, page_key, page_url, page_token, page_html, is_private,
-                    created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                    page_target, page_key, page_url, page_token, page_bytes, is_private,
+                    created_at, updated_at, page_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(pr_number) DO UPDATE SET
                     diff_hash = excluded.diff_hash,
                     head_sha = excluded.head_sha,
@@ -95,9 +97,10 @@ impl Database {
                     page_key = excluded.page_key,
                     page_url = excluded.page_url,
                     page_token = excluded.page_token,
-                    page_html = excluded.page_html,
+                    page_bytes = excluded.page_bytes,
                     is_private = excluded.is_private,
-                    updated_at = excluded.updated_at",
+                    updated_at = excluded.updated_at,
+                    page_hash = excluded.page_hash",
                 params![
                     row.pr_number,
                     row.diff_hash,
@@ -108,10 +111,11 @@ impl Database {
                     row.page_key,
                     row.page_url,
                     row.page_token,
-                    row.page_html,
+                    row.page_bytes as i64,
                     row.is_private as i64,
                     row.created_at,
                     row.updated_at,
+                    row.page_hash,
                 ],
             )?;
             Ok(())
@@ -143,7 +147,7 @@ mod tests {
             gen_hash: "g1".into(),
             graph_json: "{}".into(),
             page_target: Some("wshm".into()),
-            page_html: Some("<html></html>".into()),
+            page_bytes: 1234,
             is_private: true,
             created_at: "t0".into(),
             updated_at: "t0".into(),
@@ -159,7 +163,7 @@ mod tests {
         assert_eq!(got.created_at, "t0");
         let listed = db.list_pr_diagrams().unwrap();
         assert_eq!(listed.len(), 1);
-        assert!(listed[0].page_html.is_none(), "list skips the page HTML");
+        assert_eq!(listed[0].page_bytes, 1234);
         db.delete_pr_diagram(7).unwrap();
         assert!(db.get_pr_diagram(7).unwrap().is_none());
     }

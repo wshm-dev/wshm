@@ -485,11 +485,10 @@ async fn auth_middleware(
     if is_public_path(&path) {
         return next.run(req).await;
     }
-    // Hosted PR diagram pages: reachable with their unguessable token alone
-    // for public repos; the handler demands a session for private ones.
+    // Hosted PR diagram pages: the token is the credential (see
+    // `diagram_page`, which checks a session itself for private repos).
+    // Read-only GET, so no CSRF check either.
     if path.starts_with("/diagrams/") {
-        let authenticated = request_is_authenticated(&state, req.headers()).await;
-        req.extensions_mut().insert(DiagramViewer { authenticated });
         return next.run(req).await;
     }
     if let Err(e) = csrf_check(&req) {
@@ -591,36 +590,22 @@ async fn auth_middleware(
     unauthorized_response(&path, req.headers())
 }
 
-/// Whether a hosted diagram page was requested by an authenticated caller.
-#[derive(Clone, Copy)]
-struct DiagramViewer {
-    authenticated: bool,
-}
-
-/// The identity checks of [`auth_middleware`], without rejecting: true when
-/// the request carries a valid session, Basic Auth pair or trusted proxy
-/// identity (or auth is explicitly disabled).
-async fn request_is_authenticated(state: &Arc<WebState>, headers: &HeaderMap) -> bool {
+/// Does the request carry a dashboard session (session cookie or Basic
+/// Auth)? Deliberately ignores the oauth2-proxy identity headers: this is
+/// used on `/diagrams/`, a path exposed without the proxy, where those
+/// headers come straight from the client.
+async fn request_has_session(state: &Arc<WebState>, headers: &HeaderMap) -> bool {
     let web_cfgs = gather_web_cfgs(state).await;
-    if state.users.is_some() {
-        return current_user(state, headers).await.is_some()
-            || (!web_cfgs.is_empty() && basic_auth_matches(headers, &web_cfgs));
+    if let Some(store) = state.users.as_ref() {
+        if let Some(uid) = read_cookie(headers, "wshm_session").and_then(verify_user_cookie) {
+            if let Ok(Some(_)) = store.find_by_id(uid).await {
+                return true;
+            }
+        }
+        return !web_cfgs.is_empty() && basic_auth_matches(headers, &web_cfgs);
     }
     if web_cfgs.is_empty() {
         return auth_explicitly_disabled();
-    }
-    let trusts_proxy = std::env::var("WSHM_TRUST_PROXY_AUTH")
-        .ok()
-        .filter(|v| v == "1" || v == "true")
-        .is_some();
-    if trusts_proxy && proxy_shared_secret_ok(headers) {
-        let has_proxy_header = headers.keys().any(|k| {
-            let n = k.as_str().to_ascii_lowercase();
-            n == "x-forwarded-user" || n == "x-forwarded-email" || n == "x-auth-request-email"
-        });
-        if has_proxy_header {
-            return true;
-        }
     }
     if let Some(cookie_val) = read_cookie(headers, "wshm_session") {
         if web_cfgs
@@ -633,16 +618,43 @@ async fn request_is_authenticated(state: &Arc<WebState>, headers: &HeaderMap) ->
     basic_auth_matches(headers, &web_cfgs)
 }
 
-/// GET /diagrams/{owner}/{repo}/{pr}?k=TOKEN -- a PR architecture page hosted
-/// by the daemon (`[pr.review_diagrams.publish] target = "wshm"`, Pro feature
-/// `diagram_hosting`). Read-only; 404 for any mismatch so tokens and PR
-/// numbers cannot be probed.
+type DiagramPath = axum::extract::Path<(String, String, u64)>;
+type DiagramQuery = Query<std::collections::HashMap<String, String>>;
+
+/// GET /diagrams/{owner}/{repo}/{pr}?k=TOKEN -- PR architecture page hosted
+/// by the daemon (`[pr.review_diagrams.publish] target = "wshm"`, Pro
+/// feature `diagram_hosting`). Exposed without the SSO proxy: the token is
+/// the only credential, proxy identity headers are never honored here, and
+/// private repos additionally need a dashboard session (their links point
+/// to `/api/v1/diagrams/...` instead). 404 on any mismatch.
 async fn diagram_page(
     State(state): State<Arc<WebState>>,
-    viewer: Option<axum::Extension<DiagramViewer>>,
     headers: HeaderMap,
-    axum::extract::Path((owner, repo, pr)): axum::extract::Path<(String, String, u64)>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    axum::extract::Path((owner, repo, pr)): DiagramPath,
+    Query(params): DiagramQuery,
+) -> Response {
+    serve_diagram(&state, &headers, &owner, &repo, pr, &params, false).await
+}
+
+/// GET /api/v1/diagrams/{owner}/{repo}/{pr}?k=TOKEN -- same page behind the
+/// normal dashboard authentication (link used for private repos).
+async fn diagram_page_authed(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    axum::extract::Path((owner, repo, pr)): DiagramPath,
+    Query(params): DiagramQuery,
+) -> Response {
+    serve_diagram(&state, &headers, &owner, &repo, pr, &params, true).await
+}
+
+async fn serve_diagram(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    owner: &str,
+    repo: &str,
+    pr: u64,
+    params: &std::collections::HashMap<String, String>,
+    authenticated: bool,
 ) -> Response {
     let not_found = || (StatusCode::NOT_FOUND, "not found").into_response();
     if !crate::pro_hooks::has_feature(crate::diagrams::publish::HOSTING_FEATURE) {
@@ -659,31 +671,72 @@ async fn diagram_page(
     let Ok(Some(row)) = ds.db.get_pr_diagram(pr) else {
         return not_found();
     };
-    let (Some("wshm"), Some(token), Some(html)) = (
-        row.page_target.as_deref(),
-        row.page_token.as_deref(),
-        row.page_html,
-    ) else {
+    let (Some("wshm"), Some(token)) = (row.page_target.as_deref(), row.page_token.as_deref())
+    else {
         return not_found();
     };
     if !ct_eq(token.as_bytes(), key.as_bytes()) {
         return not_found();
     }
-    if row.is_private && !viewer.is_some_and(|v| v.authenticated) {
-        return unauthorized_response(&format!("/diagrams/{slug}/{pr}"), &headers);
+    if row.is_private && !authenticated && !request_has_session(state, headers).await {
+        return unauthorized_response(&format!("/diagrams/{slug}/{pr}"), headers);
     }
+    let Ok(graph) = serde_json::from_str::<crate::diagrams::graph::Graph>(&row.graph_json) else {
+        return not_found();
+    };
+    let dc = crate::config::load_review_diagrams(&ds.config, ds.db.as_ref());
+
+    // The page is a pure function of these: no need to fetch the diff to
+    // answer a revalidation.
+    let etag = crate::diagrams::hosted_etag(&row, &dc);
+    let page_headers = |h: &mut HeaderMap| {
+        for (k, v) in [
+            ("cache-control", "private, max-age=60, must-revalidate"),
+            // The token is in the URL: never leak it to the CDNs the page loads.
+            ("referrer-policy", "no-referrer"),
+            ("x-robots-tag", "noindex, nofollow"),
+            ("x-content-type-options", "nosniff"),
+            ("content-security-policy", "frame-ancestors 'none'"),
+        ] {
+            h.insert(k, HeaderValue::from_static(v));
+        }
+        if let Ok(v) = HeaderValue::from_str(&etag) {
+            h.insert(header::ETAG, v);
+        }
+    };
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
+    if crate::diagrams::etag_matches(if_none_match, &etag) {
+        let mut resp = StatusCode::NOT_MODIFIED.into_response();
+        page_headers(resp.headers_mut());
+        return resp;
+    }
+
+    // Diff for the viewer: fetched from the forge, kept in a bounded LRU.
+    let diff = if dc.diff_viewer {
+        let cache_key = format!("{slug}#{pr}@{}", row.diff_hash);
+        match crate::diagrams::diff_cache::global().get(&cache_key) {
+            Some(d) => d,
+            None => match ds.gh().fetch_pr_diff(pr).await {
+                Ok(d) => {
+                    let v: crate::diagrams::diff_cache::CachedDiff =
+                        (d.len() <= dc.publish.max_diff_kb as usize * 1024).then(|| d.into());
+                    crate::diagrams::diff_cache::global().put(cache_key, v.clone());
+                    v
+                }
+                Err(e) => {
+                    tracing::warn!("diagram page {slug}#{pr}: diff fetch failed: {e:#}");
+                    None
+                }
+            },
+        }
+    } else {
+        None
+    };
+    let html = crate::diagrams::render_page(&dc, &slug, pr, &graph, diff.as_deref());
     let mut resp = Html(html).into_response();
-    let h = resp.headers_mut();
-    for (k, v) in [
-        ("cache-control", "private, no-store"),
-        // The token is in the URL: never leak it to the CDNs the page loads.
-        ("referrer-policy", "no-referrer"),
-        ("x-robots-tag", "noindex, nofollow"),
-        ("x-content-type-options", "nosniff"),
-        ("content-security-policy", "frame-ancestors 'none'"),
-    ] {
-        h.insert(k, HeaderValue::from_static(v));
-    }
+    page_headers(resp.headers_mut());
     resp
 }
 
@@ -2829,7 +2882,9 @@ fn diagrams_settings_json(ds: &crate::daemon::DaemonState) -> serde_json::Value 
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok())
         .filter(|v: &serde_json::Value| v.is_object());
+    let rows = ds.db.list_pr_diagrams().unwrap_or_default();
     json!({
+        "stats": crate::diagrams::stats(&rows),
         "effective": crate::config::load_review_diagrams(&ds.config, ds.db.as_ref()),
         "override": over,
         "toml": ds.config.pr.review_diagrams,
@@ -4210,6 +4265,10 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
             get(api_repo_diagrams_get).put(api_repo_diagrams_put),
         )
         .route("/diagrams/{owner}/{repo}/{pr}", get(diagram_page))
+        .route(
+            "/api/v1/diagrams/{owner}/{repo}/{pr}",
+            get(diagram_page_authed),
+        )
         .route("/api/v1/pr-groups", get(api_pr_groups_get))
         .route("/api/v1/issue-groups", get(api_issue_groups_get))
         .route("/api/v1/auth/status", get(api_auth_status))

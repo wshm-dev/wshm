@@ -12,7 +12,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             labels      TEXT NOT NULL DEFAULT '[]',
             author      TEXT,
             created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL
+            updated_at  TEXT NOT NULL,
+            page_hash   TEXT
         );
 
         CREATE TABLE IF NOT EXISTS pull_requests (
@@ -29,7 +30,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             mergeable   INTEGER,
             ci_status   TEXT,
             created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL
+            updated_at  TEXT NOT NULL,
+            page_hash   TEXT
         );
 
         CREATE TABLE IF NOT EXISTS comments (
@@ -109,10 +111,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             page_key    TEXT,
             page_url    TEXT,
             page_token  TEXT,
-            page_html   TEXT,
+            page_bytes  INTEGER NOT NULL DEFAULT 0,
             is_private  INTEGER NOT NULL DEFAULT 0,
             created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL
+            updated_at  TEXT NOT NULL,
+            page_hash   TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(state);
@@ -141,6 +144,23 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_change_events_time ON change_events(observed_at DESC);
         ",
     )?;
+
+    // Migration: pr_diagrams from early builds stored the page HTML; the
+    // page is now rendered on request and only its size is kept.
+    if conn
+        .prepare("SELECT page_bytes FROM pr_diagrams LIMIT 0")
+        .is_err()
+    {
+        conn.execute_batch(
+            "ALTER TABLE pr_diagrams ADD COLUMN page_bytes INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    if conn
+        .prepare("SELECT page_hash FROM pr_diagrams LIMIT 0")
+        .is_err()
+    {
+        conn.execute_batch("ALTER TABLE pr_diagrams ADD COLUMN page_hash TEXT;")?;
+    }
 
     // Migration: add reactions columns to issues
     let has_reactions: bool = conn

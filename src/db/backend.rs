@@ -178,7 +178,7 @@ pub trait DatabaseBackend: Send + Sync {
         Ok(None)
     }
 
-    /// Every cached diagram, without the page HTML (cleanup sweeps).
+    /// Every cached diagram of the repo (cleanup sweeps, dashboard stats).
     fn list_pr_diagrams(&self) -> Result<Vec<PrDiagramRow>> {
         Ok(Vec::new())
     }

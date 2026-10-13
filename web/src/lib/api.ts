@@ -688,6 +688,8 @@ export interface DiagramPublishSettings {
 	container: string | null;
 	account: string | null;
 	retention_days: number;
+	max_pages: number;
+	max_diff_kb: number;
 	allow_private: boolean;
 }
 
@@ -699,10 +701,21 @@ export interface DiagramSettings {
 	language: string;
 	comment: 'mermaid' | 'none';
 	diff_viewer: boolean;
+	active_days: number;
+	max_mermaid_chars: number;
 	publish: DiagramPublishSettings;
 }
 
+/** Per-repo storage of the diagrams (graphs in the DB, published pages). */
+export interface DiagramStats {
+	graphs: number;
+	pages: number;
+	db_bytes: number;
+	page_bytes: number;
+}
+
 export interface RepoDiagramsResponse {
+	stats: DiagramStats;
 	/** What the next PR pass uses: DB override merged over the TOML. */
 	effective: DiagramSettings;
 	/** The per-repo DB override, null when the TOML applies as is. */

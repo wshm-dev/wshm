@@ -31,8 +31,21 @@ pub struct Published {
     pub key: String,
     pub url: Option<String>,
     pub token: Option<String>,
-    /// HTML to keep in the DB (only for the `wshm` target).
-    pub html: Option<String>,
+    /// Size of the rendered page (bytes).
+    pub bytes: u64,
+}
+
+/// Path of a daemon-hosted page. Public repos: `/diagrams/...`, reachable
+/// with the token alone (exposed without the SSO proxy). Private repos:
+/// `/api/v1/diagrams/...`, behind the normal dashboard authentication.
+pub fn hosted_path(repo_slug: &str, pr: u64, token: &str, is_private: bool) -> String {
+    let (owner, name) = repo_slug.split_once('/').unwrap_or((repo_slug, ""));
+    let prefix = if is_private {
+        "/api/v1/diagrams"
+    } else {
+        "/diagrams"
+    };
+    format!("{prefix}/{owner}/{name}/{pr}?k={token}")
 }
 
 /// Does this target make the page reachable by anyone with the link?
@@ -182,7 +195,7 @@ pub async fn publish(
                 url: cfg.public_url.as_deref().map(|u| join_url(u, &key)),
                 key,
                 token: Some(token),
-                html: None,
+                bytes: html.len() as u64,
             }))
         }
         DiagramPublishTarget::GithubPages => {
@@ -208,7 +221,7 @@ pub async fn publish(
                 url: base.map(|b| join_url(&b, &key)),
                 key,
                 token: Some(token),
-                html: None,
+                bytes: html.len() as u64,
             }))
         }
         DiagramPublishTarget::Wshm => {
@@ -225,16 +238,18 @@ pub async fn publish(
                 .context(
                 "publish.public_url (the daemon's external URL) is required for target = \"wshm\"",
             )?;
-            let (owner, name_) = repo_slug.split_once('/').unwrap_or((repo_slug, ""));
+            // Nothing stored: the daemon renders the page on request from the
+            // cached graph (and a fresh diff), so the DB stays small.
             Ok(Some(Published {
                 target: name,
                 url: Some(format!(
-                    "{}/diagrams/{owner}/{name_}/{pr}?k={token}",
-                    base.trim_end_matches('/')
+                    "{}{}",
+                    base.trim_end_matches('/'),
+                    hosted_path(repo_slug, pr, &token, is_private)
                 )),
                 key: format!("db:{repo_slug}#{pr}"),
                 token: Some(token),
-                html: Some(html.to_string()),
+                bytes: html.len() as u64,
             }))
         }
         _ => bail!("unreachable publish target {name}"),
@@ -329,6 +344,15 @@ mod tests {
         assert!(
             !is_public_target(&c),
             "wshm guards private repos with a session"
+        );
+    }
+
+    #[test]
+    fn hosted_paths_split_public_and_private() {
+        assert_eq!(hosted_path("o/r", 3, "t", false), "/diagrams/o/r/3?k=t");
+        assert_eq!(
+            hosted_path("o/r", 3, "t", true),
+            "/api/v1/diagrams/o/r/3?k=t"
         );
     }
 

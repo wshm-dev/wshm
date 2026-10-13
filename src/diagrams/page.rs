@@ -35,12 +35,33 @@ fn lang_attr(lang: &str) -> String {
     }
 }
 
+/// Fingerprint of the compiled-in viewer (part of the hosted page ETag).
+pub fn template_hash() -> &'static str {
+    use sha2::{Digest, Sha256};
+    static H: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    H.get_or_init(|| hex::encode(&Sha256::digest(TEMPLATE.as_bytes())[..8]))
+}
+
+/// The diff to embed: only with `diff_viewer` on and within `max_diff_kb`.
+/// Bigger diffs are left out and the viewer links to "Files changed".
+pub fn embeddable_diff(diff: &str, diff_viewer: bool, max_diff_kb: u32) -> Option<&str> {
+    (diff_viewer && !diff.is_empty() && diff.len() <= max_diff_kb as usize * 1024).then_some(diff)
+}
+
+/// "Files changed" page of a PR. Single forge-specific spot of the page.
+pub fn files_url(repo: &str, pr: u64) -> String {
+    format!("https://github.com/{repo}/pull/{pr}/files")
+}
+
 pub struct PageOptions<'a> {
     pub language: &'a str,
     pub repo: &'a str,
     pub pr: u64,
-    /// Raw PR diff, embedded only when `diff_viewer` is on.
+    /// Raw PR diff (see [`embeddable_diff`]); `None` = not embedded.
     pub diff: Option<&'a str>,
+    /// Link shown instead of the diff drawer when the diff is not embedded
+    /// (too large, or `diff_viewer` off).
+    pub files_url: Option<&'a str>,
 }
 
 /// Render the standalone HTML page.
@@ -61,6 +82,7 @@ pub fn render(g: &Graph, o: &PageOptions) -> String {
         "repo": o.repo,
         "pr": o.pr,
         "diff": o.diff.is_some(),
+        "files_url": o.files_url,
         "eyebrow": eyebrow,
     });
     let title = if g.title.is_empty() {
@@ -112,6 +134,7 @@ mod tests {
                 repo: "o/r",
                 pr: 3,
                 diff: Some(diff),
+                files_url: None,
             },
         );
         assert_eq!(
@@ -139,9 +162,20 @@ mod tests {
                 repo: "o/r",
                 pr: 1,
                 diff: None,
+                files_url: Some("https://github.com/o/r/pull/1/files"),
             },
         );
         assert!(html.contains("window.DIFF = \"\";"));
         assert!(html.contains("\"diff\":false"));
+        assert!(html.contains("\"files_url\":\"https://github.com/o/r/pull/1/files\""));
+    }
+
+    #[test]
+    fn diff_cap() {
+        let d = "x".repeat(2048);
+        assert_eq!(embeddable_diff(&d, true, 2), Some(d.as_str()));
+        assert_eq!(embeddable_diff(&d, true, 1), None, "over max_diff_kb");
+        assert_eq!(embeddable_diff(&d, false, 10), None, "diff_viewer off");
+        assert_eq!(embeddable_diff("", true, 10), None);
     }
 }

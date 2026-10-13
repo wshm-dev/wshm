@@ -59,6 +59,8 @@ text = "short"                    # short | normal | full
 language = "en"                   # language of the diagram texts
 comment = "mermaid"               # mermaid | none (link to the page only)
 diff_viewer = true                # embed the diff in the interactive page
+active_days = 14                  # skip PRs idle for longer (0 = no limit); a push re-enables
+max_mermaid_chars = 5000          # Mermaid size cap (Forgejo/Gitea default limit)
 
 # Interactive page (React Flow viewer), deleted when the PR is closed.
 [pr.review_diagrams.publish]
@@ -67,7 +69,9 @@ target = "off"                    # off | local | github-pages | wshm (Pro) | s3
 # public_url = "https://diagrams.example.com"  # link = public_url/<key>; for wshm: the daemon URL
 # dir = "/var/www/diagrams"       # local
 # pages_repo = "owner/diagrams"   # github-pages: commits to its gh-pages branch
-# retention_days = 0              # 0 = keep until the PR is closed
+# retention_days = 30             # delete pages idle for longer (0 = until the PR closes)
+# max_pages = 200                 # per repo, least recently updated pages evicted first
+# max_diff_kb = 1024              # bigger diffs: the viewer links to "Files changed"
 # allow_private = false           # public targets are refused for private repos
 
 [queue]

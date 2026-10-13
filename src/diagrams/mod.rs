@@ -8,6 +8,7 @@
 //! settings change. Everything is fail-soft: an error means no diagram, the
 //! rest of the comment is unchanged.
 
+pub mod diff_cache;
 pub mod graph;
 pub mod page;
 pub mod publish;
@@ -230,6 +231,190 @@ pub async fn comment_section(
     }
 }
 
+/// Single hook point for the forge capability: whether PR comments render
+/// Mermaid. GitHub, GitLab, Gitea/Forgejo do; Azure DevOps does not. Until
+/// the multi-forge work (wshm#227) exposes `supports_mermaid()` on the
+/// provider, every repo here is a GitHub repo, hence `true`. When it is
+/// false, the comment shows the page link instead of the diagram.
+pub fn forge_supports_mermaid(_config: &Config) -> bool {
+    true
+}
+
+/// Is the PR recent enough to (re)generate its diagram? `updated_at` moves
+/// on every push, so a new push re-enables an idle PR. 0 = no limit; an
+/// unparseable date counts as active.
+pub fn is_active(updated_at: &str, now: chrono::DateTime<chrono::Utc>, active_days: u32) -> bool {
+    if active_days == 0 {
+        return true;
+    }
+    match chrono::DateTime::parse_from_rfc3339(updated_at) {
+        Ok(t) => now.signed_duration_since(t) <= chrono::Duration::days(active_days as i64),
+        Err(_) => true,
+    }
+}
+
+/// PRs whose page must go so that at most `max_pages` remain: the least
+/// recently updated ones first (ties: lowest PR number first).
+pub fn pages_to_evict(rows: &[PrDiagramRow], max_pages: usize) -> Vec<u64> {
+    let mut with_page: Vec<&PrDiagramRow> =
+        rows.iter().filter(|r| r.page_target.is_some()).collect();
+    if with_page.len() <= max_pages {
+        return Vec::new();
+    }
+    with_page.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then(b.pr_number.cmp(&a.pr_number))
+    });
+    let mut out: Vec<u64> = with_page[max_pages..].iter().map(|r| r.pr_number).collect();
+    out.sort_unstable();
+    out
+}
+
+/// Has the page not been updated for `retention_days`? (0 = never expires)
+pub fn page_expired(
+    row: &PrDiagramRow,
+    now: chrono::DateTime<chrono::Utc>,
+    retention_days: u32,
+) -> bool {
+    retention_days > 0
+        && row.page_target.is_some()
+        && chrono::DateTime::parse_from_rfc3339(&row.updated_at)
+            .map(|t| now.signed_duration_since(t) > chrono::Duration::days(retention_days as i64))
+            .unwrap_or(false)
+}
+
+/// Dashboard numbers of one repo.
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
+pub struct DiagramStats {
+    /// Cached graphs (rows).
+    pub graphs: u64,
+    /// Published pages.
+    pub pages: u64,
+    /// Bytes kept in the DB (graph JSON).
+    pub db_bytes: u64,
+    /// Total size of the published pages (last render of each).
+    pub page_bytes: u64,
+}
+
+pub fn stats(rows: &[PrDiagramRow]) -> DiagramStats {
+    let mut s = DiagramStats::default();
+    for r in rows {
+        s.graphs += 1;
+        s.db_bytes += r.graph_json.len() as u64;
+        if r.page_target.is_some() {
+            s.pages += 1;
+            s.page_bytes += r.page_bytes;
+        }
+    }
+    s
+}
+
+/// Fingerprint of what a static page depends on besides the graph and diff.
+pub fn page_fingerprint(dc: &ReviewDiagramsConfig) -> String {
+    sha256_hex(&format!(
+        "{}|{}|{}|{}",
+        page::template_hash(),
+        dc.language,
+        dc.diff_viewer,
+        dc.publish.max_diff_kb
+    ))[..16]
+        .to_string()
+}
+
+fn clear_page(row: &mut PrDiagramRow) {
+    row.page_target = None;
+    row.page_key = None;
+    row.page_url = None;
+    row.page_token = None;
+    row.page_bytes = 0;
+    row.page_hash = None;
+}
+
+/// Delete the published page of `row` and forget it (the graph stays cached).
+async fn evict_page(
+    dc: &ReviewDiagramsConfig,
+    db: &dyn DatabaseBackend,
+    gh: &GhClient,
+    row: &PrDiagramRow,
+    why: &str,
+) {
+    if let Err(e) = publish::delete_page(&dc.publish, gh, row).await {
+        warn!(
+            "PR #{}: {why} diagram page cleanup failed: {e:#}",
+            row.pr_number
+        );
+        return;
+    }
+    if let Ok(Some(mut full)) = db.get_pr_diagram(row.pr_number) {
+        clear_page(&mut full);
+        let _ = db.upsert_pr_diagram(&full);
+    }
+    info!("PR #{}: {why} diagram page removed", row.pr_number);
+}
+
+/// Enforce `publish.max_pages` for the repo.
+async fn enforce_max_pages(dc: &ReviewDiagramsConfig, db: &dyn DatabaseBackend, gh: &GhClient) {
+    let Ok(rows) = db.list_pr_diagrams() else {
+        return;
+    };
+    for n in pages_to_evict(&rows, dc.publish.max_pages as usize) {
+        if let Some(row) = rows.iter().find(|r| r.pr_number == n) {
+            evict_page(dc, db, gh, row, "evicted (max_pages)").await;
+        }
+    }
+}
+
+/// ETag of a hosted page. The page is a pure function of these inputs, so a
+/// revalidation is answered without fetching the diff.
+pub fn hosted_etag(row: &PrDiagramRow, dc: &ReviewDiagramsConfig) -> String {
+    let h = sha256_hex(&format!(
+        "{}|{}|{}|{:?}|{}|{}|{}",
+        page::template_hash(),
+        row.graph_json,
+        row.diff_hash,
+        row.head_sha,
+        dc.language,
+        dc.diff_viewer,
+        dc.publish.max_diff_kb
+    ));
+    format!("\"{}\"", &h[..32])
+}
+
+/// Does an `If-None-Match` header match `etag`? (list, weak tags and `*`)
+pub fn etag_matches(if_none_match: Option<&str>, etag: &str) -> bool {
+    if_none_match.is_some_and(|v| {
+        v.split(',').any(|t| {
+            let t = t.trim();
+            t == "*" || t == etag || t.strip_prefix("W/") == Some(etag)
+        })
+    })
+}
+
+/// Render the interactive page of `graph`. The diff is embedded only when
+/// allowed and small enough, otherwise the viewer links to "Files changed".
+pub fn render_page(
+    dc: &ReviewDiagramsConfig,
+    repo_slug: &str,
+    pr: u64,
+    graph: &Graph,
+    diff: Option<&str>,
+) -> String {
+    let embedded =
+        diff.and_then(|d| page::embeddable_diff(d, dc.diff_viewer, dc.publish.max_diff_kb));
+    let files = page::files_url(repo_slug, pr);
+    page::render(
+        graph,
+        &page::PageOptions {
+            language: &dc.language,
+            repo: repo_slug,
+            pr,
+            diff: embedded,
+            files_url: embedded.is_none().then_some(files.as_str()),
+        },
+    )
+}
+
 async fn build_section(
     config: &Config,
     ai: &AiBackend,
@@ -253,6 +438,7 @@ async fn build_section(
     let gen = gen_hash(&dc);
     let previous = db.get_pr_diagram(pr.number).ok().flatten();
     let target = publish::target_name(dc.publish.target);
+    let repo_slug = config.repo_slug();
 
     let cached = previous
         .as_ref()
@@ -266,6 +452,13 @@ async fn build_section(
                 pr.number
             );
             g
+        }
+        None if !is_active(&pr.updated_at, chrono::Utc::now(), dc.active_days) => {
+            info!(
+                "PR #{}: no activity for more than {} days, no diagram generated",
+                pr.number, dc.active_days
+            );
+            return Ok(None);
         }
         None => match generate(ai, db, pr, diff, &dc).await? {
             Some(g) => g,
@@ -300,9 +493,15 @@ async fn build_section(
         }
     }
 
-    let page_ok = previous
-        .as_ref()
-        .filter(|p| !fresh && p.page_target.as_deref() == Some(target) && p.page_key.is_some());
+    // Hosted pages are rendered on request; static files must match the
+    // current rendering settings too.
+    let page_fp = page_fingerprint(&dc);
+    let page_ok = previous.as_ref().filter(|p| {
+        !fresh
+            && p.page_target.as_deref() == Some(target)
+            && p.page_key.is_some()
+            && (target == "wshm" || p.page_hash.as_deref() == Some(page_fp.as_str()))
+    });
     // Dry-run never deletes: keep tracking a page published elsewhere so a
     // later real run (or the close cleanup) can still remove it.
     let keep_foreign = previous
@@ -314,32 +513,22 @@ async fn build_section(
         row.page_key = p.page_key.clone();
         row.page_url = p.page_url.clone();
         row.page_token = p.page_token.clone();
-        row.page_html = p.page_html.clone();
+        row.page_bytes = p.page_bytes;
+        row.page_hash = p.page_hash.clone();
         row.is_private = p.is_private;
     } else if dc.publish.target != DiagramPublishTarget::Off {
         let is_private = match gh.fetch_repo_private().await {
             Ok(p) => p,
             Err(e) => {
-                warn!(
-                    "Could not read the visibility of {}, assuming private: {e:#}",
-                    config.repo_slug()
-                );
+                warn!("Could not read the visibility of {repo_slug}, assuming private: {e:#}");
                 true
             }
         };
-        let html = page::render(
-            &graph,
-            &page::PageOptions {
-                language: &dc.language,
-                repo: &config.repo_slug(),
-                pr: pr.number,
-                diff: dc.diff_viewer.then_some(diff),
-            },
-        );
+        let html = render_page(&dc, &repo_slug, pr.number, &graph, Some(diff));
         match publish::publish(
             &dc.publish,
             gh,
-            &config.repo_slug(),
+            &repo_slug,
             pr.number,
             &html,
             is_private,
@@ -353,7 +542,8 @@ async fn build_section(
                 row.page_key = Some(p.key);
                 row.page_url = p.url;
                 row.page_token = p.token;
-                row.page_html = p.html;
+                row.page_bytes = p.bytes;
+                row.page_hash = Some(page_fp.clone());
                 row.is_private = is_private;
             }
             Ok(None) => {}
@@ -361,6 +551,16 @@ async fn build_section(
         }
     }
     db.upsert_pr_diagram(&row)?;
+    if apply && row.page_target.is_some() {
+        enforce_max_pages(&dc, db, gh).await;
+    }
+    // Eviction may have removed this very page.
+    let page_url = db
+        .get_pr_diagram(pr.number)
+        .ok()
+        .flatten()
+        .and_then(|r| r.page_url)
+        .or(if apply { None } else { row.page_url.clone() });
 
     Ok(render::comment_section(
         &graph,
@@ -368,8 +568,10 @@ async fn build_section(
             language: &dc.language,
             text: dc.text,
             comment: dc.comment,
-            page_url: row.page_url.as_deref(),
-            page_has_diff: dc.diff_viewer,
+            page_url: page_url.as_deref(),
+            page_has_diff: dc.diff_viewer && diff.len() <= dc.publish.max_diff_kb as usize * 1024,
+            max_mermaid_chars: dc.max_mermaid_chars as usize,
+            supports_mermaid: forge_supports_mermaid(config),
         },
     ))
 }
@@ -391,7 +593,8 @@ pub async fn cleanup_pr(config: &Config, db: &dyn DatabaseBackend, gh: &GhClient
 }
 
 /// Cleanup sweep for the polling mode (no `closed` webhook): drop diagrams
-/// of PRs no longer open, and pages older than `retention_days`.
+/// of PRs no longer open, pages idle for `retention_days`, and pages beyond
+/// `max_pages`.
 pub async fn sweep(config: &Config, db: &dyn DatabaseBackend, gh: &GhClient) {
     let Ok(rows) = db.list_pr_diagrams() else {
         return;
@@ -400,38 +603,16 @@ pub async fn sweep(config: &Config, db: &dyn DatabaseBackend, gh: &GhClient) {
         return;
     }
     let dc = crate::config::load_review_diagrams(config, db);
-    let cutoff = (dc.publish.retention_days > 0)
-        .then(|| chrono::Utc::now() - chrono::Duration::days(dc.publish.retention_days as i64));
-    for row in rows {
+    let now = chrono::Utc::now();
+    for row in &rows {
         let open = matches!(db.get_pull(row.pr_number), Ok(Some(p)) if p.state == "open");
         if !open {
             cleanup_pr(config, db, gh, row.pr_number).await;
-            continue;
-        }
-        let expired = cutoff.is_some_and(|c| {
-            chrono::DateTime::parse_from_rfc3339(&row.updated_at)
-                .map(|t| t < c)
-                .unwrap_or(false)
-        });
-        if expired && row.page_target.is_some() {
-            if let Err(e) = publish::delete_page(&dc.publish, gh, &row).await {
-                warn!(
-                    "PR #{}: expired diagram page cleanup failed: {e:#}",
-                    row.pr_number
-                );
-                continue;
-            }
-            // Keep the graph cache, forget the page (re-published on next push).
-            if let Ok(Some(mut full)) = db.get_pr_diagram(row.pr_number) {
-                full.page_target = None;
-                full.page_key = None;
-                full.page_url = None;
-                full.page_token = None;
-                full.page_html = None;
-                let _ = db.upsert_pr_diagram(&full);
-            }
+        } else if page_expired(row, now, dc.publish.retention_days) {
+            evict_page(&dc, db, gh, row, "expired (retention_days)").await;
         }
     }
+    enforce_max_pages(&dc, db, gh).await;
 }
 
 #[cfg(test)]
@@ -469,5 +650,115 @@ mod tests {
         assert!(wants_architecture(&dc));
         dc.kinds = vec!["flow".into(), "bogus".into()];
         assert!(!wants_architecture(&dc));
+    }
+
+    fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap().into()
+    }
+
+    fn row(n: u64, updated: &str, page: bool) -> PrDiagramRow {
+        PrDiagramRow {
+            pr_number: n,
+            graph_json: "{}".into(),
+            page_target: page.then(|| "wshm".to_string()),
+            page_bytes: if page { 100 } else { 0 },
+            updated_at: updated.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn activity_filter() {
+        let now = at("2026-10-20T00:00:00Z");
+        assert!(is_active("2026-10-10T00:00:00Z", now, 14));
+        assert!(
+            !is_active("2026-10-05T23:59:59Z", now, 14),
+            "idle 14 days and more"
+        );
+        assert!(is_active("2020-01-01T00:00:00Z", now, 0), "0 = no limit");
+        assert!(is_active("garbage", now, 14));
+        // A push moves updated_at: the PR is active again.
+        assert!(is_active("2026-10-19T12:00:00Z", now, 14));
+    }
+
+    #[test]
+    fn eviction_keeps_the_most_recently_updated_pages() {
+        let rows = vec![
+            row(1, "2026-10-01T00:00:00Z", true),
+            row(2, "2026-10-03T00:00:00Z", true),
+            row(3, "2026-10-02T00:00:00Z", true),
+            row(4, "2026-09-01T00:00:00Z", false),
+            row(5, "2026-10-04T00:00:00Z", true),
+        ];
+        assert!(pages_to_evict(&rows, 4).is_empty());
+        assert_eq!(pages_to_evict(&rows, 2), vec![1, 3]);
+        assert_eq!(pages_to_evict(&rows, 0), vec![1, 2, 3, 5]);
+    }
+
+    #[test]
+    fn retention() {
+        let now = at("2026-10-31T00:00:00Z");
+        assert!(page_expired(&row(1, "2026-09-30T00:00:00Z", true), now, 30));
+        assert!(!page_expired(
+            &row(1, "2026-10-02T00:00:00Z", true),
+            now,
+            30
+        ));
+        assert!(
+            !page_expired(&row(1, "2026-01-01T00:00:00Z", false), now, 30),
+            "no page"
+        );
+        assert!(!page_expired(&row(1, "2026-01-01T00:00:00Z", true), now, 0));
+    }
+
+    #[test]
+    fn dashboard_stats() {
+        let rows = vec![row(1, "x", true), row(2, "x", false), row(3, "x", true)];
+        assert_eq!(
+            stats(&rows),
+            DiagramStats {
+                graphs: 3,
+                pages: 2,
+                db_bytes: 6,
+                page_bytes: 200
+            }
+        );
+    }
+
+    #[test]
+    fn etags() {
+        let dc = ReviewDiagramsConfig::default();
+        let r = row(1, "x", true);
+        let e = hosted_etag(&r, &dc);
+        assert!(e.starts_with('"') && e.ends_with('"') && e.len() == 34);
+        assert_eq!(e, hosted_etag(&r, &dc), "stable");
+        let mut r2 = r.clone();
+        r2.diff_hash = "other".into();
+        assert_ne!(e, hosted_etag(&r2, &dc), "new diff, new etag");
+        let mut dc2 = dc.clone();
+        dc2.language = "fr".into();
+        assert_ne!(e, hosted_etag(&r, &dc2));
+        assert!(etag_matches(Some(&e), &e));
+        assert!(etag_matches(Some(&format!("\"a\", W/{e}")), &e));
+        assert!(etag_matches(Some("*"), &e));
+        assert!(!etag_matches(Some("\"a\""), &e));
+        assert!(!etag_matches(None, &e));
+    }
+
+    #[test]
+    fn new_defaults() {
+        let dc = ReviewDiagramsConfig::default();
+        assert_eq!(dc.comment, crate::config::DiagramComment::Mermaid);
+        assert_eq!(dc.publish.target, DiagramPublishTarget::Off);
+        assert_eq!(
+            (
+                dc.active_days,
+                dc.max_mermaid_chars,
+                dc.publish.retention_days,
+                dc.publish.max_pages,
+                dc.publish.max_diff_kb
+            ),
+            (14, 5000, 30, 200, 1024)
+        );
     }
 }

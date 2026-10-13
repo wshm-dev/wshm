@@ -422,8 +422,15 @@ pub struct DiagramPublishConfig {
     pub endpoint: Option<String>,
     pub container: Option<String>,
     pub account: Option<String>,
-    /// Delete pages older than this many days (0 = keep until the PR closes).
+    /// Delete pages not updated for this many days (0 = keep until the PR
+    /// closes). Pages are always deleted when the PR is closed or merged.
     pub retention_days: u32,
+    /// Max published pages per repo; beyond it the least recently updated
+    /// pages are evicted first.
+    pub max_pages: u32,
+    /// Max diff size embedded in the page (KB). Above it the viewer links to
+    /// the PR's "Files changed" page instead.
+    pub max_diff_kb: u32,
     /// Allow a public target (github-pages, object stores, local with a
     /// public_url) for a private repo. Off by default: the page embeds the diff.
     pub allow_private: bool,
@@ -442,7 +449,9 @@ impl Default for DiagramPublishConfig {
             endpoint: None,
             container: None,
             account: None,
-            retention_days: 0,
+            retention_days: 30,
+            max_pages: 200,
+            max_diff_kb: 1024,
             allow_private: false,
         }
     }
@@ -462,6 +471,13 @@ pub struct ReviewDiagramsConfig {
     pub comment: DiagramComment,
     /// Embed the PR diff in the interactive page (per-component diff drawer).
     pub diff_viewer: bool,
+    /// Skip generation for PRs without activity for this many days (0 = no
+    /// limit). A new push re-enables them.
+    pub active_days: u32,
+    /// Max size of the Mermaid block in the comment (chars). Forgejo/Gitea
+    /// refuse to render more than 5000 by default; above it edge labels,
+    /// then unchanged nodes are dropped, then a link replaces the diagram.
+    pub max_mermaid_chars: u32,
     pub publish: DiagramPublishConfig,
 }
 
@@ -474,6 +490,8 @@ impl Default for ReviewDiagramsConfig {
             language: "en".to_string(),
             comment: DiagramComment::Mermaid,
             diff_viewer: true,
+            active_days: 14,
+            max_mermaid_chars: 5000,
             publish: DiagramPublishConfig::default(),
         }
     }
@@ -2351,6 +2369,8 @@ risk_labels = true
 # language = "en"                # language of the diagram texts
 # comment = "mermaid"            # "mermaid" (diagram in the comment) | "none" (link only)
 # diff_viewer = true             # embed the diff in the interactive page
+# active_days = 14               # skip PRs idle for longer (0 = no limit)
+# max_mermaid_chars = 5000       # Mermaid size cap (Forgejo/Gitea default limit)
 #
 # Interactive page (React Flow viewer). Off by default.
 # [pr.review_diagrams.publish]
@@ -2359,7 +2379,9 @@ risk_labels = true
 # public_url = "https://diagrams.example.com"   # link = public_url/prefix/...
 # dir = "/var/www/diagrams"      # local
 # pages_repo = "owner/diagrams"  # github-pages (gh-pages branch, repo token)
-# retention_days = 0             # 0 = delete when the PR is closed
+# retention_days = 30            # delete pages idle for longer (0 = until the PR closes)
+# max_pages = 200                # per repo, least recently updated evicted first
+# max_diff_kb = 1024             # bigger diffs: the viewer links to "Files changed"
 # allow_private = false          # allow public targets for a private repo
 
 [queue]

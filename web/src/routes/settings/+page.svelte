@@ -420,7 +420,12 @@
 				for (const k of ['public_url', 'dir', 'pages_repo', 'bucket', 'region', 'endpoint', 'container', 'account']) {
 					if (typeof p[k] === 'string' && (p[k] as string).trim() === '') p[k] = null;
 				}
-				body.publish.retention_days = Math.max(0, Math.floor(Number(body.publish.retention_days) || 0));
+				const int = (v: unknown) => Math.max(0, Math.floor(Number(v) || 0));
+				body.publish.retention_days = int(body.publish.retention_days);
+				body.publish.max_pages = int(body.publish.max_pages);
+				body.publish.max_diff_kb = int(body.publish.max_diff_kb);
+				body.active_days = int(body.active_days);
+				body.max_mermaid_chars = int(body.max_mermaid_chars);
 			}
 			setDiagramsInfo(await updateRepoDiagrams(diagramsRepo, body));
 			diagramsMessage = reset ? 'Override removed: the TOML settings apply.' : 'Saved.';
@@ -430,6 +435,11 @@
 			diagramsMessageErr = true;
 		}
 		diagramsSaving = false;
+	}
+	function fmtBytes(n: number): string {
+		if (n < 1024) return `${n} B`;
+		if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+		return `${(n / 1024 / 1024).toFixed(1)} MB`;
 	}
 	function toggleDiagramKind(kind: string) {
 		if (!diagramsDraft) return;
@@ -1697,6 +1707,13 @@
 									Using the TOML settings (no per-repo override).
 								{/if}
 							</p>
+							{#if diagramsInfo}
+								<p class="text-[0.7rem] text-muted-foreground">
+									Storage: {diagramsInfo.stats.pages} published page{diagramsInfo.stats.pages === 1 ? '' : 's'}
+									({fmtBytes(diagramsInfo.stats.page_bytes)}), {diagramsInfo.stats.graphs} cached
+									graph{diagramsInfo.stats.graphs === 1 ? '' : 's'} ({fmtBytes(diagramsInfo.stats.db_bytes)} in the database).
+								</p>
+							{/if}
 
 							<div class="grid gap-3 sm:grid-cols-2">
 								<label class="flex items-center gap-2 text-xs">
@@ -1725,6 +1742,14 @@
 										<option value="mermaid">mermaid — diagram, story and walkthrough</option>
 										<option value="none">none — link to the page only</option>
 									</select>
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Skip PRs idle for more than (days, 0 = never)</Label>
+									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.active_days} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Max Mermaid size (chars, 0 = no cap)</Label>
+									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.max_mermaid_chars} />
 								</div>
 								<div>
 									<Label class="text-xs mb-1">Kinds</Label>
@@ -1774,6 +1799,14 @@
 								<div>
 									<Label class="text-xs mb-1">Retention (days, 0 = until the PR closes)</Label>
 									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.publish.retention_days} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Max pages (oldest evicted first)</Label>
+									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.publish.max_pages} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Max embedded diff (KB, bigger = link to Files changed)</Label>
+									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.publish.max_diff_kb} />
 								</div>
 								{#if diagramsDraft.publish.target === 'local'}
 									<div>

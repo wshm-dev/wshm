@@ -486,6 +486,7 @@ function Graph() {
       </li>`)}</ol>
       <div className="detail">${n
         ? html`<p className="sec">${T.component} · ${STATUS[n.status]}</p><h2>${n.label}</h2><code>${n.file}</code><p className="body" dangerouslySetInnerHTML=${{ __html: md(n.detail) }}></p>
+            ${!M.diff && M.files_url && n.status !== "unchanged" && html`<div className="links"><a className="sm on" href=${M.files_url} target="_blank" rel="noopener">${T.onGh}</a></div>`}
             ${M.diff && html`<div className="links">${(DIFF_BY_NODE[n.id] || []).length ? html`<button className="sm on" onClick=${() => openDiff(n.id)}>${T.showDiff} · ${DIFF_BY_NODE[n.id].length} ${DIFF_BY_NODE[n.id].length > 1 ? T.files : T.file}</button>` : html`<span className="hint">${T.noDiff}</span>`}</div>`}
             <div className="links">${steps.filter(s => s.source === n.id || s.target === n.id).map(s => html`<button key=${s.id} className="sm" onClick=${() => pick(s.step)}>${T.step} ${s.step} · ${s.label}</button>`)}</div>`
         : html`<p className="hint">${T.hint}</p>`}
