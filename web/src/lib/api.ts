@@ -648,7 +648,7 @@ export interface Skill {
 	name: string;
 	description?: string | null;
 	content: string;
-	/** Which pipelines this applies to: "triage" and/or "pr_review". Empty = both. */
+	/** Which pipelines this applies to: any of "triage", "pr_review", "review", "diagrams". Empty = all. */
 	pipelines: string[];
 	enabled: boolean;
 }

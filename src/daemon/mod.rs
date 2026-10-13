@@ -76,6 +76,10 @@ impl DaemonState {
         features: crate::config::RepoFeatures,
     ) -> Self {
         crate::ai::related::set_repo_enabled(&config.repo_slug(), features.related_history);
+        // Every daemon path (single, multi-repo, runtime add_repo, Pro's
+        // Postgres factory) builds its per-repo state here, so this is the one
+        // place TOML `[[skills]]` get seeded into the shared DB list.
+        crate::config::seed_skills_logged(db.as_ref(), &config.skills);
         Self {
             db,
             gh: std::sync::RwLock::new(gh),

@@ -1555,6 +1555,15 @@
 											/>
 											Code review (Pro)
 										</label>
+										<label class="flex items-center gap-1">
+											<input
+												type="checkbox"
+												class="h-3.5 w-3.5"
+												checked={s.pipelines.includes('diagrams')}
+												onchange={() => togglePipeline(i, 'diagrams')}
+											/>
+											Diagrams
+										</label>
 										<span class="italic">(all, if none checked)</span>
 									</div>
 									<textarea

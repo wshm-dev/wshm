@@ -2696,6 +2696,22 @@ async fn api_repo_skills_patch(
         }
     };
 
+    if let Some((name, bad)) = skills.iter().find_map(|s| {
+        s.pipelines
+            .iter()
+            .find(|p| !crate::config::SKILL_PIPELINES.contains(&p.as_str()))
+            .map(|p| (s.name.clone(), p.clone()))
+    }) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!(
+                "skill '{name}': unknown pipeline '{bad}' (expected one of {:?})",
+                crate::config::SKILL_PIPELINES
+            )})),
+        )
+            .into_response();
+    }
+
     let json_str = serde_json::to_string(&skills).unwrap_or_else(|_| "[]".into());
     if let Err(e) = ds
         .db

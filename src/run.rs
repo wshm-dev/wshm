@@ -31,6 +31,7 @@ pub fn triage_format(cli: &Cli) -> OutputFormat {
 pub fn init_core(cli: &Cli) -> Result<(crate::Config, Arc<dyn DatabaseBackend>, crate::Client)> {
     let config = crate::Config::load(cli)?;
     let db: Arc<dyn DatabaseBackend> = Arc::new(crate::Database::open(&config)?);
+    crate::config::seed_skills_logged(db.as_ref(), &config.skills);
     let gh = crate::Client::new(&config)?;
     Ok((config, db, gh))
 }
