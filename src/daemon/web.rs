@@ -2386,6 +2386,12 @@ async fn api_repo_features_patch(
         }
     }
 
+    // Multi-pod: merge over the FRESH shared registry, not this pod's
+    // possibly stale copy, so persist() below can't revert another pod's edit.
+    if let Err(e) = state.multi.sync_registry().await {
+        tracing::warn!("registry sync before features PATCH failed: {e:#}");
+    }
+
     let repos = state.multi.repos.read().await;
     let ds = match repos.get(&slug) {
         Some(d) => d.clone(),

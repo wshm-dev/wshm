@@ -1769,6 +1769,13 @@ pub struct GlobalDaemonConfig {
 
     #[serde(default = "default_poll_interval")]
     pub poll_interval: u64,
+
+    /// Multi-pod: how often (seconds) each pod re-reads the persisted repo
+    /// registry (features, apply mode, added/removed repos) so a change made
+    /// through one pod reaches the others without a restart. Only active when
+    /// the persistence layer is shared (Pro on Postgres). `0` disables it.
+    #[serde(default = "default_registry_sync_secs")]
+    pub registry_sync_secs: u64,
 }
 
 impl Default for GlobalDaemonConfig {
@@ -1779,15 +1786,20 @@ impl Default for GlobalDaemonConfig {
             apply: false,
             poll: false,
             poll_interval: default_poll_interval(),
+            registry_sync_secs: default_registry_sync_secs(),
         }
     }
+}
+
+fn default_registry_sync_secs() -> u64 {
+    30
 }
 
 fn default_poll_interval() -> u64 {
     30
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct RepoEntry {
     /// Repository slug: "owner/repo"
     pub slug: String,
