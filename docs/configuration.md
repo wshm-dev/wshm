@@ -100,10 +100,17 @@ full_sync_interval_hours = 24
 # url = "https://outlook.office.com/webhook/YOUR/URL"
 
 [export]
-# [export.storage]
-# provider = "s3"                 # s3, azure, gcs (Pro)
-# bucket = "wshm-events"
-# region = "eu-west-1"
+# [export.storage]                # one JSON object per event: <prefix>/YYYY/MM/DD/<Kind>-<ms>.json
+# provider = "s3"                 # s3, gcs, azure, local (Pro)
+# bucket = "wshm-events"          # s3 / gcs
+# prefix = "wshm/events"
+# region = "eu-west-1"             # s3
+# endpoint = "https://s3.gra.io.cloud.ovh.net"  # S3-compatible (MinIO, OVH, Scaleway...)
+# account = "mystorageacct"        # azure (or AZURE_STORAGE_ACCOUNT_NAME)
+# container = "wshm-events"        # azure
+# dir = "/var/lib/wshm/events"     # local
+# Credentials are never set here: AWS_* / instance role, GOOGLE_APPLICATION_CREDENTIALS /
+# workload identity, AZURE_STORAGE_* / managed identity.
 #
 # [export.database]
 # provider = "elastic"            # elastic, opensearch, postgres, mongodb, mysql (Pro)

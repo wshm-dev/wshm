@@ -56,6 +56,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked -- -D warnings
 
+      # Optional export / storage / vault backends are behind cargo features
+      # and are not built by default: check them so they cannot silently rot.
+      - name: Check all features
+        if: runner.os == 'Linux'
+        run: cargo check --locked --all-features --all-targets
+
   security:
     name: Security
     runs-on: ubuntu-latest
