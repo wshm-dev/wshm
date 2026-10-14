@@ -3081,9 +3081,12 @@ enabled = false
     #[test]
     fn test_seed_concurrent_pods_converge() {
         let dir = std::env::temp_dir().join(format!(
-            "wshm-seed-race-{}-{:?}",
+            "wshm-seed-race-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let path = dir.join("state.db");
         crate::db::Database::open_path(&path).unwrap();

@@ -1148,9 +1148,12 @@ mod registry_sync_tests {
 
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
-            "wshm-regsync-{tag}-{}-{:?}",
+            "wshm-regsync-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(d.join(".wshm")).unwrap();
         d
