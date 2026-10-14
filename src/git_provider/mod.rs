@@ -127,6 +127,14 @@ pub trait GitProvider: Send + Sync {
         self.supports(Capability::Mermaid)
     }
 
+    /// Login of the account the token authenticates as, resolved once.
+    /// Comments by this account are never treated as commands (loop and
+    /// prompt-injection guard). `None` when unknown (GitHub relies on the
+    /// marker check, unchanged).
+    async fn self_username(&self) -> Option<String> {
+        None
+    }
+
     /// GitHub-only escape hatch (events API poller, GitHub App flows).
     fn as_github(&self) -> Option<&crate::github::Client> {
         None
@@ -287,6 +295,15 @@ pub fn provider_id(config: &crate::config::Config) -> &str {
 
 /// Build the git provider selected by `config.git_provider`.
 pub fn build_provider(config: &crate::config::Config) -> Result<SharedForge> {
+    build_provider_with_db(config, None)
+}
+
+/// Like [`build_provider`], with the repo DB for runtime (multi-pod)
+/// overrides of provider settings stored as app settings.
+pub fn build_provider_with_db(
+    config: &crate::config::Config,
+    db: Option<Arc<dyn crate::db::backend::DatabaseBackend>>,
+) -> Result<SharedForge> {
     let base_url = config
         .git_url
         .as_deref()
@@ -298,9 +315,9 @@ pub fn build_provider(config: &crate::config::Config) -> Result<SharedForge> {
         "gitlab" => Arc::new(gitlab::GitLabProvider::new(config, base_url)?),
         "gitea" => Arc::new(gitea::GiteaProvider::new(config, base_url, "gitea")?),
         "forgejo" => Arc::new(gitea::GiteaProvider::new(config, base_url, "forgejo")?),
-        "azure-devops" | "azure" => {
-            Arc::new(azure_devops::AzureDevOpsProvider::new(config, base_url)?)
-        }
+        "azure-devops" | "azure" => Arc::new(azure_devops::AzureDevOpsProvider::new(
+            config, base_url, db,
+        )?),
         other => anyhow::bail!(
             "Unknown git provider: {other}. Supported: github, gitlab, gitea, forgejo, azure-devops"
         ),
@@ -308,8 +325,10 @@ pub fn build_provider(config: &crate::config::Config) -> Result<SharedForge> {
 }
 
 /// Resolve the API token for a non-GitHub forge: encrypted secret store
-/// (per-repo → global) under `<provider>_token`, then the provider env var,
-/// then `WSHM_TOKEN`. Never read from config files.
+/// (per-repo → global) under `<provider>_token`, then the provider env
+/// vars. Never read from config files, and never `WSHM_TOKEN` /
+/// `GITHUB_TOKEN`: those are GitHub credentials and must not be sent to
+/// another host.
 pub fn forge_token(config: &crate::config::Config, provider: &str) -> Option<String> {
     let (key, env_names): (&str, &[&str]) = match provider {
         "gitlab" => ("gitlab_token", &["GITLAB_TOKEN"]),
@@ -330,7 +349,6 @@ pub fn forge_token(config: &crate::config::Config, provider: &str) -> Option<Str
     }
     found
         .or_else(|| env_names[1..].iter().find_map(|n| std::env::var(n).ok()))
-        .or_else(|| std::env::var("WSHM_TOKEN").ok())
         .filter(|t| !t.trim().is_empty())
 }
 

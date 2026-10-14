@@ -39,7 +39,7 @@ impl GitLabProvider {
     pub fn new(config: &Config, base_url: Option<&str>) -> Result<Self> {
         let base = base_url.unwrap_or("https://gitlab.com");
         let auth = match super::forge_token(config, "gitlab") {
-            Some(t) => Auth::Header("PRIVATE-TOKEN", t),
+            Some(t) => Auth::Header("Authorization", format!("Bearer {t}")),
             None => {
                 warn!(
                     "GitLab provider built without a token — anonymous, public projects \
@@ -313,6 +313,11 @@ impl GitProvider for GitLabProvider {
         &self.marker
     }
 
+    async fn self_username(&self) -> Option<String> {
+        self.rest
+            .self_login(&format!("{}/user", self.api), "username")
+            .await
+    }
     fn is_authenticated(&self) -> bool {
         self.rest.is_authenticated()
     }
@@ -625,7 +630,7 @@ impl GitProvider for GitLabProvider {
                     Method::POST,
                     &self.url(&format!("merge_requests/{pr_number}/discussions")),
                     &json!({
-                        "body": comment_body,
+                        "body": ensure_comment_marker(comment_body, &self.marker),
                         "position": {
                             "position_type": "text",
                             "base_sha": base,
@@ -652,7 +657,7 @@ impl GitProvider for GitLabProvider {
             .send_json(
                 Method::POST,
                 &self.url(&format!("merge_requests/{pr_number}/notes")),
-                &json!({ "body": summary }),
+                &json!({ "body": ensure_comment_marker(&summary, &self.marker) }),
             )
             .await?;
         Ok(())
@@ -811,7 +816,7 @@ mod tests {
 
     fn provider(server: &MockServer) -> GitLabProvider {
         GitLabProvider::with_rest(
-            Rest::new("GitLab", Auth::Header("PRIVATE-TOKEN", "tok".into())).unwrap(),
+            Rest::new("GitLab", Auth::Header("Authorization", "Bearer tok".into())).unwrap(),
             &server.url(),
             "group/sub/proj",
             "<!-- wshm -->".into(),
@@ -850,7 +855,10 @@ mod tests {
         assert_eq!(issues[0].reactions_total, 3);
         assert_eq!(issues[1].state, "closed");
         let reqs = server.requests();
-        assert_eq!(reqs[0].header("private-token").as_deref(), Some("tok"));
+        assert_eq!(
+            reqs[0].header("authorization").as_deref(),
+            Some("Bearer tok")
+        );
         assert!(reqs[0].query.contains("state=all"));
         assert!(reqs[0]
             .query
@@ -952,7 +960,8 @@ mod tests {
         assert_eq!(disc["position"]["start_sha"], "s");
         assert_eq!(disc["position"]["new_line"], 12);
         assert_eq!(disc["position"]["new_path"], "src/a.rs");
-        assert_eq!(reqs[2].json(), json!({"body": "summary"}));
+        assert_eq!(reqs[2].json(), json!({"body": "summary\n\n<!-- wshm -->"}));
+        assert!(disc["body"].as_str().unwrap().ends_with("<!-- wshm -->"));
     }
 
     #[tokio::test]

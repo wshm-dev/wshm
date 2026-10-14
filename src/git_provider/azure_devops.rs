@@ -6,6 +6,7 @@
 //! requests are Azure Repos PRs. Labels on work items are tags.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -15,6 +16,7 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use crate::config::Config;
+use crate::db::backend::DatabaseBackend;
 use crate::db::issues::Issue;
 use crate::db::pulls::PullRequest;
 use crate::github::issues::ensure_comment_marker;
@@ -47,10 +49,18 @@ pub struct AzureDevOpsProvider {
     repo: String,
     marker: String,
     slug: String,
+    /// `[azure_devops] work_item_types` (TOML default).
+    work_item_types: Vec<String>,
+    /// Repo DB for the runtime override of `work_item_types`.
+    db: Option<Arc<dyn DatabaseBackend>>,
 }
 
 impl AzureDevOpsProvider {
-    pub fn new(config: &Config, base_url: Option<&str>) -> Result<Self> {
+    pub fn new(
+        config: &Config,
+        base_url: Option<&str>,
+        db: Option<Arc<dyn DatabaseBackend>>,
+    ) -> Result<Self> {
         let base = base_url.unwrap_or("https://dev.azure.com");
         let auth = match super::forge_token(config, "azure-devops") {
             Some(t) => Auth::BasicPassword(t),
@@ -62,13 +72,15 @@ impl AzureDevOpsProvider {
                 Auth::None
             }
         };
-        let p = Self::with_rest(
+        let mut p = Self::with_rest(
             Rest::new("Azure DevOps", auth)?,
             base,
             &config.repo_owner,
             &config.repo_name,
             config.branding.comment_marker(),
         );
+        p.work_item_types = config.azure_devops.work_item_types.clone();
+        p.db = db;
         info!(
             "Azure DevOps provider initialized: {}/{}/{} repo {}",
             p.base, p.org, p.project, p.repo
@@ -95,7 +107,37 @@ impl AzureDevOpsProvider {
             repo,
             marker,
             slug: format!("{org}/{project_and_repo}"),
+            work_item_types: crate::config::AzureDevOpsConfig::default().work_item_types,
+            db: None,
         }
+    }
+
+    /// Work item types handled as issues: the DB app setting (shared by all
+    /// pods) wins over the TOML list; an empty or invalid value is ignored.
+    fn item_types(&self) -> Vec<String> {
+        let from_db = self.db.as_ref().and_then(|db| {
+            let raw = db
+                .get_app_setting(crate::db::settings::AZURE_WORK_ITEM_TYPES_KEY)
+                .ok()
+                .flatten()?;
+            serde_json::from_str::<Vec<String>>(&raw)
+                .ok()
+                .filter(|v| !v.is_empty())
+        });
+        from_db
+            .or_else(|| Some(self.work_item_types.clone()).filter(|v| !v.is_empty()))
+            .unwrap_or_else(|| crate::config::AzureDevOpsConfig::default().work_item_types)
+    }
+
+    /// WIQL clause restricting to [`Self::item_types`] (quotes escaped).
+    fn type_clause(&self) -> String {
+        let list = self
+            .item_types()
+            .iter()
+            .map(|t| format!("'{}'", t.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" AND [System.WorkItemType] IN ({list})")
     }
 
     fn with_version(url: String, version: &str) -> String {
@@ -155,8 +197,9 @@ impl AzureDevOpsProvider {
     // ── work items ──────────────────────────────────────────────────────
 
     async fn wiql_ids(&self, condition: &str) -> Result<Vec<u64>> {
+        let types = self.type_clause();
         let query = format!(
-            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project{condition} \
+            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project{types}{condition} \
              ORDER BY [System.ChangedDate] DESC"
         );
         let url = self.project_url("wit/wiql?timePrecision=true&$top=20000", API);
@@ -531,7 +574,17 @@ impl GitProvider for AzureDevOpsProvider {
     }
 
     async fn fetch_issue(&self, number: u64) -> Result<Option<Issue>> {
-        Ok(self.work_item(number).await?.map(|w| parse_work_item(&w)))
+        // Only configured types are issues (no Tasks, Epics, Test Cases...).
+        let types = self.item_types();
+        Ok(self
+            .work_item(number)
+            .await?
+            .filter(|w| {
+                w["fields"]["System.WorkItemType"]
+                    .as_str()
+                    .is_some_and(|t| types.iter().any(|k| k.eq_ignore_ascii_case(t)))
+            })
+            .map(|w| parse_work_item(&w)))
     }
 
     async fn create_issue(&self, title: &str, body: &str, labels: &[String]) -> Result<u64> {
@@ -546,10 +599,10 @@ impl GitProvider for AzureDevOpsProvider {
                 json!({"op": "add", "path": "/fields/System.Tags", "value": labels.join("; ")}),
             );
         }
-        // "Issue" exists in the Basic, Agile and CMMI processes; Scrum has
-        // "Bug" but no "Issue".
+        // First configured type the process has (default Issue, then Bug:
+        // Scrum has no "Issue").
         let mut last_err = None;
-        for kind in ["Issue", "Bug"] {
+        for kind in self.item_types() {
             let url = self.project_url(&format!("wit/workitems/${kind}"), API);
             match self
                 .rest
@@ -899,7 +952,7 @@ impl GitProvider for AzureDevOpsProvider {
             };
             self.post_thread(
                 pr_number,
-                comment,
+                &ensure_comment_marker(comment, &self.marker),
                 Some(json!({
                     "filePath": file,
                     "rightFileStart": {"line": line, "offset": 1},
@@ -908,7 +961,8 @@ impl GitProvider for AzureDevOpsProvider {
             )
             .await?;
         }
-        self.post_thread(pr_number, body, None).await
+        self.post_thread(pr_number, &ensure_comment_marker(body, &self.marker), None)
+            .await
     }
 
     async fn create_pr(
@@ -970,27 +1024,39 @@ impl GitProvider for AzureDevOpsProvider {
                 Ok(None)
             }
             Thread::Issue(n) => {
-                let resp = self
-                    .rest
-                    .get_json(&self.project_url(
-                        &format!("wit/workItems/{n}/comments?$top=200"),
-                        COMMENTS_API,
-                    ))
-                    .await?;
-                Ok(resp["comments"]
-                    .as_array()
-                    .and_then(|a| {
-                        a.iter().find(|c| {
-                            c["isDeleted"].as_bool() != Some(true)
-                                && http::has_marker(c["text"].as_str().unwrap_or(""), marker)
+                // Paginated with continuationToken (200 per page max).
+                let mut token: Option<String> = None;
+                for _ in 0..http::MAX_PAGES {
+                    let mut path = format!("wit/workItems/{n}/comments?$top=200&order=asc");
+                    if let Some(t) = &token {
+                        path.push_str(&format!("&continuationToken={}", enc(t)));
+                    }
+                    let resp = self
+                        .rest
+                        .get_json(&self.project_url(&path, COMMENTS_API))
+                        .await?;
+                    let found = resp["comments"]
+                        .as_array()
+                        .and_then(|a| {
+                            a.iter().find(|c| {
+                                c["isDeleted"].as_bool() != Some(true)
+                                    && http::has_marker(c["text"].as_str().unwrap_or(""), marker)
+                            })
                         })
-                    })
-                    .and_then(|c| c["id"].as_u64())
-                    .map(|id| CommentRef {
-                        thread,
-                        id,
-                        parent_id: None,
-                    }))
+                        .and_then(|c| c["id"].as_u64());
+                    if let Some(id) = found {
+                        return Ok(Some(CommentRef {
+                            thread,
+                            id,
+                            parent_id: None,
+                        }));
+                    }
+                    match resp["continuationToken"].as_str().filter(|t| !t.is_empty()) {
+                        Some(t) => token = Some(t.to_string()),
+                        None => break,
+                    }
+                }
+                Ok(None)
             }
         }
     }
@@ -1270,8 +1336,11 @@ mod tests {
         let inline = reqs[0].json();
         assert_eq!(inline["threadContext"]["filePath"], "/src/a.rs");
         assert_eq!(inline["threadContext"]["rightFileStart"]["line"], 8);
-        assert_eq!(inline["comments"][0]["content"], "nit");
-        assert_eq!(reqs[1].json()["comments"][0]["content"], "sum");
+        assert_eq!(inline["comments"][0]["content"], "nit\n\n<!-- wshm -->");
+        assert_eq!(
+            reqs[1].json()["comments"][0]["content"],
+            "sum\n\n<!-- wshm -->"
+        );
         assert!(reqs[1].json().get("threadContext").is_none());
     }
 
@@ -1407,6 +1476,73 @@ mod tests {
             Reply::json(json!({"value": []})),
         );
         assert!(!provider(&server).is_collaborator("ghost").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn work_item_types_filter_with_db_override() {
+        let server = MockServer::start().await;
+        server.on(
+            "POST",
+            "/acme/Proj/_apis/wit/wiql",
+            Reply::json(json!({"workItems": []})),
+        );
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/wit/workitems/9",
+            Reply::json(json!({"id": 9, "fields": {"System.WorkItemType": "Task", "System.TeamProject": "Proj"}})),
+        );
+        let mut p = provider(&server);
+        p.fetch_all_issues(None).await.unwrap();
+        // A Task is not an issue.
+        assert!(p.fetch_issue(9).await.unwrap().is_none());
+
+        let db = Arc::new(crate::Database::open_memory().unwrap());
+        db.set_app_setting(
+            crate::db::settings::AZURE_WORK_ITEM_TYPES_KEY,
+            r#"["User Story","O'Hara"]"#,
+        )
+        .unwrap();
+        p.db = Some(db);
+        p.fetch_all_issues(None).await.unwrap();
+        let queries: Vec<String> = server
+            .requests()
+            .iter()
+            .filter(|r| r.method == "POST")
+            .map(|r| r.json()["query"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            queries[0].contains("[System.WorkItemType] IN ('Issue', 'Bug')"),
+            "{}",
+            queries[0]
+        );
+        assert!(
+            queries[1].contains("IN ('User Story', 'O''Hara')"),
+            "{}",
+            queries[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn work_item_comment_lookup_follows_continuation() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/wit/workItems/3/comments",
+            Reply::json(json!({"comments": [{"id": 1, "text": "hi"}], "continuationToken": "abc"}))
+                .when_query("order=asc&api"),
+        );
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/wit/workItems/3/comments",
+            Reply::json(json!({"comments": [{"id": 2, "text": "x <!-- wshm -->"}]}))
+                .when_query("continuationToken=abc"),
+        );
+        let found = provider(&server)
+            .find_comment_with_marker(Thread::Issue(3), "<!-- wshm -->")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, 2);
     }
 
     #[test]

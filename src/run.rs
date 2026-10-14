@@ -37,7 +37,7 @@ pub fn init_core(
 )> {
     let config = crate::Config::load(cli)?;
     let db: Arc<dyn DatabaseBackend> = Arc::new(crate::Database::open(&config)?);
-    let gh = crate::git_provider::build_provider(&config)?;
+    let gh = crate::git_provider::build_provider_with_db(&config, Some(Arc::clone(&db)))?;
     Ok((config, db, gh))
 }
 
@@ -182,7 +182,8 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             let config = crate::Config::load(&cli)?;
             let db: Arc<dyn DatabaseBackend> = Arc::new(crate::Database::open(&config)?);
             if !cli.offline {
-                let gh = crate::git_provider::build_provider(&config)?;
+                let gh =
+                    crate::git_provider::build_provider_with_db(&config, Some(Arc::clone(&db)))?;
                 crate::github::sync::incremental_sync(&*gh, db.as_ref(), "pulls").await?;
             }
             crate::pipelines::pr_health::run(db.as_ref(), args, cli.json)?;
@@ -233,7 +234,8 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             let config = crate::Config::load(&cli)?;
             let db: Arc<dyn DatabaseBackend> = Arc::new(crate::Database::open(&config)?);
             if !cli.offline {
-                let gh = crate::git_provider::build_provider(&config)?;
+                let gh =
+                    crate::git_provider::build_provider_with_db(&config, Some(Arc::clone(&db)))?;
                 crate::github::sync::incremental_sync(&*gh, db.as_ref(), "issues").await?;
                 crate::github::sync::incremental_sync(&*gh, db.as_ref(), "pulls").await?;
             }

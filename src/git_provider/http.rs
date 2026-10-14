@@ -36,6 +36,8 @@ pub(crate) struct Rest {
     auth: Auth,
     /// Platform name used in error messages ("GitLab", "Gitea", ...).
     label: &'static str,
+    /// Login of the token owner, resolved once by [`Self::self_login`].
+    me: std::sync::OnceLock<String>,
 }
 
 impl Rest {
@@ -43,9 +45,17 @@ impl Rest {
         let http = reqwest::Client::builder()
             .user_agent("wshm")
             .timeout(std::time::Duration::from_secs(30))
+            // Never follow a redirect to another host: reqwest only strips
+            // Authorization/Cookie cross-host, not custom token headers.
+            .redirect(reqwest::redirect::Policy::custom(same_host_redirects))
             .build()
             .context("Failed to create HTTP client")?;
-        Ok(Self { http, auth, label })
+        Ok(Self {
+            http,
+            auth,
+            label,
+            me: std::sync::OnceLock::new(),
+        })
     }
 
     pub fn is_authenticated(&self) -> bool {
@@ -54,6 +64,28 @@ impl Rest {
 
     pub fn label(&self) -> &'static str {
         self.label
+    }
+
+    /// Login of the authenticated account (`field` of the JSON at `url`),
+    /// fetched once and cached. `None` when anonymous or on error.
+    pub async fn self_login(&self, url: &str, field: &str) -> Option<String> {
+        if !self.is_authenticated() {
+            return None;
+        }
+        if let Some(me) = self.me.get() {
+            return Some(me.clone());
+        }
+        match self.get_json(url).await {
+            Ok(v) => {
+                let login = v[field].as_str().filter(|s| !s.is_empty())?.to_string();
+                let _ = self.me.set(login.clone());
+                Some(login)
+            }
+            Err(e) => {
+                tracing::warn!("{}: cannot resolve the token owner: {e:#}", self.label);
+                None
+            }
+        }
     }
 
     /// Fail early with a clear message when a mutating call is attempted
@@ -227,6 +259,21 @@ impl Rest {
     }
 }
 
+/// Redirect policy: follow up to 5 hops, only on the original host.
+fn same_host_redirects(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
+    let origin = attempt
+        .previous()
+        .first()
+        .and_then(|u| u.host_str().map(String::from));
+    if attempt.previous().len() > 5 {
+        attempt.error("too many redirects")
+    } else if attempt.url().host_str().map(String::from) != origin {
+        attempt.stop()
+    } else {
+        attempt.follow()
+    }
+}
+
 /// Strip query strings from URLs before they reach logs (tokens never travel
 /// in URLs here, but filters can be long and noisy).
 fn redact(url: &str) -> &str {
@@ -294,5 +341,68 @@ pub(crate) fn ci_bucket(state: &str) -> Option<&'static str> {
         | "manual"
         | "notset" => Some("pending"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git_provider::mock::{MockServer, Reply};
+
+    #[tokio::test]
+    async fn redirects_never_leave_the_original_host() {
+        let server = MockServer::start().await;
+        let port = server.url().rsplit(':').next().unwrap().to_string();
+        // Same port, different host name: a token header must not follow.
+        server.on(
+            "GET",
+            "/away",
+            Reply::text("")
+                .status(302)
+                .header("location", &format!("http://localhost:{port}/x")),
+        );
+        server.on(
+            "GET",
+            "/here",
+            Reply::text("").status(302).header("location", "/ok"),
+        );
+        server.on("GET", "/ok", Reply::json(serde_json::json!({"ok": true})));
+        let rest = Rest::new("T", Auth::Header("PRIVATE-TOKEN", "secret".into())).unwrap();
+
+        let err = rest
+            .get_json(&format!("{}/away", server.url()))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("302"), "{err:#}");
+        assert!(!server.requests().iter().any(|r| r.path == "/x"));
+
+        let ok = rest
+            .get_json(&format!("{}/here", server.url()))
+            .await
+            .unwrap();
+        assert_eq!(ok["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn self_login_is_resolved_once() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            "/user",
+            Reply::json(serde_json::json!({"login": "wshm-bot"})),
+        );
+        let rest = Rest::new("T", Auth::Header("Authorization", "token t".into())).unwrap();
+        let url = format!("{}/user", server.url());
+        assert_eq!(
+            rest.self_login(&url, "login").await.as_deref(),
+            Some("wshm-bot")
+        );
+        assert_eq!(
+            rest.self_login(&url, "login").await.as_deref(),
+            Some("wshm-bot")
+        );
+        assert_eq!(server.requests().len(), 1);
+        let anon = Rest::new("T", Auth::None).unwrap();
+        assert!(anon.self_login(&url, "login").await.is_none());
     }
 }

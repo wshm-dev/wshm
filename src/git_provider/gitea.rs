@@ -102,12 +102,15 @@ impl GiteaProvider {
         )
     }
 
-    /// Follow `Link: rel="next"` pagination, calling `on_item` until it
-    /// returns `false`.
+    /// Page through a list endpoint, calling `on_item` until it returns
+    /// `false`. The `Link: rel="next"` header only says whether another
+    /// page exists: its absolute URL is built from the server ROOT_URL,
+    /// which may differ from `git_url` (proxy, internal host), so the next
+    /// URL is rebuilt from our base and the page number.
     async fn list(&self, path: &str, mut on_item: impl FnMut(&Value) -> bool) -> Result<()> {
         let sep = if path.contains('?') { '&' } else { '?' };
-        let mut url = format!("{}{sep}limit={LIMIT}&page=1", self.url(path));
-        for _ in 0..http::MAX_PAGES {
+        for page in 1..=http::MAX_PAGES {
+            let url = format!("{}{sep}limit={LIMIT}&page={page}", self.url(path));
             let (body, headers) = self.rest.get_json_with_headers(&url).await?;
             // Gitea answers `null` for some empty lists.
             let empty = Vec::new();
@@ -122,13 +125,13 @@ impl GiteaProvider {
                     return Ok(());
                 }
             }
-            match headers
+            let has_next = headers
                 .get("link")
                 .and_then(|v| v.to_str().ok())
                 .and_then(crate::github::parse_link_next)
-            {
-                Some(next) if !items.is_empty() => url = next,
-                _ => return Ok(()),
+                .is_some();
+            if !has_next || items.is_empty() {
+                return Ok(());
             }
         }
         Ok(())
@@ -339,6 +342,12 @@ impl GitProvider for GiteaProvider {
 
     fn is_authenticated(&self) -> bool {
         self.rest.is_authenticated()
+    }
+
+    async fn self_username(&self) -> Option<String> {
+        self.rest
+            .self_login(&format!("{}/user", self.api), "login")
+            .await
     }
 
     fn supports(&self, cap: Capability) -> bool {
@@ -651,13 +660,13 @@ impl GitProvider for GiteaProvider {
         self.rest.require_auth("submit review")?;
         let comments: Vec<Value> = comments
             .iter()
-            .map(|(path, line, b)| json!({ "path": path, "body": b, "new_position": line }))
+            .map(|(path, line, b)| json!({ "path": path, "body": ensure_comment_marker(b, &self.marker), "new_position": line }))
             .collect();
         self.rest
             .send_json(
                 Method::POST,
                 &self.url(&format!("pulls/{pr_number}/reviews")),
-                &json!({ "body": body, "event": "COMMENT", "comments": comments }),
+                &json!({ "body": ensure_comment_marker(body, &self.marker), "event": "COMMENT", "comments": comments }),
             )
             .await?;
         Ok(())
@@ -774,7 +783,15 @@ impl GitProvider for GiteaProvider {
         ));
         // 404/403 → not a collaborator (or not visible to the token).
         let resp = self.rest.send(Method::GET, &url, None, None, None).await?;
-        if matches!(resp.status.as_u16(), 403 | 404) {
+        if resp.status.as_u16() == 404 {
+            return Ok(false);
+        }
+        if resp.status.as_u16() == 403 {
+            warn!(
+                "{}: collaborator check for {username} refused (403) — the API token needs \
+                 admin rights on {}/{} to read other users' permissions; denying",
+                self.flavor, self.owner, self.repo
+            );
             return Ok(false);
         }
         if !resp.status.is_success() {
@@ -814,8 +831,9 @@ mod tests {
     async fn issues_follow_link_pagination_and_skip_pulls() {
         let server = MockServer::start().await;
         let next = format!(
-            "<{}{R}/issues?state=all&type=issues&limit=50&page=2>; rel=\"next\"",
-            server.url()
+            // ROOT_URL differs from git_url: must not be followed.
+            "<https://public.example{}/issues?state=all&type=issues&limit=50&page=2>; rel=\"next\"",
+            R
         );
         server.on(
             "GET",
@@ -926,8 +944,8 @@ mod tests {
         assert_eq!(reqs[1].json(), json!({"body": "hello\n\n<!-- wshm -->"}));
         assert_eq!(
             reqs[2].json(),
-            json!({"body": "sum", "event": "COMMENT",
-                   "comments": [{"path": "a.rs", "body": "nit", "new_position": 4}]})
+            json!({"body": "sum\n\n<!-- wshm -->", "event": "COMMENT",
+                   "comments": [{"path": "a.rs", "body": "nit\n\n<!-- wshm -->", "new_position": 4}]})
         );
     }
 

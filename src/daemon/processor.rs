@@ -527,6 +527,16 @@ async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Re
         .and_then(|l| l.as_str())
         .unwrap_or("unknown");
 
+    // Never execute what wshm's own account wrote (a review or reply can
+    // echo a command injected through PR content). GitHub returns None
+    // here and keeps relying on the marker check above.
+    if let Some(me) = state.gh().self_username().await {
+        if me.eq_ignore_ascii_case(triggered_by) || me.eq_ignore_ascii_case(sender) {
+            info!("Ignoring command on #{number} posted by wshm's own account {me}");
+            return Ok(());
+        }
+    }
+
     info!("Slash command on #{number} by {triggered_by}: {cmd:?}");
 
     // Detect if this is a PR (issue_comment fires for both issues and PRs)
