@@ -815,6 +815,30 @@ pub struct SkillDef {
 /// Pipeline names a [`SkillDef::pipelines`] entry may target.
 pub const SKILL_PIPELINES: &[&str] = &["triage", "pr_review", "review", "diagrams"];
 
+/// Strip pipeline values that aren't in [`SKILL_PIPELINES`], returning one
+/// human-readable warning per change. A skill whose every pipeline was
+/// unknown is disabled rather than left with an empty list (empty = ALL
+/// pipelines, which would widen a typo into "apply everywhere").
+pub fn sanitize_skill_pipelines(skill: &mut SkillDef) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let had_any = !skill.pipelines.is_empty();
+    let name = skill.name.clone();
+    skill.pipelines.retain(|p| {
+        let ok = SKILL_PIPELINES.contains(&p.as_str());
+        if !ok {
+            warnings.push(format!("skill '{name}': unknown pipeline '{p}' removed"));
+        }
+        ok
+    });
+    if had_any && skill.pipelines.is_empty() && skill.enabled {
+        skill.enabled = false;
+        warnings.push(format!(
+            "skill '{name}': no known pipeline left, disabled (expected any of {SKILL_PIPELINES:?})"
+        ));
+    }
+    warnings
+}
+
 /// Build the AI-prompt fragment listing the skills that apply to `pipeline`
 /// (one of [`SKILL_PIPELINES`]). Mirrors [`domains_prompt`]'s DB-backed,
 /// stateless-pods-safe pattern — see its doc comment for why this isn't TOML.
@@ -905,9 +929,21 @@ pub fn seed_skills(
     use crate::db::settings::{SKILLS_KEY, SKILLS_SEEDED_KEY};
     const MAX_ATTEMPTS: usize = 8;
 
-    // First occurrence wins on duplicate names in the TOML.
+    // First occurrence wins on duplicate names in the TOML. Unknown pipeline
+    // values are stripped here so a TOML typo can never land in the DB list
+    // (where it would make every Settings save carry an invalid value).
+    let sanitized: Vec<SkillDef> = toml_skills
+        .iter()
+        .cloned()
+        .map(|mut s| {
+            for w in sanitize_skill_pipelines(&mut s) {
+                tracing::warn!("[[skills]] {w}");
+            }
+            s
+        })
+        .collect();
     let mut seeds: Vec<&SkillDef> = Vec::new();
-    for s in toml_skills {
+    for s in &sanitized {
         if s.name.trim().is_empty() {
             tracing::warn!("[[skills]] entry with an empty name ignored");
             continue;
@@ -915,13 +951,6 @@ pub fn seed_skills(
         if seeds.iter().any(|x| x.name == s.name) {
             tracing::warn!(skill = %s.name, "duplicate [[skills]] name ignored");
             continue;
-        }
-        if let Some(bad) = s
-            .pipelines
-            .iter()
-            .find(|p| !SKILL_PIPELINES.contains(&p.as_str()))
-        {
-            tracing::warn!(skill = %s.name, pipeline = %bad, "[[skills]] has an unknown pipeline; it will never match");
         }
         seeds.push(s);
     }
@@ -3005,6 +3034,45 @@ enabled = false
                 .as_deref(),
             Some("not json")
         );
+    }
+
+    #[test]
+    fn test_sanitize_skill_pipelines() {
+        let mut s = skill("x", &["triage", "bogus"], true);
+        let w = sanitize_skill_pipelines(&mut s);
+        assert_eq!(s.pipelines, vec!["triage"]);
+        assert!(s.enabled);
+        assert_eq!(w.len(), 1);
+
+        // Only unknown values: disabled, never widened to "all pipelines".
+        let mut s = skill("y", &["diagram"], true);
+        sanitize_skill_pipelines(&mut s);
+        assert!(s.pipelines.is_empty() && !s.enabled);
+
+        let mut s = skill("z", &[], true);
+        assert!(sanitize_skill_pipelines(&mut s).is_empty());
+        assert!(s.enabled);
+    }
+
+    #[test]
+    fn test_seed_strips_unknown_pipelines() {
+        let db = crate::db::Database::open_memory().unwrap();
+        seed_skills(
+            &db,
+            &[
+                skill("a", &["review", "nope"], true),
+                skill("b", &["typo"], true),
+            ],
+        )
+        .unwrap();
+        let s = stored(&db);
+        assert_eq!(s[0].pipelines, vec!["review"]);
+        assert!(s[0].enabled);
+        assert!(s[1].pipelines.is_empty() && !s[1].enabled);
+        assert!(s.iter().all(|k| k
+            .pipelines
+            .iter()
+            .all(|p| SKILL_PIPELINES.contains(&p.as_str()))));
     }
 
     /// Two "pods" seeding the same shared DB concurrently: the atomic

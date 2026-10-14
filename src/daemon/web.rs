@@ -2386,9 +2386,11 @@ async fn api_repo_features_patch(
         }
     }
 
-    // Multi-pod: merge over the FRESH shared registry, not this pod's
-    // possibly stale copy, so persist() below can't revert another pod's edit.
-    if let Err(e) = state.multi.sync_registry().await {
+    // Multi-pod: hold the registry lock for the whole sync → mutate →
+    // persist sequence and merge over the FRESH shared registry, so neither
+    // the periodic sync nor this pod's stale copy can revert the edit.
+    let _registry = state.multi.lock_registry().await;
+    if let Err(e) = state.multi.sync_registry_locked().await {
         tracing::warn!("registry sync before features PATCH failed: {e:#}");
     }
 
@@ -2406,7 +2408,9 @@ async fn api_repo_features_patch(
     drop(repos);
 
     // Merge partial update over current snapshot.
-    let mut features = ds.features();
+    let prev_features = ds.features();
+    let prev_apply = ds.apply();
+    let mut features = prev_features.clone();
     macro_rules! patch_bool {
         ($field:ident) => {
             if let Some(v) = body.get(stringify!($field)).and_then(|v| v.as_bool()) {
@@ -2444,13 +2448,15 @@ async fn api_repo_features_patch(
 
     // Persist so the change survives restart: mutate the canonical registry
     // and flush via the persistence hook (Pro → Postgres) or the TOML
-    // fallback (OSS). Errors are logged but not propagated — the in-memory
-    // state is already updated, worst case the user re-toggles after restart.
+    // fallback (OSS). On failure the edit is rolled back and a 5xx returned:
+    // reporting success would let the next registry sync silently revert it.
     if let Some(runtime) = state.multi.runtime.as_ref() {
+        let mut prev_entry = None;
         {
             let mut canonical = runtime.repos.write().await;
             for entry in canonical.iter_mut() {
                 if entry.slug == slug {
+                    prev_entry = Some(entry.clone());
                     entry.features = features.clone();
                     if let Some(new_apply) = apply_change {
                         entry.apply = Some(new_apply);
@@ -2459,7 +2465,20 @@ async fn api_repo_features_patch(
             }
         }
         if let Err(e) = runtime.persist().await {
-            tracing::warn!("Failed to persist repo features: {e}");
+            tracing::warn!("Failed to persist repo features: {e:#}");
+            if let Some(prev) = prev_entry {
+                let mut canonical = runtime.repos.write().await;
+                if let Some(entry) = canonical.iter_mut().find(|e| e.slug == slug) {
+                    *entry = prev;
+                }
+            }
+            ds.set_features(prev_features);
+            ds.set_apply(prev_apply);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("failed to persist repo features: {e:#}")})),
+            )
+                .into_response();
         }
     }
 
@@ -2682,7 +2701,7 @@ async fn api_repo_skills_patch(
     };
     drop(repos);
 
-    let skills = match body.get("skills") {
+    let mut skills = match body.get("skills") {
         Some(s) => match serde_json::from_value::<Vec<crate::config::SkillDef>>(s.clone()) {
             Ok(parsed) => parsed,
             Err(e) => {
@@ -2702,20 +2721,15 @@ async fn api_repo_skills_patch(
         }
     };
 
-    if let Some((name, bad)) = skills.iter().find_map(|s| {
-        s.pipelines
-            .iter()
-            .find(|p| !crate::config::SKILL_PIPELINES.contains(&p.as_str()))
-            .map(|p| (s.name.clone(), p.clone()))
-    }) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!(
-                "skill '{name}': unknown pipeline '{bad}' (expected one of {:?})",
-                crate::config::SKILL_PIPELINES
-            )})),
-        )
-            .into_response();
+    // Tolerant: strip unknown pipeline values (e.g. left in stored data by an
+    // older build) instead of rejecting the whole save, which would leave the
+    // UI unable to fix them. What was stripped is reported back.
+    let warnings: Vec<String> = skills
+        .iter_mut()
+        .flat_map(crate::config::sanitize_skill_pipelines)
+        .collect();
+    for w in &warnings {
+        tracing::warn!("skills PATCH: {w}");
     }
 
     let json_str = serde_json::to_string(&skills).unwrap_or_else(|_| "[]".into());
@@ -2730,7 +2744,7 @@ async fn api_repo_skills_patch(
             .into_response();
     }
 
-    Json(json!({ "skills": skills })).into_response()
+    Json(json!({ "skills": skills, "warnings": warnings })).into_response()
 }
 
 /// POST /api/v1/repos/{slug}/domains/discover -- infer the repo's grand domains

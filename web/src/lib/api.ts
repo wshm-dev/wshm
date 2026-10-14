@@ -662,7 +662,10 @@ export async function fetchRepoSkills(slug: string): Promise<{ skills: Skill[] }
 	return res.json();
 }
 
-export async function updateRepoSkills(slug: string, skills: Skill[]): Promise<{ skills: Skill[] }> {
+export async function updateRepoSkills(
+	slug: string,
+	skills: Skill[]
+): Promise<{ skills: Skill[]; warnings?: string[] }> {
 	const res = await fetch(`/api/v1/repos/${encodeURIComponent(slug)}/skills`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json', ...CSRF_HEADERS },
