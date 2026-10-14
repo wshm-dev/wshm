@@ -88,7 +88,7 @@ tower-http = { version = "0.6", features = ["trace"] }
 flate2 = "1"
 tar = "0.4"
 zip = "2"
-async-trait = "0.1"
+async-trait = "0.1.92"
 is-terminal = "0.4"
 zeroize = "1"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
