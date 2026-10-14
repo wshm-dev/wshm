@@ -13,8 +13,6 @@ pub const PROMPT_VERSION: &str = "arch-1";
 pub const MAX_DIRECT_DIFF_BYTES: usize = 40_000;
 /// Max diff bytes per summary call (several files batched together).
 pub const SUMMARY_BATCH_BYTES: usize = 30_000;
-/// Max summary calls for one PR; files beyond are listed by name only.
-pub const MAX_SUMMARY_CALLS: usize = 6;
 
 /// Human name of a language code, for the "write in X" instruction.
 pub fn language_name(code: &str) -> String {

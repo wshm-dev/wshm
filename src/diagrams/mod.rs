@@ -113,6 +113,7 @@ async fn graph_user_prompt(
     db: &dyn DatabaseBackend,
     pr: &PullRequest,
     diff: &str,
+    max_calls: usize,
 ) -> String {
     let body = pr.body.as_deref().unwrap_or("(no description)");
     let chunks: Vec<(String, String)> = crate::ai::prompts::inline_review::split_diff_by_file(diff)
@@ -143,10 +144,10 @@ async fn graph_user_prompt(
         useful / 1024,
         pr_diagram::MAX_DIRECT_DIFF_BYTES / 1000,
         chunks.len(),
-        batches.len().min(pr_diagram::MAX_SUMMARY_CALLS)
+        batches.len().min(max_calls)
     );
     let mut summaries: std::collections::HashMap<String, String> = Default::default();
-    for batch in batches.iter().take(pr_diagram::MAX_SUMMARY_CALLS) {
+    for batch in batches.iter().take(max_calls) {
         let user = pr_diagram::summary_user(&pr.title, batch);
         match ai
             .complete::<FileSummaries>(pr_diagram::SUMMARY_SYSTEM, &user)
@@ -164,11 +165,11 @@ async fn graph_user_prompt(
             Err(e) => warn!("PR diagram: file summary call failed, continuing: {e:#}"),
         }
     }
-    if batches.len() > pr_diagram::MAX_SUMMARY_CALLS {
+    if batches.len() > max_calls {
         info!(
             "PR diagram: {} file batches, only {} summarized",
             batches.len(),
-            pr_diagram::MAX_SUMMARY_CALLS
+            max_calls
         );
     }
     let files: Vec<(String, usize, usize, Option<String>)> = chunks
@@ -189,7 +190,7 @@ async fn generate(
     diff: &str,
     dc: &ReviewDiagramsConfig,
 ) -> Result<Option<Graph>> {
-    let mut user = graph_user_prompt(ai, db, pr, diff).await;
+    let mut user = graph_user_prompt(ai, db, pr, diff, dc.max_summary_calls as usize).await;
     let skills = crate::config::load_skills(db);
     let skills_prompt = crate::config::skills_prompt(&skills, "diagrams");
     if !skills_prompt.is_empty() {
@@ -211,8 +212,52 @@ async fn generate(
     Ok(g)
 }
 
-/// Build the "Architecture" section for the PR analysis comment. Fail-soft:
-/// any error is logged and yields `None`.
+fn section_options<'a>(
+    config: &Config,
+    dc: &'a ReviewDiagramsConfig,
+    page_url: Option<&'a str>,
+    diff_len: usize,
+) -> render::SectionOptions<'a> {
+    render::SectionOptions {
+        language: &dc.language,
+        text: dc.text,
+        comment: dc.comment,
+        page_url,
+        page_has_diff: dc.diff_viewer && diff_len <= dc.publish.max_diff_kb as usize * 1024,
+        max_mermaid_chars: dc.max_mermaid_chars as usize,
+        supports_mermaid: forge_supports_mermaid(config),
+    }
+}
+
+/// The section of an already generated diagram for this exact diff, from the
+/// DB alone (no AI, no network). Lets the analysis comment carry an
+/// unchanged diagram right away instead of waiting for the diagram step.
+pub fn cached_section(
+    config: &Config,
+    db: &dyn DatabaseBackend,
+    pr: &PullRequest,
+    diff: Option<&str>,
+) -> Option<String> {
+    let dc = crate::config::load_review_diagrams(config, db);
+    if !dc.enabled || !dc.kinds.iter().any(|k| k == "architecture") {
+        return None;
+    }
+    let diff = diff.filter(|d| !d.trim().is_empty())?;
+    let row = db.get_pr_diagram(pr.number).ok().flatten()?;
+    if row.diff_hash != sha256_hex(diff) || row.gen_hash != gen_hash(&dc) {
+        return None;
+    }
+    let graph: Graph = serde_json::from_str(&row.graph_json).ok()?;
+    render::comment_section(
+        &graph,
+        &section_options(config, &dc, row.page_url.as_deref(), diff.len()),
+    )
+}
+
+/// The diagram step: generate (or reuse) the graph, publish the page and
+/// build the "Architecture" section. Bounded by `timeout_secs` (on expiry
+/// the futures are dropped, which kills the AI CLI) and fail-soft: any
+/// error or timeout is logged and yields `None`.
 pub async fn comment_section(
     config: &Config,
     ai: &AiBackend,
@@ -222,10 +267,25 @@ pub async fn comment_section(
     diff: Option<&str>,
     apply: bool,
 ) -> Option<String> {
-    match build_section(config, ai, db, gh, pr, diff, apply).await {
-        Ok(s) => s,
-        Err(e) => {
+    let budget = crate::config::load_review_diagrams(config, db)
+        .timeout_secs
+        .max(1);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(budget as u64),
+        build_section(config, ai, db, gh, pr, diff, apply),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             warn!("PR #{}: diagram skipped: {e:#}", pr.number);
+            None
+        }
+        Err(_) => {
+            warn!(
+                "PR #{}: diagram step abandoned after {budget}s (timeout_secs)",
+                pr.number
+            );
             None
         }
     }
@@ -282,6 +342,31 @@ pub fn page_expired(
         && chrono::DateTime::parse_from_rfc3339(&row.updated_at)
             .map(|t| now.signed_duration_since(t) > chrono::Duration::days(retention_days as i64))
             .unwrap_or(false)
+}
+
+/// Repo visibility for the hosted pages, from the forge, cached 5 minutes
+/// per repo. Unknown (error) counts as private.
+pub async fn repo_is_private(slug: &str, gh: &GhClient) -> bool {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, (bool, Instant)>>> =
+        std::sync::OnceLock::new();
+    const TTL: Duration = Duration::from_secs(300);
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((v, at)) = cache.lock().ok().and_then(|c| c.get(slug).copied()) {
+        if at.elapsed() < TTL {
+            return v;
+        }
+    }
+    let v = gh.fetch_repo_private().await.unwrap_or(true);
+    if let Ok(mut c) = cache.lock() {
+        if c.len() > 1000 {
+            c.clear();
+        }
+        c.insert(slug.to_string(), (v, Instant::now()));
+    }
+    v
 }
 
 /// Dashboard numbers of one repo.
@@ -367,9 +452,15 @@ async fn enforce_max_pages(dc: &ReviewDiagramsConfig, db: &dyn DatabaseBackend, 
 
 /// ETag of a hosted page. The page is a pure function of these inputs, so a
 /// revalidation is answered without fetching the diff.
-pub fn hosted_etag(row: &PrDiagramRow, dc: &ReviewDiagramsConfig) -> String {
+/// `current_head` is the PR head now (the embedded diff is fetched for it).
+pub fn hosted_etag(
+    row: &PrDiagramRow,
+    dc: &ReviewDiagramsConfig,
+    current_head: Option<&str>,
+    is_private: bool,
+) -> String {
     let h = sha256_hex(&format!(
-        "{}|{}|{}|{:?}|{}|{}|{}",
+        "{}|{}|{}|{:?}|{current_head:?}|{is_private}|{}|{}|{}",
         page::template_hash(),
         row.graph_json,
         row.diff_hash,
@@ -399,6 +490,7 @@ pub fn render_page(
     pr: u64,
     graph: &Graph,
     diff: Option<&str>,
+    assets: page::Assets,
 ) -> String {
     let embedded =
         diff.and_then(|d| page::embeddable_diff(d, dc.diff_viewer, dc.publish.max_diff_kb));
@@ -411,6 +503,7 @@ pub fn render_page(
             pr,
             diff: embedded,
             files_url: embedded.is_none().then_some(files.as_str()),
+            assets,
         },
     )
 }
@@ -524,7 +617,14 @@ async fn build_section(
                 true
             }
         };
-        let html = render_page(&dc, &repo_slug, pr.number, &graph, Some(diff));
+        // Hosted pages load the vendored assets from the daemon; files
+        // published elsewhere are self-contained.
+        let assets = if dc.publish.target == DiagramPublishTarget::Wshm {
+            page::Assets::Hosted
+        } else {
+            page::Assets::Inline
+        };
+        let html = render_page(&dc, &repo_slug, pr.number, &graph, Some(diff), assets);
         match publish::publish(
             &dc.publish,
             gh,
@@ -546,8 +646,11 @@ async fn build_section(
                 row.page_hash = Some(page_fp.clone());
                 row.is_private = is_private;
             }
-            Ok(None) => {}
-            Err(e) => warn!("PR #{}: diagram page not published: {e:#}", pr.number),
+            Ok(None) => keep_previous_page(&mut row, previous.as_ref(), target, apply),
+            Err(e) => {
+                warn!("PR #{}: diagram page not published: {e:#}", pr.number);
+                keep_previous_page(&mut row, previous.as_ref(), target, apply);
+            }
         }
     }
     db.upsert_pr_diagram(&row)?;
@@ -564,16 +667,33 @@ async fn build_section(
 
     Ok(render::comment_section(
         &graph,
-        &render::SectionOptions {
-            language: &dc.language,
-            text: dc.text,
-            comment: dc.comment,
-            page_url: page_url.as_deref(),
-            page_has_diff: dc.diff_viewer && diff.len() <= dc.publish.max_diff_kb as usize * 1024,
-            max_mermaid_chars: dc.max_mermaid_chars as usize,
-            supports_mermaid: forge_supports_mermaid(config),
-        },
+        &section_options(config, &dc, page_url.as_deref(), diff.len()),
     ))
+}
+
+/// Publication skipped (dry-run, refused) or failed: keep tracking the page
+/// published before, so its link (already in the comment) keeps working and
+/// a later cleanup can still delete it. Not when a real run just deleted
+/// it because the target changed.
+fn keep_previous_page(
+    row: &mut PrDiagramRow,
+    previous: Option<&PrDiagramRow>,
+    target: &str,
+    apply: bool,
+) {
+    let Some(p) = previous.filter(|p| p.page_target.is_some()) else {
+        return;
+    };
+    if apply && p.page_target.as_deref() != Some(target) {
+        return;
+    }
+    row.page_target = p.page_target.clone();
+    row.page_key = p.page_key.clone();
+    row.page_url = p.page_url.clone();
+    row.page_token = p.page_token.clone();
+    row.page_bytes = p.page_bytes;
+    row.page_hash = p.page_hash.clone();
+    row.is_private = p.is_private;
 }
 
 /// Delete the published page and the cached graph of a PR (closed/merged).
@@ -726,18 +846,103 @@ mod tests {
     }
 
     #[test]
+    fn previous_page_survives_a_skipped_or_failed_publication() {
+        let prev = PrDiagramRow {
+            page_target: Some("github-pages".into()),
+            page_key: Some("k".into()),
+            page_url: Some("https://x/k".into()),
+            page_token: Some("t".into()),
+            page_bytes: 9,
+            page_hash: Some("h".into()),
+            ..Default::default()
+        };
+        let mut row = PrDiagramRow::default();
+        keep_previous_page(&mut row, Some(&prev), "github-pages", true);
+        assert_eq!(row.page_url.as_deref(), Some("https://x/k"));
+        assert_eq!(row.page_token.as_deref(), Some("t"));
+        // Dry-run with another target: still tracked (nothing was deleted).
+        let mut row = PrDiagramRow::default();
+        keep_previous_page(&mut row, Some(&prev), "wshm", false);
+        assert_eq!(row.page_key.as_deref(), Some("k"));
+        // Real run that switched target: the old page was deleted, forget it.
+        let mut row = PrDiagramRow::default();
+        keep_previous_page(&mut row, Some(&prev), "wshm", true);
+        assert!(row.page_key.is_none());
+        let mut row = PrDiagramRow::default();
+        keep_previous_page(&mut row, None, "wshm", true);
+        assert!(row.page_target.is_none());
+    }
+
+    fn pull(n: u64, state: &str) -> PullRequest {
+        PullRequest {
+            number: n,
+            title: format!("PR {n}"),
+            body: None,
+            state: state.into(),
+            labels: vec![],
+            author: None,
+            head_sha: Some("h".into()),
+            base_sha: None,
+            head_ref: None,
+            base_ref: None,
+            mergeable: None,
+            ci_status: None,
+            created_at: "2026-10-01T00:00:00Z".into(),
+            updated_at: "2026-10-01T00:00:00Z".into(),
+            review_decision: None,
+            review_decision_at: None,
+            reactions_plus1: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_drops_closed_prs_and_expired_pages() {
+        let db = crate::db::Database::open_memory().unwrap();
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = Config::default();
+        let gh = GhClient::new(&config).unwrap();
+        db.upsert_pull(&pull(1, "open")).unwrap();
+        db.upsert_pull(&pull(2, "closed")).unwrap();
+        db.upsert_pull(&pull(3, "open")).unwrap();
+        let fresh = chrono::Utc::now().to_rfc3339();
+        // 1: open, recent page -> kept. 2: closed (e.g. re-created by an
+        // analysis that raced the close) -> removed. 3: open, page idle for
+        // 40 days -> page dropped, graph kept. 4: PR unknown -> removed.
+        db.upsert_pr_diagram(&row(1, &fresh, true)).unwrap();
+        db.upsert_pr_diagram(&row(2, &fresh, true)).unwrap();
+        db.upsert_pr_diagram(&row(3, "2026-01-01T00:00:00Z", true))
+            .unwrap();
+        db.upsert_pr_diagram(&row(4, &fresh, false)).unwrap();
+        sweep(&config, &db, &gh).await;
+        assert!(db.get_pr_diagram(1).unwrap().unwrap().page_target.is_some());
+        assert!(db.get_pr_diagram(2).unwrap().is_none());
+        let r3 = db.get_pr_diagram(3).unwrap().unwrap();
+        assert!(r3.page_target.is_none() && r3.page_url.is_none());
+        assert!(db.get_pr_diagram(4).unwrap().is_none());
+    }
+
+    #[test]
     fn etags() {
         let dc = ReviewDiagramsConfig::default();
         let r = row(1, "x", true);
-        let e = hosted_etag(&r, &dc);
+        let e = hosted_etag(&r, &dc, Some("h1"), false);
         assert!(e.starts_with('"') && e.ends_with('"') && e.len() == 34);
-        assert_eq!(e, hosted_etag(&r, &dc), "stable");
+        assert_eq!(e, hosted_etag(&r, &dc, Some("h1"), false), "stable");
         let mut r2 = r.clone();
         r2.diff_hash = "other".into();
-        assert_ne!(e, hosted_etag(&r2, &dc), "new diff, new etag");
+        assert_ne!(
+            e,
+            hosted_etag(&r2, &dc, Some("h1"), false),
+            "new diff, new etag"
+        );
+        assert_ne!(
+            e,
+            hosted_etag(&r, &dc, Some("h2"), false),
+            "new head, new etag"
+        );
         let mut dc2 = dc.clone();
         dc2.language = "fr".into();
-        assert_ne!(e, hosted_etag(&r, &dc2));
+        assert_ne!(e, hosted_etag(&r, &dc2, Some("h1"), false));
         assert!(etag_matches(Some(&e), &e));
         assert!(etag_matches(Some(&format!("\"a\", W/{e}")), &e));
         assert!(etag_matches(Some("*"), &e));

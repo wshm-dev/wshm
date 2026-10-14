@@ -618,6 +618,28 @@ async fn request_has_session(state: &Arc<WebState>, headers: &HeaderMap) -> bool
     basic_auth_matches(headers, &web_cfgs)
 }
 
+/// GET /diagrams/_assets/{file} -- the viewer's vendored JS/CSS. Versioned
+/// names (content hash), so cached forever. No auth: static, public code.
+async fn diagram_asset(axum::extract::Path(file): axum::extract::Path<String>) -> Response {
+    match crate::diagrams::page::asset(&file) {
+        Some((content_type, body)) => {
+            let mut resp = body.into_response();
+            let h = resp.headers_mut();
+            h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+            h.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=31536000, immutable"),
+            );
+            h.insert(
+                "x-content-type-options",
+                HeaderValue::from_static("nosniff"),
+            );
+            resp
+        }
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
 type DiagramPath = axum::extract::Path<(String, String, u64)>;
 type DiagramQuery = Query<std::collections::HashMap<String, String>>;
 
@@ -678,17 +700,27 @@ async fn serve_diagram(
     if !ct_eq(token.as_bytes(), key.as_bytes()) {
         return not_found();
     }
-    if row.is_private && !authenticated && !request_has_session(state, headers).await {
+    // Visibility from the forge (cached a few minutes), not the value frozen
+    // at publication: a repo made private stops being served anonymously.
+    let is_private = crate::diagrams::repo_is_private(&slug, &ds.gh()).await || row.is_private;
+    if is_private && !authenticated && !request_has_session(state, headers).await {
         return unauthorized_response(&format!("/diagrams/{slug}/{pr}"), headers);
     }
     let Ok(graph) = serde_json::from_str::<crate::diagrams::graph::Graph>(&row.graph_json) else {
         return not_found();
     };
     let dc = crate::config::load_review_diagrams(&ds.config, ds.db.as_ref());
+    let current_head = ds
+        .db
+        .get_pull(pr)
+        .ok()
+        .flatten()
+        .and_then(|p| p.head_sha)
+        .or_else(|| row.head_sha.clone());
 
     // The page is a pure function of these: no need to fetch the diff to
     // answer a revalidation.
-    let etag = crate::diagrams::hosted_etag(&row, &dc);
+    let etag = crate::diagrams::hosted_etag(&row, &dc, current_head.as_deref(), is_private);
     let page_headers = |h: &mut HeaderMap| {
         for (k, v) in [
             ("cache-control", "private, max-age=60, must-revalidate"),
@@ -696,7 +728,7 @@ async fn serve_diagram(
             ("referrer-policy", "no-referrer"),
             ("x-robots-tag", "noindex, nofollow"),
             ("x-content-type-options", "nosniff"),
-            ("content-security-policy", "frame-ancestors 'none'"),
+            ("content-security-policy", crate::diagrams::page::HOSTED_CSP),
         ] {
             h.insert(k, HeaderValue::from_static(v));
         }
@@ -715,7 +747,11 @@ async fn serve_diagram(
 
     // Diff for the viewer: fetched from the forge, kept in a bounded LRU.
     let diff = if dc.diff_viewer {
-        let cache_key = format!("{slug}#{pr}@{}", row.diff_hash);
+        // Keyed by the current head: a push invalidates it.
+        let cache_key = format!(
+            "{slug}#{pr}@{}",
+            current_head.as_deref().unwrap_or(&row.diff_hash)
+        );
         match crate::diagrams::diff_cache::global().get(&cache_key) {
             Some(d) => d,
             None => match ds.gh().fetch_pr_diff(pr).await {
@@ -734,7 +770,14 @@ async fn serve_diagram(
     } else {
         None
     };
-    let html = crate::diagrams::render_page(&dc, &slug, pr, &graph, diff.as_deref());
+    let html = crate::diagrams::render_page(
+        &dc,
+        &slug,
+        pr,
+        &graph,
+        diff.as_deref(),
+        crate::diagrams::page::Assets::Hosted,
+    );
     let mut resp = Html(html).into_response();
     page_headers(resp.headers_mut());
     resp
@@ -2951,6 +2994,13 @@ async fn api_repo_diagrams_put(
         if !unknown.is_empty() {
             return bad(format!("unknown setting(s): {}", unknown.join(", ")));
         }
+        let toml_only = crate::config::toml_only_keys(&body);
+        if !toml_only.is_empty() {
+            return bad(format!(
+                "TOML-only setting(s), not allowed in the per-repo override: {}",
+                toml_only.join(", ")
+            ));
+        }
         if let Err(e) =
             crate::config::apply_review_diagrams_override(&ds.config.pr.review_diagrams, &body)
         {
@@ -4264,6 +4314,7 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
             "/api/v1/repos/{slug}/diagrams",
             get(api_repo_diagrams_get).put(api_repo_diagrams_put),
         )
+        .route("/diagrams/_assets/{file}", get(diagram_asset))
         .route("/diagrams/{owner}/{repo}/{pr}", get(diagram_page))
         .route(
             "/api/v1/diagrams/{owner}/{repo}/{pr}",

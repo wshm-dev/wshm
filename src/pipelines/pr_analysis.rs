@@ -12,6 +12,109 @@ use crate::db::pulls::{PrAnalysisRow, PullRequest};
 use crate::export::{EventKind, ExportEvent, ExportManager};
 use crate::github::Client as GhClient;
 
+/// What to do with the (slow) diagram step of `[pr.review_diagrams]`. The
+/// analysis comment is always posted first, without waiting for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagramMode {
+    /// Run it right after posting, in this task (CLI). In a dry-run it only
+    /// runs for an explicit preview.
+    Inline,
+    /// Return it as a [`DiagramJob`] for the caller to spawn (daemon).
+    Deferred,
+    /// Only reuse a cached diagram, never generate.
+    Skip,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RunOptions {
+    /// Print the comment instead of posting it (single-PR CLI dry-run).
+    pub preview: bool,
+    pub diagrams: DiagramMode,
+}
+
+/// A pending diagram step: generate the architecture section and, if it
+/// differs from what was posted, edit the analysis comment in place.
+#[derive(Debug, Clone)]
+pub struct DiagramJob {
+    pub pr: PullRequest,
+    diff: String,
+    analysis: PrAnalysis,
+    posted_section: Option<String>,
+    apply: bool,
+    preview: bool,
+}
+
+/// Concurrent background diagram steps, all repos together. Separate from
+/// the event processor's permits so a slow AI never stalls event handling.
+static DIAGRAM_JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// Spawn a diagram job in the background (daemon).
+pub fn spawn_diagram_job(
+    config: std::sync::Arc<Config>,
+    db: std::sync::Arc<dyn DatabaseBackend>,
+    gh: std::sync::Arc<GhClient>,
+    job: DiagramJob,
+) {
+    tokio::spawn(async move {
+        let Ok(_permit) = DIAGRAM_JOBS.acquire().await else {
+            return;
+        };
+        finish_diagram(&config, db.as_ref(), &gh, job).await;
+    });
+}
+
+/// Run a diagram job: bounded by `[pr.review_diagrams].timeout_secs`, never
+/// fails. Edits the comment only when the PR head did not move meanwhile.
+pub async fn finish_diagram(
+    config: &Config,
+    db: &dyn DatabaseBackend,
+    gh: &GhClient,
+    job: DiagramJob,
+) {
+    let ai = match AiBackend::from_config(config, config.model_for("pr")) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(
+                "PR #{}: diagram skipped, no AI backend: {e:#}",
+                job.pr.number
+            );
+            return;
+        }
+    };
+    let section =
+        crate::diagrams::comment_section(config, &ai, db, gh, &job.pr, Some(&job.diff), job.apply)
+            .await;
+    if section.is_none() || section == job.posted_section {
+        return;
+    }
+    let comment = format_analysis_comment(&job.analysis, config, section.as_deref());
+    if job.apply {
+        let head = db
+            .get_pull(job.pr.number)
+            .ok()
+            .flatten()
+            .and_then(|p| p.head_sha);
+        if head != job.pr.head_sha {
+            info!(
+                "PR #{}: new head since the analysis, stale diagram not posted",
+                job.pr.number
+            );
+            return;
+        }
+        match gh.comment_pr(job.pr.number, &comment).await {
+            Ok(()) => info!(
+                "PR #{}: architecture diagram added to the analysis comment",
+                job.pr.number
+            ),
+            Err(e) => tracing::warn!("PR #{}: could not add the diagram: {e:#}", job.pr.number),
+        }
+    } else if job.preview {
+        println!(
+            "--- comment preview, updated with the diagram (dry-run, not posted) ---\n{comment}\n--- end of preview ---"
+        );
+    }
+}
+
 #[derive(Serialize)]
 struct PrAnalysisOutput {
     pr_number: u64,
@@ -20,6 +123,8 @@ struct PrAnalysisOutput {
     analysis: PrAnalysis,
 }
 
+/// CLI entry point: a single-PR dry-run previews the comment (and its
+/// diagram); with `--apply` the diagram step runs right after posting.
 pub async fn run(
     config: &Config,
     db: &dyn DatabaseBackend,
@@ -28,6 +133,24 @@ pub async fn run(
     json: bool,
     exporter: Option<&ExportManager>,
 ) -> Result<()> {
+    let opts = RunOptions {
+        preview: args.pr.is_some() && !args.apply && !json,
+        diagrams: DiagramMode::Inline,
+    };
+    run_with(config, db, gh, args, json, exporter, opts).await?;
+    Ok(())
+}
+
+/// Analyze PRs. Returns the deferred diagram jobs (`DiagramMode::Deferred`).
+pub async fn run_with(
+    config: &Config,
+    db: &dyn DatabaseBackend,
+    gh: &GhClient,
+    args: &PrArgs,
+    json: bool,
+    exporter: Option<&ExportManager>,
+    opts: RunOptions,
+) -> Result<Vec<DiagramJob>> {
     let model = config.model_for("pr");
     let ai = AiBackend::from_config(config, model)?;
 
@@ -44,7 +167,7 @@ pub async fn run(
                 } else {
                     println!("PR #{number} not found in cache. Run `wshm sync` first.");
                 }
-                return Ok(());
+                return Ok(Vec::new());
             }
         }
     } else {
@@ -57,7 +180,7 @@ pub async fn run(
         } else {
             println!("No PRs to analyze.");
         }
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // Polling mode has no `closed` webhook: drop diagrams of closed PRs here.
@@ -65,8 +188,7 @@ pub async fn run(
         crate::diagrams::sweep(config, db, gh).await;
     }
 
-    // A single-PR dry-run prints the comment it would post.
-    let preview = args.pr.is_some() && !args.apply && !json;
+    let mut jobs: Vec<DiagramJob> = Vec::new();
     let mut results: Vec<PrAnalysisOutput> = Vec::with_capacity(pulls.len());
 
     for pr in &pulls {
@@ -76,8 +198,17 @@ pub async fn run(
         }
 
         info!("Analyzing PR #{}: {}", pr.number, pr.title);
-        match analyze_pr(config, &ai, db, gh, pr, args.apply, preview, exporter).await {
-            Ok(analysis) => {
+        match analyze_pr(config, &ai, db, gh, pr, args.apply, opts.preview, exporter).await {
+            Ok((analysis, job)) => {
+                // The diagram never runs in a dry-run unless explicitly
+                // previewed: no AI spent on a comment nobody will see.
+                if let Some(job) = job.filter(|j| j.apply || j.preview) {
+                    match opts.diagrams {
+                        DiagramMode::Inline => finish_diagram(config, db, gh, job).await,
+                        DiagramMode::Deferred if job.apply => jobs.push(job),
+                        _ => {}
+                    }
+                }
                 if !json {
                     print_analysis(pr, &analysis, args.apply);
                 }
@@ -108,7 +239,7 @@ pub async fn run(
         println!("{}", serde_json::to_string_pretty(&results)?);
     }
 
-    Ok(())
+    Ok(jobs)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -121,7 +252,7 @@ async fn analyze_pr(
     apply: bool,
     preview: bool,
     exporter: Option<&ExportManager>,
-) -> Result<PrAnalysis> {
+) -> Result<(PrAnalysis, Option<DiagramJob>)> {
     // Content hash cache: skip LLM call if content hasn't changed since last
     // analysis. The hash covers title + body + head_sha + labels, so a new
     // push (head_sha change) or an edit re-triggers analysis, but a no-op
@@ -147,15 +278,18 @@ async fn analyze_pr(
                 .as_deref()
                 .and_then(|n| serde_json::from_str(n).ok())
                 .unwrap_or_default();
-            return Ok(PrAnalysis {
-                summary: existing.summary,
-                risk_level: existing.risk_level,
-                pr_type: existing.pr_type,
-                linked_issues: Vec::new(),
-                review_checklist,
-                suggested_labels: Vec::new(),
-                domains: existing.domains,
-            });
+            return Ok((
+                PrAnalysis {
+                    summary: existing.summary,
+                    risk_level: existing.risk_level,
+                    pr_type: existing.pr_type,
+                    linked_issues: Vec::new(),
+                    review_checklist,
+                    suggested_labels: Vec::new(),
+                    domains: existing.domains,
+                },
+                None,
+            ));
         }
     }
 
@@ -262,9 +396,10 @@ async fn analyze_pr(
     // Account for the LLM call — advisory, never fail the pipeline.
     let _ = db.record_llm_invocation("pr_analysis", None);
 
-    // Architecture diagram (`[pr.review_diagrams]`), fail-soft.
-    let diagram =
-        crate::diagrams::comment_section(config, ai, db, gh, pr, diff.as_deref(), apply).await;
+    // Architecture diagram (`[pr.review_diagrams]`): only a cached one here
+    // (DB read, no AI). Generation is a separate, bounded step that runs
+    // after the comment is posted (see `DiagramJob`).
+    let diagram = crate::diagrams::cached_section(config, db, pr, diff.as_deref());
 
     // Store in DB
     let now = chrono::Utc::now().to_rfc3339();
@@ -345,7 +480,15 @@ async fn analyze_pr(
         );
     }
 
-    Ok(analysis)
+    let job = diff.map(|diff| DiagramJob {
+        pr: pr.clone(),
+        diff,
+        analysis: analysis.clone(),
+        posted_section: diagram,
+        apply,
+        preview,
+    });
+    Ok((analysis, job))
 }
 
 /// `diagram`: the "Architecture" section, inserted before the checklist (or

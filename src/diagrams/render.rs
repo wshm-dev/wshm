@@ -67,6 +67,30 @@ fn words(lang: &str) -> &'static Words {
     }
 }
 
+/// Markdown prose (on top of [`clean_text`]), for the comment only: no
+/// issue/PR cross-reference (`#12`, `owner/repo#12`, `GH-12`), no HTML
+/// entity (so `&#64;bob` cannot become a mention), no bare autolink and no
+/// `[`/`]` (reference links). Not for code spans, which GitHub renders
+/// verbatim anyway.
+fn md_text(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    for (i, &c) in chars.iter().enumerate() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '[' => out.push_str("\\["),
+            ']' => out.push_str("\\]"),
+            '#' if chars.get(i + 1).is_some_and(|n| n.is_ascii_digit()) => {
+                out.push_str("#\u{200B}")
+            }
+            _ => out.push(c),
+        }
+    }
+    out.replace("://", ":\u{200B}//")
+        .replace("www.", "www\u{200B}.")
+        .replace("GH-", "GH\u{200B}-")
+}
+
 /// Text inside a quoted Mermaid label. Strings are already clean, this is
 /// defense in depth for graphs read back from the cache; `#` would start a
 /// Mermaid entity code.
@@ -250,7 +274,7 @@ pub fn comment_section(g: &Graph, o: &SectionOptions) -> Option<String> {
     }
 
     if !g.story.is_empty() {
-        out.push_str(&clean_text(&g.story, 1000));
+        out.push_str(&md_text(&clean_text(&g.story, 1000)));
         out.push_str("\n\n");
     }
     // Link-only fallback: forge without Mermaid, or a graph too big for the cap.
@@ -273,7 +297,7 @@ pub fn comment_section(g: &Graph, o: &SectionOptions) -> Option<String> {
         g.nodes
             .iter()
             .find(|n| n.id == id)
-            .map(|n| clean_text(&n.label, 40))
+            .map(|n| md_text(&clean_text(&n.label, 40)))
             .unwrap_or_default()
     };
     out.push_str(&format!(
@@ -289,7 +313,7 @@ pub fn comment_section(g: &Graph, o: &SectionOptions) -> Option<String> {
         } else {
             format!(" (`{label}`)")
         };
-        let caption = clean_text(&e.caption, 400);
+        let caption = md_text(&clean_text(&e.caption, 400));
         let caption = if caption.is_empty() {
             String::new()
         } else {
@@ -328,8 +352,8 @@ pub fn comment_section(g: &Graph, o: &SectionOptions) -> Option<String> {
             };
             out.push_str(&format!(
                 "| **{}** | {file} | {status} | {} |\n",
-                clean_text(&n.label, 40),
-                clean_text(&n.summary, 140)
+                md_text(&clean_text(&n.label, 40)),
+                md_text(&clean_text(&n.summary, 140))
             ));
         }
         out.push_str("\n</details>\n");
@@ -527,6 +551,20 @@ mod tests {
         .unwrap();
         assert!(!s.contains("javascript"));
         assert!(!s.contains("shields.io"));
+    }
+
+    #[test]
+    fn markdown_prose_has_no_references_entities_or_autolinks() {
+        let s = md_text("Fixes #12 and o/r#3, GH-4, &#64;bob, see https://e.x or www.e.x [a]: b");
+        assert!(!s.contains("#1") && !s.contains("#3"), "{s}");
+        assert!(!s.contains("GH-4"));
+        assert!(
+            !s.contains("&#64;") && s.contains("&amp;#"),
+            "entity not decodable: {s}"
+        );
+        assert!(!s.contains("https://") && !s.contains("www.e"));
+        assert!(s.contains("\\[a\\]"));
+        assert_eq!(md_text("plain words"), "plain words");
     }
 
     #[test]

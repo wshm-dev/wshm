@@ -1,0 +1,380 @@
+import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import { createRoot } from "react-dom/client";
+import { ReactFlow, ReactFlowProvider, useReactFlow, Background, Controls, MiniMap, Panel, Handle, Position, BaseEdge, EdgeLabelRenderer } from "@xyflow/react";
+import dagre from "@dagrejs/dagre";
+import htm from "htm";
+import { Diff2HtmlUI } from "./diff-ui.js";
+const html = htm.bind(React.createElement);
+// Page data: a non-executable JSON block (no inline script, strict CSP).
+const DATA = JSON.parse(document.getElementById("wshm-data").textContent);
+const G = DATA.graph;
+
+const FIT_ALL = { top: "64px", right: "24px", bottom: "24px", left: "24px" }, FIT_FOCUS = { top: "90px", right: "15%", bottom: "15%", left: "15%" };
+const W = 250, H = 96, PITCH_TB = 204, PITCH_LR = 380, GAP = 26;
+const M = DATA.meta || {};
+const T = (M.lang === "en") ? {
+  status: { new: "new", modified: "modified", unchanged: "unchanged" }, search: "Search a component", lanes: "Lanes", showLanes: "Show lanes",
+  options: "Options", orient: "Orientation", vertical: "Vertical", horizontal: "Horizontal", filtered: "Filtered items", dim: "Dim", hide: "Hide",
+  display: "Display", edgeNames: "Call names on links", summaries: "Summary in boxes", lanesOpt: "Lanes", minimap: "Minimap", autozoom: "Auto-zoom on click",
+  all: "Show all", text: "Text", smaller: "Smaller text", reset: "Default size", bigger: "Bigger text", hidePanel: "Hide panel", walk: "Walkthrough",
+  prev: "Previous step (←)", next: "Next step (→)", component: "Component", step: "step", textBtn: "⟨ text", split: "Drag to resize · double-click: default size",
+  hint: "Click a step or a component: the diagram zooms in. Esc or a click on the background to see everything. Arrow keys to move through the steps."
+} : {
+  status: { new: "nouveau", modified: "modifié", unchanged: "inchangé" }, search: "Rechercher un composant", lanes: "Bandes", showLanes: "Afficher les bandes",
+  options: "Options", orient: "Orientation", vertical: "Verticale", horizontal: "Horizontale", filtered: "Éléments filtrés", dim: "Estomper", hide: "Masquer",
+  display: "Affichage", edgeNames: "Noms des appels sur les liens", summaries: "Résumé dans les blocs", lanesOpt: "Bandes", minimap: "Mini-carte", autozoom: "Zoom auto au clic",
+  all: "Tout voir", text: "Texte", smaller: "Texte plus petit", reset: "Taille par défaut", bigger: "Texte plus grand", hidePanel: "Masquer le panneau", walk: "Le parcours",
+  prev: "Étape précédente (←)", next: "Étape suivante (→)", component: "Composant", step: "étape", textBtn: "⟨ texte", split: "Glisser pour redimensionner · double-clic : taille par défaut",
+  hint: "Clique une étape ou un composant : le schéma zoome dessus. Échap ou clic dans le vide pour tout revoir. Flèches du clavier pour avancer."
+};
+const STATUS = T.status;
+Object.assign(T, M.lang === "en"
+  ? { diff: "diff", showDiff: "Show the diff", noDiff: "Not changed by this PR: no diff.", unified: "Unified", split: "Side by side", onGh: "Open on GitHub ↗", close: "Close (Esc)", files: "files", file: "file" }
+  : { diff: "diff", showDiff: "Voir le diff", noDiff: "Pas modifié par cette PR : pas de diff.", unified: "Unifié", split: "Côte à côte", onGh: "Ouvrir sur GitHub ↗", close: "Fermer (Échap)", files: "fichiers", file: "fichier" });
+// Split the PR diff per file and map each component to its files.
+const DIFF_FILES = (() => {
+  const out = []; let cur = null;
+  for (const line of (DATA.diff || "").split("\n")) {
+    if (line.startsWith("diff --git ")) { cur = { path: line.split(" b/").pop(), text: "", add: 0, del: 0 }; out.push(cur); }
+    if (!cur) continue;
+    cur.text += line + "\n";
+    if (line.startsWith("+") && !line.startsWith("+++")) cur.add++;
+    else if (line.startsWith("-") && !line.startsWith("---")) cur.del++;
+  }
+  return out;
+})();
+const filesFor = n => {
+  if (!M.diff || n.status === "unchanged") return [];
+  const toks = (n.files || [n.file]).join(" ").replace(/[()]/g, " ").split(/[\s,;]+/).filter(t => t.includes(".") || t.includes("/"));
+  return DIFF_FILES.filter(f => toks.some(t => f.path === t || f.path.endsWith("/" + t) || (t.includes("/") && f.path.startsWith(t.replace(/\/$/, "") + "/"))));
+};
+const ghLink = async path => {
+  const base = `https://github.com/${M.repo}/pull/${M.pr}/files`;
+  try { const h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(path)); return base + "#diff-" + [...new Uint8Array(h)].map(b => b.toString(16).padStart(2, "0")).join(""); } catch { return base; }
+};
+const DIFF_BY_NODE = Object.fromEntries((G.nodes || []).map(n => [n.id, filesFor(n)]));
+const md = s => (s || "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])).replace(/`([^`]+)`/g, '<code class="i">$1</code>');
+const store = { get(k, d) { try { const v = localStorage.getItem("wshm-graph-" + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+                set(k, v) { try { localStorage.setItem("wshm-graph-" + k, JSON.stringify(v)); } catch {} } };
+
+const byId = Object.fromEntries(G.nodes.map(n => [n.id, n]));
+const steps = G.edges.map((e, i) => ({ ...e, id: "e" + i })).filter(e => byId[e.source] && byId[e.target]).sort((a, b) => a.step - b.step);
+
+// Normalize rows: a callee is always strictly below its caller, whatever the model said.
+const row = Object.fromEntries(G.nodes.map(n => [n.id, n.layer | 0]));
+for (let pass = 0; pass < G.nodes.length; pass++) {
+  let moved = false;
+  steps.forEach(e => { if (row[e.target] <= row[e.source]) { row[e.target] = row[e.source] + 1; moved = true; } });
+  if (!moved) break;
+}
+{ const used = [...new Set(Object.values(row))].sort((a, b) => a - b); const remap = Object.fromEntries(used.map((r, i) => [r, i])); for (const k in row) row[k] = remap[row[k]]; }
+const nRows = Math.max(...Object.values(row)) + 1;
+const rowName = Array.from({ length: nRows }, (_, r) => {
+  const names = [...new Set(G.nodes.filter(n => row[n.id] === r).map(n => G.layers[n.layer] || ""))].filter(Boolean);
+  return names.join(" · ");
+});
+const laneNames = [...new Set(G.nodes.map(n => G.layers[n.layer]).filter(Boolean))];
+const neighbours = id => [id, ...steps.filter(e => e.source === id).map(e => e.target), ...steps.filter(e => e.target === id).map(e => e.source)];
+
+function layout(orient) {
+  const tb = orient === "TB";
+  const g = new dagre.graphlib.Graph();
+  g.setGraph({ rankdir: orient, nodesep: tb ? 70 : 40, ranksep: tb ? PITCH_TB - H : PITCH_LR - W, edgesep: 30 });
+  g.setDefaultEdgeLabel(() => ({}));
+  G.nodes.forEach(n => g.setNode(n.id, { width: W, height: H }));
+  steps.forEach(e => g.setEdge(e.source, e.target, { minlen: row[e.target] - row[e.source] }));
+  dagre.layout(g);
+  const pos = {};
+  G.nodes.forEach(n => {
+    const p = g.node(n.id);
+    pos[n.id] = tb ? { x: p.x - W / 2, y: row[n.id] * PITCH_TB + 40 } : { x: row[n.id] * PITCH_LR + 40, y: p.y - H / 2 };
+  });
+  for (let r = 0; r < nRows; r++) {
+    const k = tb ? "x" : "y", size = tb ? W + 50 : H + 40;
+    const rr = G.nodes.filter(n => row[n.id] === r).sort((a, b) => pos[a.id][k] - pos[b.id][k]);
+    for (let i = 1; i < rr.length; i++) pos[rr[i].id][k] = Math.max(pos[rr[i].id][k], pos[rr[i - 1].id][k] + size);
+  }
+  const corridor = {};
+  steps.forEach(e => { const pts = g.edge(e.source, e.target)?.points || []; corridor[e.id] = pts.length > 2 ? (tb ? pts[Math.floor(pts.length / 2)].x : pts[Math.floor(pts.length / 2)].y) : null; });
+  return { pos, corridor };
+}
+
+const slots = {};
+steps.forEach(e => { (slots[e.source] ??= { out: [], in: [] }).out.push(e.id); (slots[e.target] ??= { out: [], in: [] }).in.push(e.id); });
+const slotPct = (list, id) => ((list.indexOf(id) + 1) / (list.length + 1)) * 100;
+
+function Lane({ data }) {
+  return html`<div className=${"lane " + (data.lr ? "lr" : "")} style=${{ width: data.w + "px", height: data.h + "px" }}><span>${data.name}</span></div>`;
+}
+
+function Comp({ data }) {
+  const n = data.n, s = slots[n.id] || { in: [], out: [] }, lr = data.lr;
+  const cls = `node st-${n.status} ${data.on ? "on" : ""} ${data.hit ? "hit" : ""} ${data.fade ? "fade" : ""}`;
+  const hs = (list, id) => lr ? { top: slotPct(list, id) + "%", opacity: 0 } : { left: slotPct(list, id) + "%", opacity: 0 };
+  return html`<div className=${cls}>
+    ${s.in.map(id => html`<${Handle} key=${id} id=${id} type="target" position=${lr ? Position.Left : Position.Top} style=${hs(s.in, id)} />`)}
+    <div className="top"><span className="file" title=${n.file}>${n.file}</span><span className=${"st " + n.status}>${STATUS[n.status]}</span></div>
+    <div style=${{ display: "flex", alignItems: "baseline", gap: "6px" }}><div className="name">${n.label}</div>
+      ${(DIFF_BY_NODE[n.id] || []).length > 0 && html`<button className="dchip nodrag" title=${T.showDiff} onClick=${ev => { ev.stopPropagation(); data.openDiff(n.id); }}>
+        ${T.diff} <span className="a">+${DIFF_BY_NODE[n.id].reduce((a, f) => a + f.add, 0)}</span> <span className="d">−${DIFF_BY_NODE[n.id].reduce((a, f) => a + f.del, 0)}</span></button>`}</div>
+    ${data.summaries && html`<div className="sum">${n.summary}</div>`}
+    ${s.out.map(id => html`<${Handle} key=${id} id=${id} type="source" position=${lr ? Position.Right : Position.Bottom} style=${hs(s.out, id)} />`)}
+  </div>`;
+}
+
+function ortho(pts, r = 8) {
+  let d = `M ${pts[0][0]} ${pts[0][1]}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [x0, y0] = pts[i - 1], [x1, y1] = pts[i], [x2, y2] = pts[i + 1];
+    const d1 = Math.hypot(x1 - x0, y1 - y0), d2 = Math.hypot(x2 - x1, y2 - y1);
+    if (d1 < 0.5 || d2 < 0.5) continue;
+    const rr = Math.min(r, d1 / 2, d2 / 2);
+    d += ` L ${x1 - (x1 - x0) / d1 * rr} ${y1 - (y1 - y0) / d1 * rr} Q ${x1} ${y1} ${x1 + (x2 - x1) / d2 * rr} ${y1 + (y2 - y1) / d2 * rr}`;
+  }
+  const l = pts[pts.length - 1];
+  return d + ` L ${l[0]} ${l[1]}`;
+}
+
+// Route in (cross, main) coordinates, then map to x/y for the orientation.
+function StepEdge({ id, sourceX, sourceY, targetX, targetY, data }) {
+  const { e, on, fade, lr, labels } = data;
+  const [sa, sb, ta, tb] = lr ? [sourceY, sourceX, targetY, targetX - 2] : [sourceX, sourceY, targetX, targetY - 2];
+  const c = data.corridor;
+  // each connector gets its own horizontal track (no shared or stacked strokes)
+  const y1 = sb + 28 + data.kOut * 10, y2 = tb - 16 - data.kIn * 10;
+  const ab = (c != null && Math.abs(c - sa) > 4)
+    ? [[sa, sb], [sa, y1], [c, y1], [c, y2], [ta, y2], [ta, tb]]
+    : [[sa, sb], [sa, y2], [ta, y2], [ta, tb]];
+  const pts = ab.map(([a, b]) => lr ? [b, a] : [a, b]);
+  const hot = on || e.status === "new";
+  const [bx, by] = lr ? [sb + 14, sa] : [sa, sb + 13];
+  return html`<g style=${{ opacity: fade ? 0.15 : 1, transition: "opacity .2s" }}>
+    <${BaseEdge} id=${id} path=${ortho(pts)} markerEnd=${hot ? "url(#m-accent)" : "url(#m-muted)"}
+      style=${{ stroke: hot ? "#bf4520" : "#4f5d75", strokeWidth: on ? 2.4 : 1.4, strokeDasharray: e.status === "unchanged" ? "5 4" : undefined }} />
+    <${EdgeLabelRenderer}>
+      <div className=${`badge nodrag nopan ${lr ? "lr" : ""} ${on ? "on" : ""} ${fade ? "fade" : ""}`} onClick=${() => data.pick(e.step)}
+        style=${{ transform: `translate(-11px, -11px) translate(${bx}px, ${by}px)` }}>
+        <span className="num">${e.step}</span>${labels && html`<span className="lbl" title=${e.label} style=${{ maxWidth: (lr ? 120 : Math.max(40, W / (data.nOut + 1) - 34)) + "px", overflow: "hidden", textOverflow: "ellipsis" }}>${e.label}</span>`}
+      </div>
+    </${EdgeLabelRenderer}>
+  </g>`;
+}
+const nodeTypes = { comp: Comp, lane: Lane };
+const edgeTypes = { step: StepEdge };
+
+function Dropdown({ label, children }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef();
+  useEffect(() => { const f = ev => { if (ref.current && !ref.current.contains(ev.target)) setOpen(false); }; document.addEventListener("mousedown", f); return () => document.removeEventListener("mousedown", f); }, []);
+  return html`<div className="dd" ref=${ref}><button className=${"sm " + (open ? "on" : "")} onClick=${() => setOpen(!open)}>${label} ▾</button>${open && html`<div className="menu">${children}</div>`}</div>`;
+}
+const Check = ({ on, set, children }) => html`<label><input type="checkbox" checked=${on} onChange=${ev => set(ev.target.checked)} />${children}</label>`;
+
+function DiffDrawer({ node, files, h, setH, close }) {
+  const ref = useRef();
+  const [fmt, setFmt] = useState(() => store.get("diffFmt", "line-by-line"));
+  const [links, setLinks] = useState({});
+  useEffect(() => {
+    if (!ref.current) return;
+    const ui = new Diff2HtmlUI(ref.current, files.map(f => f.text).join(""), {
+      outputFormat: fmt, drawFileList: files.length > 1, fileListToggle: true, fileListStartVisible: false, fileContentToggle: true,
+      matching: "lines", highlight: true, synchronisedScroll: true, stickyFileHeaders: true, colorScheme: "light" });
+    ui.draw(); ui.highlightCode();
+  }, [node.id, fmt]);
+  useEffect(() => { Promise.all(files.map(f => ghLink(f.path).then(u => [f.path, u]))).then(kv => setLinks(Object.fromEntries(kv))); }, [node.id]);
+  const drag = ev => {
+    ev.preventDefault();
+    const y0 = ev.clientY, h0 = h, box = ref.current.closest(".canvas").getBoundingClientRect();
+    const mv = e => setH(Math.min(box.height - 60, Math.max(160, h0 + (y0 - e.clientY))));
+    const up = () => { window.removeEventListener("mousemove", mv); window.removeEventListener("mouseup", up); setH(v => { store.set("diffH", v); return v; }); };
+    window.addEventListener("mousemove", mv); window.addEventListener("mouseup", up);
+  };
+  const add = files.reduce((a, f) => a + f.add, 0), del = files.reduce((a, f) => a + f.del, 0);
+  return html`<div className="drawer" style=${{ height: h + "px" }}>
+    <div className="grip" onMouseDown=${drag}></div>
+    <div className="dhead">
+      <b>${node.label}</b><span className="meta">${files.length} ${files.length > 1 ? T.files : T.file} · <span style=${{ color: "#1a7f37" }}>+${add}</span> <span style=${{ color: "#cf222e" }}>−${del}</span></span>
+      ${files.map(f => html`<a key=${f.path} href=${links[f.path] || "#"} target="_blank" rel="noopener" title=${T.onGh}>${f.path.split("/").pop()} ↗</a>`)}
+      <span className="sp"></span>
+      <div className="seg" style=${{ margin: 0 }}>
+        <button className=${fmt === "line-by-line" ? "on" : ""} onClick=${() => { setFmt("line-by-line"); store.set("diffFmt", "line-by-line"); }}>${T.unified}</button>
+        <button className=${fmt === "side-by-side" ? "on" : ""} onClick=${() => { setFmt("side-by-side"); store.set("diffFmt", "side-by-side"); }}>${T.split}</button>
+      </div>
+      <button className="sm" title=${T.close} onClick=${close}>×</button>
+    </div>
+    <div className="dbody" ref=${ref}></div>
+  </div>`;
+}
+
+function Graph() {
+  const rf = useReactFlow();
+  const [opt, setOptRaw] = useState(() => ({ orient: "TB", labels: true, summaries: true, lanes: true, minimap: true, autozoom: true, hide: false, ...store.get("opt", {}) }));
+  const setOpt = patch => setOptRaw(o => { const n = { ...o, ...patch }; store.set("opt", n); return n; });
+  const [status, setStatus] = useState({ new: true, modified: true, unchanged: true });
+  const [lanesOn, setLanesOn] = useState(() => Object.fromEntries(laneNames.map(l => [l, true])));
+  const [q, setQ] = useState("");
+  const [active, setActive] = useState(() => +(/step=(\d+)/.exec(location.hash)?.[1] || 0) || null);
+  const [sel, setSel] = useState(null);
+  const [panelW, setPanelW] = useState(() => store.get("panelW", 380));
+  const [panelOpen, setPanelOpen] = useState(() => store.get("panelOpen", true));
+  const [fs, setFs] = useState(() => store.get("fs", 1));
+  const lr = opt.orient === "LR";
+  const [diffNode, setDiffNode] = useState(null);
+  const [diffH, setDiffH] = useState(() => store.get("diffH", 360));
+  const openDiff = id => { setDiffNode(id); setSel(id); };
+
+  const { pos, corridor } = useMemo(() => layout(opt.orient), [opt.orient]);
+  const visible = useMemo(() => {
+    const ql = q.trim().toLowerCase();
+    return Object.fromEntries(G.nodes.map(n => [n.id, status[n.status] && lanesOn[G.layers[n.layer]] !== false]));
+  }, [status, lanesOn, q]);
+  const hits = useMemo(() => { const ql = q.trim().toLowerCase(); return ql ? G.nodes.filter(n => (n.label + " " + n.file + " " + n.summary).toLowerCase().includes(ql)).map(n => n.id) : []; }, [q]);
+  const cur = steps.find(s => s.step === active);
+  const stepVisible = s => visible[s.source] && visible[s.target];
+
+  const zoomTo = useCallback((ids, force) => {
+    if (!opt.autozoom && !force) return;
+    const list = (ids && ids.length ? ids : G.nodes.filter(n => visible[n.id]).map(n => n.id)).map(id => ({ id }));
+    setTimeout(() => rf.fitView({ nodes: list, padding: ids && ids.length ? FIT_FOCUS : FIT_ALL, duration: 450, maxZoom: 1.25 }), 30);
+  }, [rf, opt.autozoom, visible]);
+
+  const pick = st => {
+    setActive(st);
+    const s = steps.find(x => x.step === st);
+    if (s) { setSel(s.target); zoomTo([s.source, s.target]); } else zoomTo(null);
+  };
+  const selectNode = id => {
+    setSel(id); setActive(null);
+    if (!opt.autozoom) return;
+    const nd = rf.getInternalNode(id), w = nd?.measured?.width || W, h = nd?.measured?.height || H;
+    if (nd) rf.setCenter(nd.internals.positionAbsolute.x + w / 2, nd.internals.positionAbsolute.y + h / 2, { zoom: 1.3, duration: 450 });
+  };
+  const showAll = () => { setActive(null); setSel(null); zoomTo(null, true); };
+
+  useEffect(() => { const s0 = steps.find(x => x.step === active); zoomTo(s0 ? [s0.source, s0.target] : null, true); }, [opt.orient, status, lanesOn, opt.hide]);
+  useEffect(() => {
+    const k = ev => {
+      if (ev.target.tagName === "INPUT") return;
+      const vis = steps.filter(stepVisible).map(s => s.step);
+      const i = vis.indexOf(active);
+      if (ev.key === "ArrowRight" || ev.key === "ArrowDown") { ev.preventDefault(); pick(vis[Math.min(vis.length - 1, i + 1)]); }
+      if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") { ev.preventDefault(); pick(vis[Math.max(0, i - 1)]); }
+      if (ev.key === "Escape") { if (diffNode) setDiffNode(null); else showAll(); }
+    };
+    window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k);
+  });
+
+  // splitter
+  const dragging = useRef(false);
+  const [drag, setDrag] = useState(false);
+  useEffect(() => {
+    const move = ev => { if (!dragging.current) return; const w = Math.min(Math.max(window.innerWidth - ev.clientX, 260), window.innerWidth * 0.65); setPanelW(w); };
+    const up = () => { if (dragging.current) { dragging.current = false; setDrag(false); setPanelW(w => { store.set("panelW", w); return w; }); } };
+    window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
+    return () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+  }, []);
+  const togglePanel = () => setPanelOpen(o => { store.set("panelOpen", !o); return !o; });
+  const setFont = v => { const f = Math.min(1.4, Math.max(0.8, Math.round(v * 10) / 10)); setFs(f); store.set("fs", f); };
+
+  const xs = Object.values(pos).map(p => p.x), ys = Object.values(pos).map(p => p.y);
+  const minX = Math.min(...xs) - (lr ? 20 : 150), maxX = Math.max(...xs) + W + 40, minY = Math.min(...ys) - 40, maxY = Math.max(...ys) + H + 40;
+  const lanes = opt.lanes ? rowName.map((name, r) => lr
+      ? { id: "lane" + r, type: "lane", position: { x: r * PITCH_LR + 20, y: minY - 10 }, width: PITCH_LR, height: maxY - minY + 10, data: { name, w: PITCH_LR, h: maxY - minY + 10, lr }, draggable: false, selectable: false, focusable: false, zIndex: -1 }
+      : { id: "lane" + r, type: "lane", position: { x: minX, y: r * PITCH_TB + 4 }, width: maxX - minX, height: PITCH_TB, data: { name, w: maxX - minX, h: PITCH_TB, lr }, draggable: false, selectable: false, focusable: false, zIndex: -1 }) : [];
+  const nodes = lanes.concat(G.nodes.map(n => {
+    const vis = visible[n.id];
+    const on = sel === n.id || (cur && (cur.source === n.id || cur.target === n.id));
+    return { id: n.id, type: "comp", position: pos[n.id], width: W, height: opt.summaries ? H : 66, hidden: opt.hide && !vis,
+      data: { n, lr, summaries: opt.summaries, openDiff, on, hit: hits.includes(n.id), fade: !vis || (cur && !on) || (hits.length > 0 && !hits.includes(n.id)) } };
+  }));
+  const edges = steps.map(e => ({ id: e.id, source: e.source, target: e.target, sourceHandle: e.id, targetHandle: e.id, type: "step",
+    hidden: opt.hide && !stepVisible(e),
+    data: { e, lr, labels: opt.labels, corridor: corridor[e.id], kOut: slots[e.source].out.indexOf(e.id), nOut: slots[e.source].out.length, kIn: slots[e.target].in.indexOf(e.id), on: active === e.step, fade: !stepVisible(e) || (active != null && active !== e.step), pick } }));
+  const count = st => G.nodes.filter(n => n.status === st).length;
+  const n = sel && byId[sel];
+  const visSteps = steps.filter(stepVisible).map(s => s.step);
+  const ai = visSteps.indexOf(active);
+
+  return html`<main>
+    <div className="canvas">
+      <${ReactFlow} nodes=${nodes} edges=${edges} nodeTypes=${nodeTypes} edgeTypes=${edgeTypes} fitView fitViewOptions=${{ padding: FIT_ALL }}
+          minZoom=${0.2} nodesConnectable=${false}
+          onNodeClick=${(_, nd) => nd.type === "comp" && selectNode(nd.id)} onPaneClick=${showAll}>
+        <svg style=${{ position: "absolute", width: 0, height: 0 }}><defs>
+          <marker id="m-muted" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75" /></marker>
+          <marker id="m-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520" /></marker>
+        </defs></svg>
+        <${Panel} position="top-left">
+          <div className="bar">
+            <input type="search" placeholder=${T.search} value=${q} onChange=${ev => setQ(ev.target.value)}
+              onKeyDown=${ev => { if (ev.key === "Enter" && hits.length) zoomTo(hits, true); }} />
+            <span className="sep"></span>
+            ${["new", "modified", "unchanged"].map(st => html`<button key=${st} className=${`chip ${st} ${status[st] ? "on" : ""}`} onClick=${() => setStatus({ ...status, [st]: !status[st] })}>
+              <span className="dot"></span>${STATUS[st]} <span className="n">${count(st)}</span></button>`)}
+            <span className="sep"></span>
+            <${Dropdown} label=${T.lanes}>
+              <h4>${T.showLanes}</h4>
+              ${laneNames.map(l => html`<${Check} key=${l} on=${lanesOn[l]} set=${v => setLanesOn({ ...lanesOn, [l]: v })}>${l}</${Check}>`)}
+            </${Dropdown}>
+            <${Dropdown} label=${T.options}>
+              <h4>${T.orient}</h4>
+              <div className="seg"><button className=${!lr ? "on" : ""} onClick=${() => setOpt({ orient: "TB" })}>${T.vertical}</button><button className=${lr ? "on" : ""} onClick=${() => setOpt({ orient: "LR" })}>${T.horizontal}</button></div>
+              <h4>${T.filtered}</h4>
+              <div className="seg"><button className=${!opt.hide ? "on" : ""} onClick=${() => setOpt({ hide: false })}>${T.dim}</button><button className=${opt.hide ? "on" : ""} onClick=${() => setOpt({ hide: true })}>${T.hide}</button></div>
+              <h4>${T.display}</h4>
+              <${Check} on=${opt.labels} set=${v => setOpt({ labels: v })}>${T.edgeNames}</${Check}>
+              <${Check} on=${opt.summaries} set=${v => setOpt({ summaries: v })}>${T.summaries}</${Check}>
+              <${Check} on=${opt.lanes} set=${v => setOpt({ lanes: v })}>${T.lanesOpt}</${Check}>
+              <${Check} on=${opt.minimap} set=${v => setOpt({ minimap: v })}>${T.minimap}</${Check}>
+              <${Check} on=${opt.autozoom} set=${v => setOpt({ autozoom: v })}>${T.autozoom}</${Check}>
+            </${Dropdown}>
+            <button className="sm" onClick=${showAll} title="Esc">${T.all}</button>
+          </div>
+        </${Panel}>
+        <${Background} gap=${22} size=${1} color="rgba(45,49,66,.14)" />
+        <${Controls} showInteractive=${false} />
+        ${opt.minimap && html`<${MiniMap} pannable zoomable ariaLabel=${T.minimap}
+          nodeColor=${nd => nd.type === "lane" ? "rgba(0,0,0,0)" : nd.data.n.status === "new" ? "#bf4520" : nd.data.n.status === "unchanged" ? "#d5d8de" : "#4f5d75"}
+          nodeStrokeColor=${nd => nd.type === "lane" ? "transparent" : nd.data.on ? "#bf4520" : "transparent"} nodeStrokeWidth=${6}
+          nodeBorderRadius=${6} maskColor="rgba(245,245,245,.65)" maskStrokeColor="#2d3142" maskStrokeWidth=${2}
+          style=${{ width: 180, height: 120, background: "#fff" }} />`}
+      </${ReactFlow}>
+      ${diffNode && html`<${DiffDrawer} node=${byId[diffNode]} files=${DIFF_BY_NODE[diffNode] || []} h=${diffH} setH=${setDiffH} close=${() => setDiffNode(null)} />`}
+    </div>
+    ${panelOpen && html`<div className=${"split " + (drag ? "drag" : "")} title=${T.split}
+        onMouseDown=${ev => { ev.preventDefault(); dragging.current = true; setDrag(true); }}
+        onDoubleClick=${() => { setPanelW(380); store.set("panelW", 380); }}></div>`}
+    <aside className=${panelOpen ? "" : "closed"} style=${{ width: panelW + "px", "--fs": fs }}>
+      <div className="ptools"><span className="lab">${T.text}</span>
+        <button className="sm" onClick=${() => setFont(fs - 0.1)} title=${T.smaller}>A−</button>
+        <button className="sm" onClick=${() => setFont(1)} title=${T.reset}>${Math.round(fs * 100)}%</button>
+        <button className="sm" onClick=${() => setFont(fs + 0.1)} title=${T.bigger}>A+</button>
+        <button className="sm" onClick=${togglePanel} title=${T.hidePanel}>⟩</button>
+      </div>
+      <p className="story" dangerouslySetInnerHTML=${{ __html: md(G.story) }}></p>
+      <p className="sec">${T.walk} <span className="nav">
+        <button className="sm" title=${T.prev} onClick=${() => pick(visSteps[Math.max(0, ai - 1)])}>‹</button>
+        <button className="sm" title=${T.next} onClick=${() => pick(visSteps[Math.min(visSteps.length - 1, ai + 1)])}>›</button></span></p>
+      <ol className="steps">${steps.map(s => html`<li key=${s.id} className=${(active === s.step ? "on " : "") + (stepVisible(s) ? "" : "off")} onClick=${() => pick(active === s.step ? null : s.step)}>
+        <span className="num">${s.step}</span>
+        <div><div className="what">${byId[s.source].label} → ${byId[s.target].label}</div><div className="cap" dangerouslySetInnerHTML=${{ __html: md(s.caption) }}></div></div>
+      </li>`)}</ol>
+      <div className="detail">${n
+        ? html`<p className="sec">${T.component} · ${STATUS[n.status]}</p><h2>${n.label}</h2><code>${n.file}</code><p className="body" dangerouslySetInnerHTML=${{ __html: md(n.detail) }}></p>
+            ${!M.diff && M.files_url && n.status !== "unchanged" && html`<div className="links"><a className="sm on" href=${M.files_url} target="_blank" rel="noopener">${T.onGh}</a></div>`}
+            ${M.diff && html`<div className="links">${(DIFF_BY_NODE[n.id] || []).length ? html`<button className="sm on" onClick=${() => openDiff(n.id)}>${T.showDiff} · ${DIFF_BY_NODE[n.id].length} ${DIFF_BY_NODE[n.id].length > 1 ? T.files : T.file}</button>` : html`<span className="hint">${T.noDiff}</span>`}</div>`}
+            <div className="links">${steps.filter(s => s.source === n.id || s.target === n.id).map(s => html`<button key=${s.id} className="sm" onClick=${() => pick(s.step)}>${T.step} ${s.step} · ${s.label}</button>`)}</div>`
+        : html`<p className="hint">${T.hint}</p>`}
+      </div>
+    </aside>
+    ${!panelOpen && html`<button className="sm" style=${{ position: "absolute", right: "12px", top: "92px", zIndex: 5 }} onClick=${togglePanel}>${T.textBtn}</button>`}
+  </main>`;
+}
+
+function App() {
+  return html`<${React.Fragment}>
+    <header><div><p className="eyebrow">${M.eyebrow || ""}</p><h1>${G.title}</h1></div></header>
+    <${ReactFlowProvider}><${Graph} /></${ReactFlowProvider}>
+  </${React.Fragment}>`;
+}
+createRoot(document.getElementById("root")).render(html`<${App} />`);

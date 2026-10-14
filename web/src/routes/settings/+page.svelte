@@ -417,7 +417,11 @@
 			if (!reset) {
 				body = JSON.parse(JSON.stringify(diagramsDraft)) as DiagramSettings;
 				const p = body.publish as unknown as Record<string, unknown>;
-				for (const k of ['public_url', 'dir', 'pages_repo', 'bucket', 'region', 'endpoint', 'container', 'account']) {
+				// TOML-only: the server rejects them in a per-repo override.
+				delete p.dir;
+				delete p.pages_repo;
+				delete p.allow_private;
+				for (const k of ['public_url', 'bucket', 'region', 'endpoint', 'container', 'account']) {
 					if (typeof p[k] === 'string' && (p[k] as string).trim() === '') p[k] = null;
 				}
 				const int = (v: unknown) => Math.max(0, Math.floor(Number(v) || 0));
@@ -426,6 +430,8 @@
 				body.publish.max_diff_kb = int(body.publish.max_diff_kb);
 				body.active_days = int(body.active_days);
 				body.max_mermaid_chars = int(body.max_mermaid_chars);
+				body.timeout_secs = Math.max(1, int(body.timeout_secs));
+				body.max_summary_calls = int(body.max_summary_calls);
 			}
 			setDiagramsInfo(await updateRepoDiagrams(diagramsRepo, body));
 			diagramsMessage = reset ? 'Override removed: the TOML settings apply.' : 'Saved.';
@@ -1752,6 +1758,14 @@
 									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.max_mermaid_chars} />
 								</div>
 								<div>
+									<Label class="text-xs mb-1">Time budget of the diagram step (seconds)</Label>
+									<Input class="h-8" type="number" min="1" bind:value={diagramsDraft.timeout_secs} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Max summary calls for large diffs</Label>
+									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.max_summary_calls} />
+								</div>
+								<div>
 									<Label class="text-xs mb-1">Kinds</Label>
 									<div class="flex flex-wrap gap-3 text-[0.7rem] text-muted-foreground">
 										{#each DIAGRAM_KINDS as k}
@@ -1810,24 +1824,18 @@
 								</div>
 								{#if diagramsDraft.publish.target === 'local'}
 									<div>
-										<Label class="text-xs mb-1">Directory</Label>
-										<Input
-											class="h-8"
-											placeholder="/var/www/diagrams"
-											value={diagramsDraft.publish.dir ?? ''}
-											oninput={(e) => diagramsDraft && (diagramsDraft.publish.dir = (e.currentTarget as HTMLInputElement).value)}
-										/>
+										<Label class="text-xs mb-1">Directory (TOML only)</Label>
+										<Input class="h-8" disabled value={diagramsDraft.publish.dir ?? '(not set in the TOML)'} />
 									</div>
 								{/if}
 								{#if diagramsDraft.publish.target === 'github-pages'}
 									<div>
-										<Label class="text-xs mb-1">Pages repository (owner/repo)</Label>
-										<Input
-											class="h-8"
-											placeholder="owner/diagrams"
-											value={diagramsDraft.publish.pages_repo ?? ''}
-											oninput={(e) => diagramsDraft && (diagramsDraft.publish.pages_repo = (e.currentTarget as HTMLInputElement).value)}
-										/>
+										<Label class="text-xs mb-1">Pages repository (TOML only)</Label>
+										<Input class="h-8" disabled value={diagramsDraft.publish.pages_repo ?? '(not set in the TOML)'} />
+										<p class="text-[0.7rem] text-muted-foreground mt-1">
+											If this repository is public, its file tree and git history list every page:
+											the random token in the file name does not prevent enumeration there.
+										</p>
 									</div>
 								{/if}
 								{#if ['s3', 'gcs', 'azure'].includes(diagramsDraft.publish.target)}
@@ -1847,8 +1855,8 @@
 									</p>
 								{/if}
 								<label class="flex items-center gap-2 text-xs sm:col-span-2">
-									<input type="checkbox" class="h-4 w-4" bind:checked={diagramsDraft.publish.allow_private} />
-									Allow a public target for a private repository (the page embeds the diff)
+									<input type="checkbox" class="h-4 w-4" disabled checked={diagramsDraft.publish.allow_private} />
+									Allow a public target for a private repository (TOML only: <code>publish.allow_private</code>)
 								</label>
 							</div>
 

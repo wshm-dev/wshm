@@ -48,6 +48,9 @@ pub async fn run(state: Arc<DaemonState>) {
     let mut last_update_check = Instant::now();
     let mut last_retriage = Instant::now();
     let mut last_daily_notify = Instant::now();
+    // PR diagram cleanup (closed PRs, retention, max_pages). Hourly, and on
+    // the first cycle so a restart catches up.
+    let mut last_diagram_sweep: Option<Instant> = None;
     let daily_notify_interval = Duration::from_secs(24 * 3600);
 
     // Failure counters
@@ -82,6 +85,11 @@ pub async fn run(state: Arc<DaemonState>) {
                 state.config.repo_slug()
             );
             break;
+        }
+
+        if diagram_sweep_due(last_diagram_sweep, Instant::now()) {
+            last_diagram_sweep = Some(Instant::now());
+            crate::diagrams::sweep(&state.config, state.db.as_ref(), &state.gh()).await;
         }
 
         let features = state.features();
@@ -239,5 +247,28 @@ pub async fn run(state: Arc<DaemonState>) {
             info!("Daily recap: {} repos active", 1);
             // TODO(pro): Pro notify pipeline sends full digest to Discord/Slack/email
         }
+    }
+}
+
+/// Interval of the PR diagram cleanup sweep.
+const DIAGRAM_SWEEP_EVERY: Duration = Duration::from_secs(3600);
+
+fn diagram_sweep_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|t| now.duration_since(t) >= DIAGRAM_SWEEP_EVERY)
+}
+
+#[cfg(test)]
+mod diagram_sweep_tests {
+    use super::*;
+
+    #[test]
+    fn sweep_runs_first_then_hourly() {
+        let now = Instant::now();
+        assert!(diagram_sweep_due(None, now));
+        assert!(!diagram_sweep_due(Some(now), now + Duration::from_secs(60)));
+        assert!(diagram_sweep_due(
+            Some(now),
+            now + Duration::from_secs(3600)
+        ));
     }
 }

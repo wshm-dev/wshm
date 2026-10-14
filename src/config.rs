@@ -478,6 +478,12 @@ pub struct ReviewDiagramsConfig {
     /// refuse to render more than 5000 by default; above it edge labels,
     /// then unchanged nodes are dropped, then a link replaces the diagram.
     pub max_mermaid_chars: u32,
+    /// Time budget of the whole diagram step (AI calls + publication), in
+    /// seconds. It runs after the analysis comment is posted, in the
+    /// background; past the budget it is abandoned (the AI CLI is killed).
+    pub timeout_secs: u32,
+    /// Max per-file summary AI calls for a large diff (> 40 KB).
+    pub max_summary_calls: u32,
     pub publish: DiagramPublishConfig,
 }
 
@@ -492,6 +498,8 @@ impl Default for ReviewDiagramsConfig {
             diff_viewer: true,
             active_days: 14,
             max_mermaid_chars: 5000,
+            timeout_secs: 120,
+            max_summary_calls: 3,
             publish: DiagramPublishConfig::default(),
         }
     }
@@ -533,14 +541,50 @@ pub fn unknown_json_keys(reference: &serde_json::Value, over: &serde_json::Value
     out
 }
 
+/// `[pr.review_diagrams]` keys that only the TOML may set: where files are
+/// written or committed, and the private-repo safeguard. A per-repo DB
+/// override (editable from the dashboard) must not redirect output or
+/// expose private code.
+pub const REVIEW_DIAGRAMS_TOML_ONLY: &[&str] =
+    &["publish.dir", "publish.pages_repo", "publish.allow_private"];
+
+/// TOML-only keys present in a per-repo override.
+pub fn toml_only_keys(over: &serde_json::Value) -> Vec<String> {
+    REVIEW_DIAGRAMS_TOML_ONLY
+        .iter()
+        .filter(|k| {
+            let mut v = over;
+            for part in k.split('.') {
+                match v.get(part) {
+                    Some(x) => v = x,
+                    None => return false,
+                }
+            }
+            true
+        })
+        .map(|k| k.to_string())
+        .collect()
+}
+
 /// Apply a per-repo override (JSON object, possibly partial) on top of the
-/// TOML value. Errors when the merged value is not a valid config.
+/// TOML value. TOML-only keys in the override are ignored. Errors when the
+/// merged value is not a valid config.
 pub fn apply_review_diagrams_override(
     toml: &ReviewDiagramsConfig,
     over: &serde_json::Value,
 ) -> Result<ReviewDiagramsConfig> {
+    let mut over = over.clone();
+    for k in REVIEW_DIAGRAMS_TOML_ONLY {
+        if let Some((section, key)) = k.split_once('.') {
+            if let Some(obj) = over.get_mut(section).and_then(|v| v.as_object_mut()) {
+                if obj.remove(key).is_some() {
+                    tracing::warn!("review_diagrams DB override: '{k}' is TOML-only, ignored");
+                }
+            }
+        }
+    }
     let mut base = serde_json::to_value(toml)?;
-    merge_json(&mut base, over);
+    merge_json(&mut base, &over);
     Ok(serde_json::from_value(base)?)
 }
 
@@ -2371,18 +2415,23 @@ risk_labels = true
 # diff_viewer = true             # embed the diff in the interactive page
 # active_days = 14               # skip PRs idle for longer (0 = no limit)
 # max_mermaid_chars = 5000       # Mermaid size cap (Forgejo/Gitea default limit)
+# timeout_secs = 120             # budget of the background diagram step
+# max_summary_calls = 3          # per-file summary calls for diffs > 40 KB
 #
 # Interactive page (React Flow viewer). Off by default.
 # [pr.review_diagrams.publish]
 # target = "off"                 # "off" | "local" | "github-pages" | "wshm" | "s3" | "gcs" | "azure"
 # prefix = "wshm-diagrams"
 # public_url = "https://diagrams.example.com"   # link = public_url/prefix/...
-# dir = "/var/www/diagrams"      # local
-# pages_repo = "owner/diagrams"  # github-pages (gh-pages branch, repo token)
+# dir = "/var/www/diagrams"      # local (TOML only)
+# pages_repo = "owner/diagrams"  # github-pages, gh-pages branch, repo token (TOML only).
+#                                # If that repo is public, its tree and git history
+#                                # list every page: the token in the file name does
+#                                # not prevent enumeration there.
 # retention_days = 30            # delete pages idle for longer (0 = until the PR closes)
 # max_pages = 200                # per repo, least recently updated evicted first
 # max_diff_kb = 1024             # bigger diffs: the viewer links to "Files changed"
-# allow_private = false          # allow public targets for a private repo
+# allow_private = false          # allow public targets for a private repo (TOML only)
 
 [queue]
 enabled = true
@@ -2977,6 +3026,22 @@ mod review_diagrams_tests {
         assert!(
             apply_review_diagrams_override(&toml, &serde_json::json!({"text": "huge"})).is_err()
         );
+    }
+
+    #[test]
+    fn toml_only_keys_are_detected_and_ignored() {
+        let over = serde_json::json!({"publish": {"dir": "/etc", "allow_private": true, "target": "local"}});
+        assert_eq!(
+            toml_only_keys(&over),
+            vec!["publish.dir", "publish.allow_private"]
+        );
+        let mut toml = ReviewDiagramsConfig::default();
+        toml.publish.dir = Some("/srv".into());
+        let eff = apply_review_diagrams_override(&toml, &over).unwrap();
+        assert_eq!(eff.publish.dir.as_deref(), Some("/srv"));
+        assert!(!eff.publish.allow_private);
+        assert_eq!(eff.publish.target, DiagramPublishTarget::Local);
+        assert!(toml_only_keys(&serde_json::json!({"text": "full"})).is_empty());
     }
 
     #[test]

@@ -61,18 +61,23 @@ comment = "mermaid"               # mermaid | none (link to the page only)
 diff_viewer = true                # embed the diff in the interactive page
 active_days = 14                  # skip PRs idle for longer (0 = no limit); a push re-enables
 max_mermaid_chars = 5000          # Mermaid size cap (Forgejo/Gitea default limit)
+timeout_secs = 120                # budget of the diagram step (runs after the comment is posted)
+max_summary_calls = 3             # per-file summary calls for diffs > 40 KB
 
 # Interactive page (React Flow viewer), deleted when the PR is closed.
 [pr.review_diagrams.publish]
 target = "off"                    # off | local | github-pages | wshm (Pro) | s3 | gcs | azure (pending)
 # prefix = "wshm-diagrams"
 # public_url = "https://diagrams.example.com"  # link = public_url/<key>; for wshm: the daemon URL
-# dir = "/var/www/diagrams"       # local
-# pages_repo = "owner/diagrams"   # github-pages: commits to its gh-pages branch
+# dir = "/var/www/diagrams"       # local (TOML only, not in the per-repo override)
+# pages_repo = "owner/diagrams"   # github-pages: commits to its gh-pages branch (TOML only).
+#                                 # If this repo is public, its tree and git history list
+#                                 # every page: the random token in the file name does not
+#                                 # prevent enumeration there.
 # retention_days = 30             # delete pages idle for longer (0 = until the PR closes)
 # max_pages = 200                 # per repo, least recently updated pages evicted first
 # max_diff_kb = 1024              # bigger diffs: the viewer links to "Files changed"
-# allow_private = false           # public targets are refused for private repos
+# allow_private = false           # public targets are refused for private repos (TOML only)
 
 [queue]
 enabled = true

@@ -12,8 +12,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             labels      TEXT NOT NULL DEFAULT '[]',
             author      TEXT,
             created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL,
-            page_hash   TEXT
+            updated_at  TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS pull_requests (
@@ -30,8 +29,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             mergeable   INTEGER,
             ci_status   TEXT,
             created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL,
-            page_hash   TEXT
+            updated_at  TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS comments (

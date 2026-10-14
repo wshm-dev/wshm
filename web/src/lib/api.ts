@@ -703,6 +703,8 @@ export interface DiagramSettings {
 	diff_viewer: boolean;
 	active_days: number;
 	max_mermaid_chars: number;
+	timeout_secs: number;
+	max_summary_calls: number;
 	publish: DiagramPublishSettings;
 }
 
