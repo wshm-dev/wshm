@@ -105,7 +105,11 @@ impl ObjectTarget {
     /// the provider is not compiled in.
     pub fn from_config(config: &StorageTargetConfig) -> Result<ObjectTarget> {
         let provider = config.provider.trim().to_ascii_lowercase();
-        let prefix = config.prefix.as_deref().unwrap_or_default();
+        let prefix = normalise_prefix(config.prefix.as_deref().unwrap_or_default());
+        if !prefix.is_empty() {
+            check_portable(&prefix)
+                .with_context(|| format!("invalid storage prefix '{prefix}'"))?;
+        }
         let configured_url = non_empty(&config.public_url);
 
         let (store, default_url, supports_attributes): (
@@ -140,7 +144,7 @@ impl ObjectTarget {
         Ok(ObjectTarget {
             store,
             provider,
-            prefix: normalise_prefix(prefix),
+            prefix,
             public_base: configured_url
                 .map(|u| u.trim_end_matches('/').to_string())
                 .or(default_url),
@@ -183,9 +187,7 @@ impl ObjectTarget {
         } else {
             format!("{}/{}", self.prefix, key)
         };
-        // Rejects empty segments, `.` / `..` and control characters, which
-        // also keeps the local provider inside its directory.
-        Path::parse(&full).with_context(|| format!("invalid object key '{key}'"))?;
+        check_portable(&full).with_context(|| format!("invalid object key '{key}'"))?;
         Ok(full)
     }
 
@@ -231,9 +233,10 @@ impl ObjectTarget {
     }
 
     /// Public URL of `key`: the configured `public_url`, else the provider's
-    /// canonical HTTPS URL (AWS S3 without custom endpoint, GCS, Azure
-    /// without custom endpoint). `None` for `local` or custom endpoints
-    /// without `public_url`. The object is only reachable if the bucket /
+    /// canonical HTTPS URL (AWS S3, GCS, Azure). `None` for `local` and for
+    /// any custom endpoint, whether from config or env (`AWS_ENDPOINT*`,
+    /// `GOOGLE_BASE_URL`, `AZURE_STORAGE_ENDPOINT`,
+    /// `AZURE_STORAGE_USE_EMULATOR`): set `public_url` for those. The object is only reachable if the bucket /
     /// container grants public read (or sits behind a CDN).
     pub fn public_url(&self, key: &str) -> Option<String> {
         let base = self.public_base.as_ref()?;
@@ -266,6 +269,18 @@ fn non_empty(v: &Option<String>) -> Option<&str> {
     v.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// Rejects what could escape the target directory or alias another object:
+/// empty, `.` and `..` segments and control characters (via [`Path::parse`]),
+/// plus `\` and `:`, which Windows treats as a path separator and a drive /
+/// stream marker for the local provider.
+fn check_portable(path: &str) -> Result<()> {
+    if let Some(c) = path.chars().find(|c| matches!(c, '\\' | ':')) {
+        bail!("character {c:?} is not allowed");
+    }
+    Path::parse(path)?;
+    Ok(())
+}
+
 fn normalise_prefix(prefix: &str) -> String {
     prefix
         .split('/')
@@ -278,7 +293,7 @@ type Built = (Arc<dyn ObjectStore>, Option<String>);
 
 #[cfg(feature = "storage-s3")]
 fn build_s3(config: &StorageTargetConfig) -> Result<Built> {
-    use object_store::aws::AmazonS3Builder;
+    use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 
     let bucket = non_empty(&config.bucket).context("storage provider 's3' requires `bucket`")?;
     let mut builder = AmazonS3Builder::from_env().with_bucket_name(bucket);
@@ -294,11 +309,18 @@ fn build_s3(config: &StorageTargetConfig) -> Result<Built> {
             .with_endpoint(ep)
             .with_allow_http(ep.starts_with("http://"));
     }
+    // A custom endpoint may also come from the environment (AWS_ENDPOINT,
+    // AWS_ENDPOINT_URL, AWS_ENDPOINT_URL_S3): no amazonaws.com URL then.
+    let custom_endpoint = endpoint.is_some()
+        || builder
+            .get_config_value(&AmazonS3ConfigKey::Endpoint)
+            .is_some()
+        || builder
+            .get_config_value(&AmazonS3ConfigKey::S3Endpoint)
+            .is_some();
     let store = builder.build().context("cannot configure S3 storage")?;
-    let default_url = match endpoint {
-        None => Some(format!("https://{bucket}.s3.{region}.amazonaws.com")),
-        Some(_) => None,
-    };
+    let default_url =
+        (!custom_endpoint).then(|| format!("https://{bucket}.s3.{region}.amazonaws.com"));
     Ok((Arc::new(store), default_url))
 }
 
@@ -309,7 +331,7 @@ fn build_s3(_: &StorageTargetConfig) -> Result<Built> {
 
 #[cfg(feature = "storage-gcs")]
 fn build_gcs(config: &StorageTargetConfig) -> Result<Built> {
-    use object_store::gcp::GoogleCloudStorageBuilder;
+    use object_store::gcp::{GoogleCloudStorageBuilder, GoogleConfigKey};
 
     let bucket = non_empty(&config.bucket).context("storage provider 'gcs' requires `bucket`")?;
     let mut builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
@@ -317,11 +339,14 @@ fn build_gcs(config: &StorageTargetConfig) -> Result<Built> {
     if let Some(ep) = endpoint {
         builder = builder.with_base_url(ep);
     }
+    // GOOGLE_BASE_URL in the environment also means an emulator / custom host.
+    let custom_endpoint = endpoint.is_some()
+        || builder
+            .get_config_value(&GoogleConfigKey::BaseUrl)
+            .is_some();
     let store = builder.build().context("cannot configure GCS storage")?;
-    let default_url = match endpoint {
-        None => Some(format!("https://storage.googleapis.com/{bucket}")),
-        Some(_) => None,
-    };
+    let default_url =
+        (!custom_endpoint).then(|| format!("https://storage.googleapis.com/{bucket}"));
     Ok((Arc::new(store), default_url))
 }
 
@@ -332,7 +357,7 @@ fn build_gcs(_: &StorageTargetConfig) -> Result<Built> {
 
 #[cfg(feature = "storage-azure")]
 fn build_azure(config: &StorageTargetConfig) -> Result<Built> {
-    use object_store::azure::MicrosoftAzureBuilder;
+    use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
 
     let container = non_empty(&config.container)
         .or_else(|| non_empty(&config.bucket))
@@ -350,9 +375,21 @@ fn build_azure(config: &StorageTargetConfig) -> Result<Built> {
             .with_endpoint(ep.to_string())
             .with_allow_http(ep.starts_with("http://"));
     }
+    // AZURE_STORAGE_ENDPOINT / AZURE_STORAGE_USE_EMULATOR (Azurite) in the
+    // environment also mean a non-public host.
+    let custom_endpoint = endpoint.is_some()
+        || builder
+            .get_config_value(&AzureConfigKey::Endpoint)
+            .is_some()
+        || builder
+            .get_config_value(&AzureConfigKey::UseEmulator)
+            .as_deref()
+            == Some("true");
     let store = builder.build().context("cannot configure Azure storage")?;
-    let default_url = match (endpoint, account) {
-        (None, Some(acc)) => Some(format!("https://{acc}.blob.core.windows.net/{container}")),
+    let default_url = match account {
+        Some(acc) if !custom_endpoint => {
+            Some(format!("https://{acc}.blob.core.windows.net/{container}"))
+        }
         _ => None,
     };
     Ok((Arc::new(store), default_url))
@@ -422,6 +459,40 @@ mod tests {
             assert!(t.put(bad, vec![], "text/plain").await.is_err(), "{bad:?}");
         }
         assert!(t.put("ok.txt", vec![], " ").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_windows_separators_and_drive_markers() {
+        let t = mem_target("", None);
+        for bad in ["a\\..\\b", "a\\b.html", "c:/x.html", "a/b:c", "..\\escape"] {
+            assert!(t.full_key(bad).is_err(), "{bad:?}");
+            assert!(t.put(bad, vec![], "text/plain").await.is_err(), "{bad:?}");
+        }
+        assert!(t.full_key("a-b_c.d/e f.html").is_ok());
+    }
+
+    #[test]
+    fn invalid_prefix_fails_config() {
+        let dir = temp_dir("prefix");
+        for bad in ["..", "a/../b", "./x", "a\\b", "c:"] {
+            let cfg = StorageTargetConfig {
+                provider: "local".into(),
+                dir: Some(dir.to_string_lossy().into_owned()),
+                prefix: Some(bad.into()),
+                ..Default::default()
+            };
+            let e = ObjectTarget::from_config(&cfg).unwrap_err().to_string();
+            assert!(e.contains("invalid storage prefix"), "{bad:?}: {e}");
+        }
+        let ok = StorageTargetConfig {
+            provider: "local".into(),
+            dir: Some(dir.to_string_lossy().into_owned()),
+            prefix: Some("/a//b/".into()),
+            ..Default::default()
+        };
+        let t = ObjectTarget::from_config(&ok).unwrap();
+        assert_eq!(t.full_key("k").unwrap(), "a/b/k");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -541,42 +612,60 @@ mod tests {
         cfg.endpoint = Some("http://127.0.0.1:9000".into());
         let t = ObjectTarget::from_config(&cfg).unwrap();
         assert_eq!(t.public_url("a.html"), None);
+
+        // Endpoint from the environment only: still no amazonaws.com URL,
+        // an explicit public_url is honoured.
+        cfg.endpoint = None;
+        std::env::set_var("AWS_ENDPOINT", "http://127.0.0.1:9000");
+        let env_only = ObjectTarget::from_config(&cfg);
+        cfg.public_url = Some("https://pages.example.com".into());
+        let with_url = ObjectTarget::from_config(&cfg);
+        std::env::remove_var("AWS_ENDPOINT");
+        assert_eq!(env_only.unwrap().public_url("a.html"), None);
+        assert_eq!(
+            with_url.unwrap().public_url("a.html").as_deref(),
+            Some("https://pages.example.com/x/a.html")
+        );
     }
 
     #[cfg(feature = "storage-gcs")]
     #[test]
-    fn gcs_default_url() {
+    fn gcs_default_and_env_base_url() {
         let cfg = StorageTargetConfig {
             provider: "gcs".into(),
             bucket: Some("gb".into()),
             ..Default::default()
         };
         // Building needs no credentials (they are resolved per request).
-        {
-            let t = ObjectTarget::from_config(&cfg).unwrap();
-            assert_eq!(
-                t.public_url("i.html").as_deref(),
-                Some("https://storage.googleapis.com/gb/i.html")
-            );
-        }
+        let t = ObjectTarget::from_config(&cfg).unwrap();
+        assert_eq!(
+            t.public_url("i.html").as_deref(),
+            Some("https://storage.googleapis.com/gb/i.html")
+        );
+        std::env::set_var("GOOGLE_BASE_URL", "http://127.0.0.1:4443");
+        let emu = ObjectTarget::from_config(&cfg);
+        std::env::remove_var("GOOGLE_BASE_URL");
+        assert_eq!(emu.unwrap().public_url("i.html"), None);
     }
 
     #[cfg(feature = "storage-azure")]
     #[test]
-    fn azure_default_url() {
+    fn azure_default_and_emulator_url() {
         let cfg = StorageTargetConfig {
             provider: "azure".into(),
             account: Some("acct".into()),
             container: Some("pages".into()),
             ..Default::default()
         };
-        {
-            let t = ObjectTarget::from_config(&cfg).unwrap();
-            assert_eq!(
-                t.public_url("i.html").as_deref(),
-                Some("https://acct.blob.core.windows.net/pages/i.html")
-            );
-        }
+        let t = ObjectTarget::from_config(&cfg).unwrap();
+        assert_eq!(
+            t.public_url("i.html").as_deref(),
+            Some("https://acct.blob.core.windows.net/pages/i.html")
+        );
+        std::env::set_var("AZURE_STORAGE_USE_EMULATOR", "true");
+        let emu = ObjectTarget::from_config(&cfg);
+        std::env::remove_var("AZURE_STORAGE_USE_EMULATOR");
+        assert_eq!(emu.unwrap().public_url("i.html"), None);
     }
 
     /// Integration test against a local MinIO (never a real cloud account).
