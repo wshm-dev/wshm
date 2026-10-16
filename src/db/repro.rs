@@ -87,9 +87,84 @@ fn row_to_run(row: &rusqlite::Row) -> rusqlite::Result<ReproRunRow> {
     })
 }
 
+/// Result of [`Database::reserve_repro_run`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reservation {
+    Reserved(i64),
+    RepoLimit,
+    GlobalLimit,
+}
+
 impl Database {
-    pub fn insert_repro_run(&self, run: &ReproRunRow) -> Result<i64> {
+    /// Check the daily limits and insert the reserving row in ONE transaction
+    /// (the connection mutex serialises callers of this database). The
+    /// SQLite file is per repo, so the global count here is this file's;
+    /// the caller adds a process-wide count on top.
+    pub fn reserve_repro_run(
+        &self,
+        run: &ReproRunRow,
+        max_repo: u32,
+        max_global: u32,
+        since: &str,
+    ) -> Result<Reservation> {
         self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let n: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM repro_runs WHERE created_at >= ?1",
+                params![since],
+                |row| row.get(0),
+            )?;
+            if n as u64 >= max_repo as u64 {
+                return Ok(Reservation::RepoLimit);
+            }
+            if n as u64 >= max_global as u64 {
+                return Ok(Reservation::GlobalLimit);
+            }
+            let id = insert(&tx, run)?;
+            tx.commit()?;
+            Ok(Reservation::Reserved(id))
+        })
+    }
+
+    /// Replace a reserved row with its final state (by `run.id`).
+    pub fn update_repro_run(&self, run: &ReproRunRow) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE repro_runs SET outcome = ?2, reason = ?3, dedupe_key = ?4, issue_hash = ?5,
+                    head_sha = ?6, default_branch = ?7, command = ?8, files_json = ?9,
+                    expected_failure = ?10, output = ?11, exit_code = ?12, missing_info = ?13,
+                    comment_posted = ?14, test_pr = ?15
+                 WHERE id = ?1",
+                params![
+                    run.id,
+                    run.outcome,
+                    run.reason,
+                    run.dedupe_key,
+                    run.issue_hash,
+                    run.head_sha,
+                    run.default_branch,
+                    run.command,
+                    serde_json::to_string(&run.files)?,
+                    run.expected_failure,
+                    run.output,
+                    run.exit_code,
+                    serde_json::to_string(&run.missing_info)?,
+                    run.comment_posted as i64,
+                    run.test_pr.map(|n| n as i64),
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn insert_repro_run(&self, run: &ReproRunRow) -> Result<i64> {
+        self.with_conn(|conn| insert(conn, run))
+    }
+}
+
+fn insert(conn: &rusqlite::Connection, run: &ReproRunRow) -> Result<i64> {
+    {
+        {
             conn.execute(
                 "INSERT INTO repro_runs (issue_number, outcome, reason, dedupe_key, issue_hash,
                     head_sha, default_branch, command, files_json, expected_failure, output,
@@ -115,9 +190,11 @@ impl Database {
                 ],
             )?;
             Ok(conn.last_insert_rowid())
-        })
+        }
     }
+}
 
+impl Database {
     pub fn latest_repro_run(&self, issue_number: u64) -> Result<Option<ReproRunRow>> {
         self.with_conn(|conn| {
             Ok(conn

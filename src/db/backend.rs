@@ -204,6 +204,26 @@ pub trait DatabaseBackend: Send + Sync {
         anyhow::bail!("repro_runs is not supported by this database backend")
     }
 
+    /// Atomically check the daily limits (`max_repo` for this repo,
+    /// `max_global` across repos where the backend can see them) over rows
+    /// created at or after `since`, and insert `run` to reserve the slot.
+    fn reserve_repro_run(
+        &self,
+        run: &super::repro::ReproRunRow,
+        max_repo: u32,
+        max_global: u32,
+        since: &str,
+    ) -> Result<super::repro::Reservation> {
+        let _ = (run, max_repo, max_global, since);
+        anyhow::bail!("repro_runs is not supported by this database backend")
+    }
+
+    /// Store the final state of a reserved run (matched by `run.id`).
+    fn update_repro_run(&self, run: &super::repro::ReproRunRow) -> Result<()> {
+        let _ = run;
+        anyhow::bail!("repro_runs is not supported by this database backend")
+    }
+
     /// Latest reproduction attempt for an issue.
     fn latest_repro_run(&self, issue_number: u64) -> Result<Option<super::repro::ReproRunRow>> {
         let _ = issue_number;
@@ -591,6 +611,20 @@ impl DatabaseBackend for super::Database {
 
     fn latest_repro_run(&self, issue_number: u64) -> Result<Option<super::repro::ReproRunRow>> {
         super::Database::latest_repro_run(self, issue_number)
+    }
+
+    fn reserve_repro_run(
+        &self,
+        run: &super::repro::ReproRunRow,
+        max_repo: u32,
+        max_global: u32,
+        since: &str,
+    ) -> Result<super::repro::Reservation> {
+        super::Database::reserve_repro_run(self, run, max_repo, max_global, since)
+    }
+
+    fn update_repro_run(&self, run: &super::repro::ReproRunRow) -> Result<()> {
+        super::Database::update_repro_run(self, run)
     }
 
     fn count_repro_runs_since(&self, since: &str) -> Result<u64> {

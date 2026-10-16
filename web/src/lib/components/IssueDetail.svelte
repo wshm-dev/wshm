@@ -35,7 +35,8 @@
 		confirmed: badgeRed,
 		'not-reproduced': badgeGreen,
 		'needs-info': 'border-yellow-500/30 bg-yellow-500/15 text-yellow-700 dark:text-yellow-400',
-		error: 'border-muted bg-muted text-muted-foreground'
+		error: 'border-muted bg-muted text-muted-foreground',
+		pending: 'border-blue-500/30 bg-blue-500/15 text-blue-600 dark:text-blue-400'
 	};
 </script>
 

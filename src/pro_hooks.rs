@@ -215,6 +215,9 @@ pub struct ReproSandbox {
     /// Fails with a clear message when the container runtime is unusable
     /// (daemon down, binary missing). Checked before any AI call.
     pub check: fn() -> BoxFuture<'static, anyhow::Result<()>>,
+    /// Remove containers left over by a previous process (crash, kill).
+    /// Called once when the reproduction worker starts.
+    pub cleanup: fn() -> BoxFuture<'static, ()>,
     /// Run one generated reproduction in an isolated container.
     pub run: fn(
         crate::pipelines::repro::SandboxRequest,

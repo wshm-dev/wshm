@@ -744,18 +744,27 @@ impl GitProvider for GitLabProvider {
 
     async fn upsert_tagged_comment(&self, number: u64, tag: &str, body: &str) -> Result<()> {
         self.rest.require_auth("GitLab comment")?;
+        let me = self.self_username().await;
         let mut found = None;
         self.list(&format!("issues/{number}/notes?sort=asc"), |note| {
             if note["system"].as_bool() != Some(true)
-                && note["body"].as_str().unwrap_or("").contains(tag)
+                && super::tagged_comment_matches(
+                    note["body"].as_str().unwrap_or(""),
+                    note["author"]["username"].as_str().unwrap_or(""),
+                    tag,
+                    me.as_deref(),
+                )
             {
                 found = note["id"].as_u64();
             }
             found.is_none()
         })
         .await?;
-        match found {
-            Some(id) => {
+        match super::tagged_target(found, me.as_deref()) {
+            super::TaggedTarget::Refuse => anyhow::bail!(
+                "a tagged comment exists on !{number} but the bot identity is unknown; not posting"
+            ),
+            super::TaggedTarget::Update(id) => {
                 let existing = CommentRef {
                     thread: Thread::Issue(number),
                     id,
@@ -763,7 +772,7 @@ impl GitProvider for GitLabProvider {
                 };
                 self.update_comment(&existing, body).await
             }
-            None => {
+            super::TaggedTarget::Create => {
                 self.rest
                     .send_json(
                         Method::POST,

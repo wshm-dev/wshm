@@ -578,7 +578,7 @@ export interface ReproFile {
 export interface ReproRun {
 	id: number;
 	issue_number: number;
-	outcome: 'confirmed' | 'not-reproduced' | 'needs-info' | 'error';
+	outcome: 'pending' | 'confirmed' | 'not-reproduced' | 'needs-info' | 'error';
 	reason: string;
 	head_sha: string | null;
 	default_branch: string | null;

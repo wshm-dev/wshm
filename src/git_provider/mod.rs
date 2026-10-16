@@ -97,6 +97,36 @@ pub struct PolledComment {
     pub created_at: String,
 }
 
+/// Prefix of feature-specific comment tags (`<!-- wshm:repro -->`). A comment
+/// carrying one is never the generic wshm comment that `comment_issue`
+/// updates, so a tagged comment cannot be clobbered by triage.
+pub const TAGGED_COMMENT_PREFIX: &str = "<!-- wshm:";
+
+/// Whether an existing comment is the target of a tagged upsert: it carries
+/// `tag` and, when the bot identity is known, was written by the bot (a
+/// third party pasting the tag must not be able to capture the comment).
+pub fn tagged_comment_matches(body: &str, author: &str, tag: &str, me: Option<&str>) -> bool {
+    body.contains(tag) && me.is_none_or(|m| author.eq_ignore_ascii_case(m))
+}
+
+/// Outcome of looking for the bot's tagged comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaggedTarget {
+    Update(u64),
+    Create,
+    /// A tagged comment exists but the bot identity is unknown, so it cannot
+    /// be told apart from a forged one: refuse instead of guessing.
+    Refuse,
+}
+
+pub fn tagged_target(found: Option<u64>, me: Option<&str>) -> TaggedTarget {
+    match (found, me) {
+        (Some(id), Some(_)) => TaggedTarget::Update(id),
+        (Some(_), None) => TaggedTarget::Refuse,
+        (None, _) => TaggedTarget::Create,
+    }
+}
+
 /// Error for an operation the platform has no equivalent for.
 pub fn unsupported(provider: &str, what: &str) -> anyhow::Error {
     anyhow::anyhow!("{what} is not supported on {provider}")

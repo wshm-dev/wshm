@@ -4,21 +4,26 @@
 //! queues a bounded background job (see `daemon::repro_worker`) that:
 //!
 //! 1. checks the per-repo switch (`RepoFeatures::repro_issues`, off by
-//!    default), apply mode, author trust, the daily limit and that a sandbox
-//!    is registered (Pro) and usable (Docker up);
-//! 2. clones the default branch into a throwaway directory;
+//!    default), apply mode, author trust, that a sandbox is registered (Pro)
+//!    and usable (Docker up), dedupes on the issue content + remote HEAD
+//!    (`git ls-remote`, before any clone) and reserves a run slot against
+//!    the per-repo and global daily limits (a `pending` row);
+//! 2. clones the default branch into a throwaway directory with hardened
+//!    git settings (no hooks, no fsmonitor, no global/system config);
 //! 3. asks the AI for a minimal reproduction (failing test or small script)
 //!    — the issue text is passed as untrusted DATA;
-//! 4. runs the generated command in the Pro Docker sandbox (no network by
-//!    default, no secrets, CPU/memory/pids/time limits, read-only checkout
-//!    except a scratch dir);
+//! 4. writes the generated files as NEW files only (no symlink, no `.git`,
+//!    no existing file) and runs the command in the Pro Docker sandbox (no
+//!    network by default, no secrets, CPU/memory/pids/time limits, read-only
+//!    checkout, only a size-limited `/tmp` tmpfs writable);
 //! 5. classifies the outcome, stores it in `repro_runs`, posts or updates one
-//!    tagged comment and sets the outcome label.
+//!    tagged comment and sets the outcome label; optionally opens a draft PR
+//!    with the failing test, built from a FRESH clone.
 //!
 //! There is no host-execution fallback: without a sandbox nothing runs.
 
 use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -38,17 +43,29 @@ use crate::pro_hooks::ReproSandbox;
 /// object with any subset of [`ReproConfig`] fields).
 pub const REPRO_SETTINGS_KEY: &str = "triage_repro";
 
-/// Hidden tag identifying the reproduction comment (kept separate from the
-/// triage comment, which `comment_issue` upserts).
+/// Hidden tag identifying the reproduction comment. Comments carrying a
+/// `<!-- wshm:… -->` tag are never matched by the generic `comment_issue`
+/// lookup, so triage cannot overwrite it (and vice versa).
 pub const REPRO_COMMENT_TAG: &str = "<!-- wshm:repro -->";
 
-/// Directory, relative to the checkout, mounted writable in the sandbox.
+/// Directory, relative to the checkout, for standalone repro scripts. It is
+/// part of the read-only checkout inside the sandbox; only `/tmp` is writable.
 pub const SCRATCH_DIR: &str = ".wshm-repro";
+
+/// Outcome stored while a run is in flight (reserves the daily slot).
+pub const PENDING: &str = "pending";
+/// A `pending` row older than this is considered abandoned.
+const PENDING_STALE_HOURS: i64 = 2;
 
 const MAX_FILES: usize = 8;
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_CHARS: usize = 2000;
 const MAX_STORED_OUTPUT_CHARS: usize = 16_000;
+
+/// `repro-work` housekeeping: checkouts older than this are removed…
+const WORK_MAX_AGE: Duration = Duration::from_secs(2 * 3600);
+/// …and the oldest ones go when the directory grows past this.
+const WORK_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 // ── Configuration ────────────────────────────────────────────────────────
 
@@ -57,6 +74,7 @@ const MAX_STORED_OUTPUT_CHARS: usize = 16_000;
 pub struct ReproLabels {
     pub confirmed: String,
     pub not_reproduced: String,
+    /// Distinct from triage's `needs-info` so repro never removes it.
     pub needs_info: String,
 }
 
@@ -65,7 +83,7 @@ impl Default for ReproLabels {
         Self {
             confirmed: "repro:confirmed".into(),
             not_reproduced: "repro:not-reproduced".into(),
-            needs_info: "needs-info".into(),
+            needs_info: "repro:needs-info".into(),
         }
     }
 }
@@ -83,11 +101,18 @@ pub struct ReproConfig {
     pub timeout_secs: u64,
     /// Attempts per repo over a rolling 24h window (0 = none).
     pub max_runs_per_day: u32,
-    /// Give the sandbox network access (off: `--network none`).
+    /// Attempts across all repos over a rolling 24h window (0 = none). Read
+    /// from the TOML only: a per-repo DB override cannot change it.
+    pub max_runs_per_day_global: u32,
+    /// Give the sandbox network access (off: `--network none`). When on, the
+    /// container can reach the host network, including cloud metadata
+    /// endpoints (169.254.169.254) — wshm cannot firewall that itself.
     pub network: bool,
     /// Post (and update) the reproduction comment on the issue.
     pub post_comment: bool,
     /// Open a draft PR containing only the failing test when confirmed.
+    /// Requires `trusted_authors_only` (the branch lives in the base repo and
+    /// its CI may run with secrets).
     pub create_test_pr: bool,
     pub labels: ReproLabels,
     /// Container limits.
@@ -105,6 +130,7 @@ impl Default for ReproConfig {
             trusted_authors_only: true,
             timeout_secs: 300,
             max_runs_per_day: 20,
+            max_runs_per_day_global: 100,
             network: false,
             post_comment: true,
             create_test_pr: false,
@@ -119,7 +145,8 @@ impl Default for ReproConfig {
 
 impl ReproConfig {
     /// Overlay a JSON object (any subset of fields) on `self`. `labels` is
-    /// merged field by field. Values are clamped to sane bounds.
+    /// merged field by field. Values are clamped to sane bounds. The result
+    /// must pass [`Self::validate`].
     pub fn overlay(&self, override_json: &str) -> Result<ReproConfig> {
         let patch: serde_json::Value =
             serde_json::from_str(override_json).context("invalid repro settings JSON")?;
@@ -132,6 +159,8 @@ impl ReproConfig {
             .expect("struct serializes to an object");
         for (k, v) in patch {
             match (k.as_str(), obj.get_mut(k)) {
+                // Global cap: TOML only.
+                ("max_runs_per_day_global", _) => {}
                 ("labels", Some(serde_json::Value::Object(labels))) => {
                     if let Some(p) = v.as_object() {
                         for (lk, lv) in p {
@@ -145,7 +174,20 @@ impl ReproConfig {
         }
         let cfg: ReproConfig =
             serde_json::from_value(base).context("invalid repro settings value")?;
+        cfg.validate()?;
         Ok(cfg.clamped())
+    }
+
+    /// Reject unsafe combinations (used by the API and the overlay).
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.create_test_pr || self.trusted_authors_only,
+            "create_test_pr requires trusted_authors_only = true"
+        );
+        if let Some(img) = self.image.as_deref().filter(|s| !s.trim().is_empty()) {
+            validate_image_ref(img)?;
+        }
+        Ok(())
     }
 
     /// TOML defaults overlaid with the per-repo DB override, if any. A broken
@@ -172,6 +214,10 @@ impl ReproConfig {
         }
         self.cpus = self.cpus.clamp(0.1, 16.0);
         self.pids_limit = self.pids_limit.clamp(16, 4096);
+        if self.create_test_pr && !self.trusted_authors_only {
+            warn!("[triage.repro] create_test_pr ignored: it requires trusted_authors_only = true");
+            self.create_test_pr = false;
+        }
         self
     }
 
@@ -181,6 +227,22 @@ impl ReproConfig {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(&config.fix.docker_image)
     }
+}
+
+/// Accept only plain image references (`registry/name:tag@sha256:…`), so the
+/// value can never be read as a `docker run` option.
+pub fn validate_image_ref(image: &str) -> Result<()> {
+    let ok = !image.is_empty()
+        && image.len() <= 255
+        && image
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && image
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':' | '@'));
+    anyhow::ensure!(ok, "invalid sandbox image reference: {image:?}");
+    Ok(())
 }
 
 // ── Outcome ──────────────────────────────────────────────────────────────
@@ -287,8 +349,14 @@ impl ReproPlan {
             "plan needs a short expected_failure signal"
         );
         anyhow::ensure!(self.files.len() <= MAX_FILES, "plan has too many files");
+        let mut seen = std::collections::HashSet::new();
         for f in &self.files {
-            safe_relative_path(&f.path)?;
+            let p = safe_relative_path(&f.path)?;
+            anyhow::ensure!(
+                seen.insert(p.to_string_lossy().to_lowercase()),
+                "duplicate generated file {}",
+                f.path
+            );
             anyhow::ensure!(
                 f.content.len() <= MAX_FILE_BYTES,
                 "generated file {} is too large",
@@ -299,59 +367,116 @@ impl ReproPlan {
     }
 }
 
-/// Validate an AI-provided relative path: no absolute paths, no `..`, and
-/// nothing that would configure CI, git or wshm.
+/// Lowercased component with the trailing dots/spaces some filesystems
+/// ignore (`.GIT.`, `.git `) stripped.
+fn normalized_component(s: &str) -> String {
+    s.trim_end_matches(['.', ' ']).to_lowercase()
+}
+
+/// Directories (first component) generated files may never touch: git
+/// internals, CI / automation configuration, wshm state.
+const BLOCKED_DIRS: &[&str] = &[
+    ".github",
+    ".gitea",
+    ".forgejo",
+    ".gitlab",
+    ".circleci",
+    ".buildkite",
+    ".woodpecker",
+    ".semaphore",
+    ".teamcity",
+    ".azure-pipelines",
+    ".devcontainer",
+    ".husky",
+    ".vscode",
+    ".idea",
+    ".cargo",
+    ".wshm",
+];
+
+/// File names (any directory) that configure CI, hooks or builds and would
+/// execute code in CI or on a developer machine.
+const BLOCKED_FILES: &[&str] = &[
+    ".gitlab-ci.yml",
+    "azure-pipelines.yml",
+    "bitbucket-pipelines.yml",
+    ".pre-commit-config.yaml",
+    ".pre-commit-hooks.yaml",
+    ".woodpecker.yml",
+    ".woodpecker.yaml",
+    ".drone.yml",
+    ".travis.yml",
+    ".cirrus.yml",
+    "appveyor.yml",
+    ".appveyor.yml",
+    "cloudbuild.yaml",
+    "cloudbuild.yml",
+    "jenkinsfile",
+    ".gitmodules",
+    ".gitattributes",
+    ".gitignore",
+    ".gitconfig",
+    ".npmrc",
+    ".yarnrc",
+    ".yarnrc.yml",
+    ".env",
+    ".envrc",
+    "build.rs",
+    "cargo.toml",
+    "conftest.py",
+    "setup.py",
+    "setup.cfg",
+    "pyproject.toml",
+    "package.json",
+    "makefile",
+    "gemfile",
+    "rakefile",
+    "go.mod",
+];
+
+/// Validate an AI-provided relative path: no absolute paths, no `..`, no
+/// `.git` component anywhere (case/trailing-dot insensitive), nothing that
+/// configures CI, hooks, builds, git or wshm.
 pub fn safe_relative_path(p: &str) -> Result<PathBuf> {
     let path = Path::new(p);
     anyhow::ensure!(!p.trim().is_empty(), "empty path");
-    anyhow::ensure!(!p.contains('\0') && !p.contains('\\'), "invalid path {p}");
+    anyhow::ensure!(
+        !p.contains('\0') && !p.contains('\\') && !p.contains(':'),
+        "invalid path {p}"
+    );
     let mut out = PathBuf::new();
     for c in path.components() {
         match c {
-            Component::Normal(s) => out.push(s),
+            Component::Normal(s) => {
+                let s = s.to_string_lossy();
+                let n = normalized_component(&s);
+                anyhow::ensure!(
+                    !n.is_empty() && n != ".git" && !n.starts_with(".git/"),
+                    "path {p} targets git internals"
+                );
+                out.push(s.as_ref());
+            }
             Component::CurDir => {}
             _ => anyhow::bail!("path {p} must be relative and stay inside the repository"),
         }
     }
-    let first = out
-        .components()
+    let mut comps = out.components();
+    let first = comps
         .next()
-        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    const BLOCKED_DIRS: &[&str] = &[
-        ".git",
-        ".github",
-        ".gitea",
-        ".forgejo",
-        ".gitlab",
-        ".circleci",
-        ".buildkite",
-        ".wshm",
-        ".azure-pipelines",
-        ".devcontainer",
-    ];
+        .map(|c| normalized_component(&c.as_os_str().to_string_lossy()))
+        .context("empty path")?;
     anyhow::ensure!(
         !BLOCKED_DIRS.contains(&first.as_str()),
         "path {p} targets a protected directory"
     );
     let name = out
         .file_name()
-        .map(|n| n.to_string_lossy().to_lowercase())
+        .map(|n| normalized_component(&n.to_string_lossy()))
         .unwrap_or_default();
-    const BLOCKED_FILES: &[&str] = &[
-        ".gitlab-ci.yml",
-        "azure-pipelines.yml",
-        ".gitmodules",
-        ".gitattributes",
-        ".travis.yml",
-        "jenkinsfile",
-        ".drone.yml",
-    ];
     anyhow::ensure!(
         !BLOCKED_FILES.contains(&name.as_str()),
         "path {p} targets a protected file"
     );
-    anyhow::ensure!(out.components().next().is_some(), "empty path");
     Ok(out)
 }
 
@@ -361,13 +486,13 @@ pub const SYSTEM_PROMPT: &str = r#"You turn a bug report into a minimal, automat
 
 Write the smallest possible failing test in the project's own test framework when you can (it must FAIL while the bug is present and PASS once fixed). Otherwise write a small standalone script under `.wshm-repro/` that exits non-zero while the bug is present.
 
-The command runs from the repository root in an isolated container: no network, no credentials, a read-only checkout except `.wshm-repro/` and `/tmp` (HOME=/tmp, CARGO_TARGET_DIR=/tmp/target). Do not download anything. Use only tools and dependencies the repository already declares.
+The command runs from the repository root in an isolated container: no network, no credentials, the whole checkout (your files included) is READ-ONLY and only `/tmp` is writable (HOME=/tmp, CARGO_TARGET_DIR=/tmp/target). Do not download anything. Use only tools and dependencies the repository already declares.
 
 Respond with a JSON object only (no markdown):
 {
   "reproducible": true,
   "missing_info": [],
-  "files": [{"path": "relative/path/to/test_file", "content": "full file content"}],
+  "files": [{"path": "relative/path/to/new_test_file", "content": "full file content"}],
   "command": "single shell command that runs only the reproduction",
   "expected_failure": "short text that appears in the output when the bug is present (e.g. an assertion message you print)",
   "explanation": "one or two sentences on what the reproduction checks"
@@ -376,7 +501,7 @@ Respond with a JSON object only (no markdown):
 If the report does not contain enough information to write a reproduction (missing steps, versions, inputs or expected behavior), return "reproducible": false with a concrete list of what is missing in "missing_info", and leave files and command empty.
 
 Rules:
-- New files only, at most 8, relative paths, never under .git/, .github/ or other CI configuration.
+- NEW files only (never modify an existing file), at most 8, relative paths, never under .git/, .github/ or other CI configuration, never build files (Cargo.toml, build.rs, package.json, conftest.py, Makefile...).
 - Make the failure message explicit and stable so it can be matched in "expected_failure".
 - Never read environment variables, credentials or files outside the repository, and never use the network.
 
@@ -429,10 +554,9 @@ pub struct SandboxRequest {
     /// Unique id, used as container name suffix.
     pub job_id: String,
     /// Checkout of the default branch with the generated files written.
-    /// Mounted read-only at `/workspace`.
+    /// Mounted read-only at `/workspace`; only a size-limited `/tmp` tmpfs
+    /// is writable in the container.
     pub checkout: PathBuf,
-    /// `<checkout>/.wshm-repro`, mounted read-write.
-    pub scratch: PathBuf,
     pub image: String,
     pub command: String,
     pub timeout: Duration,
@@ -522,6 +646,7 @@ pub enum SkipReason {
     Category(String),
     NoSandbox,
     DailyLimit(u32),
+    GlobalLimit(u32),
     Duplicate,
 }
 
@@ -536,6 +661,7 @@ impl std::fmt::Display for SkipReason {
                 "no reproduction sandbox registered (requires wshm Pro; no host fallback)"
             ),
             Self::DailyLimit(n) => write!(f, "max_runs_per_day ({n}) reached"),
+            Self::GlobalLimit(n) => write!(f, "max_runs_per_day_global ({n}) reached"),
             Self::Duplicate => write!(
                 f,
                 "already reproduced for this issue content and default-branch commit"
@@ -576,24 +702,48 @@ pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn day_ago(now: chrono::DateTime<chrono::Utc>) -> String {
-    (now - chrono::Duration::hours(24)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+fn hours_ago(now: chrono::DateTime<chrono::Utc>, h: i64) -> String {
+    (now - chrono::Duration::hours(h)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// Rolling 24h limit. Fails closed when the DB cannot count.
-pub fn check_daily_limit(
+/// Process-wide record of reserved runs (all repos), on top of the DB count:
+/// in OSS multi-repo every repo has its own SQLite file, so only this sees
+/// the global total. Postgres (Pro) counts across repos and pods in the DB.
+static PROCESS_RUNS: StdMutex<Vec<chrono::DateTime<chrono::Utc>>> = StdMutex::new(Vec::new());
+
+/// Atomically check the per-repo and global daily limits and insert the
+/// `pending` row that reserves the slot. Returns the row id, or the reason
+/// the run must not happen.
+pub fn reserve_slot(
     db: &dyn DatabaseBackend,
     cfg: &ReproConfig,
+    global_max: u32,
+    row: &ReproRunRow,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<std::result::Result<(), SkipReason>> {
+) -> Result<std::result::Result<i64, SkipReason>> {
     if cfg.max_runs_per_day == 0 {
         return Ok(Err(SkipReason::DailyLimit(0)));
     }
-    let n = db.count_repro_runs_since(&day_ago(now))?;
-    Ok(if n >= cfg.max_runs_per_day as u64 {
-        Err(SkipReason::DailyLimit(cfg.max_runs_per_day))
-    } else {
-        Ok(())
+    if global_max == 0 {
+        return Ok(Err(SkipReason::GlobalLimit(0)));
+    }
+    let mut runs = PROCESS_RUNS.lock().unwrap_or_else(|p| p.into_inner());
+    let day = now - chrono::Duration::hours(24);
+    runs.retain(|t| *t >= day);
+    if runs.len() as u64 >= global_max as u64 {
+        return Ok(Err(SkipReason::GlobalLimit(global_max)));
+    }
+    let reserved =
+        db.reserve_repro_run(row, cfg.max_runs_per_day, global_max, &hours_ago(now, 24))?;
+    Ok(match reserved {
+        crate::db::repro::Reservation::Reserved(id) => {
+            runs.push(now);
+            Ok(id)
+        }
+        crate::db::repro::Reservation::RepoLimit => {
+            Err(SkipReason::DailyLimit(cfg.max_runs_per_day))
+        }
+        crate::db::repro::Reservation::GlobalLimit => Err(SkipReason::GlobalLimit(global_max)),
     })
 }
 
@@ -607,10 +757,22 @@ pub fn dedupe_key(issue_hash: &str, head_sha: &str) -> String {
     format!("{:x}", h.finalize())
 }
 
-/// Skip when the latest run has the same key and was conclusive. Errors are
-/// retried (still bounded by the daily limit).
-pub fn is_duplicate(latest: Option<&ReproRunRow>, key: &str) -> bool {
-    latest.is_some_and(|r| r.dedupe_key == key && r.outcome != ReproOutcome::Error.as_str())
+/// Skip when the latest run has the same key and was conclusive or is still
+/// in flight. Errors and abandoned `pending` rows are retried (still bounded
+/// by the daily limits).
+pub fn is_duplicate(
+    latest: Option<&ReproRunRow>,
+    key: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(r) = latest else { return false };
+    if r.dedupe_key != key || r.outcome == ReproOutcome::Error.as_str() {
+        return false;
+    }
+    if r.outcome == PENDING {
+        return r.created_at >= hours_ago(now, PENDING_STALE_HOURS);
+    }
+    true
 }
 
 // ── Comment ──────────────────────────────────────────────────────────────
@@ -629,6 +791,32 @@ fn fence(content: &str, lang: &str) -> String {
     }
     let ticks = "`".repeat((longest + 1).max(3));
     format!("{ticks}{lang}\n{}\n{ticks}", content.trim_end())
+}
+
+/// Make AI-written prose safe to post outside a code block: one line, no
+/// HTML, no @mentions (users or @org/team), no links/images/autolinks.
+pub fn sanitize_prose(s: &str, max: usize) -> String {
+    const ZW: char = '\u{200B}';
+    let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::with_capacity(one_line.len());
+    for ch in one_line.chars() {
+        match ch {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '@' => {
+                out.push('@');
+                out.push(ZW);
+            }
+            _ => out.push(ch),
+        }
+    }
+    let out = out
+        .replace("](", &format!("]{ZW}("))
+        .replace("![", &format!("!{ZW}["))
+        .replace("://", &format!(":{ZW}//"))
+        .replace("www.", &format!("www{ZW}."));
+    crate::pipelines::truncate(&out, max)
 }
 
 /// Keep the last `max_lines` lines / `max_chars` chars of `s`.
@@ -671,7 +859,7 @@ pub fn format_comment(config: &Config, run: &ReproRunRow, cfg: &ReproConfig) -> 
     let mut c = format!("{REPRO_COMMENT_TAG}\n{}", config.branding.header());
     c.push_str(&format!("## 🧪 Automated reproduction: {title}\n\n"));
     let where_ = match (&run.default_branch, &run.head_sha) {
-        (Some(b), Some(s)) => format!("`{b}` @ `{}`", short_sha(s)),
+        (Some(b), Some(s)) => format!("`{}` @ `{}`", sanitize_prose(b, 100), short_sha(s)),
         _ => "the default branch".into(),
     };
     match outcome {
@@ -683,11 +871,11 @@ pub fn format_comment(config: &Config, run: &ReproRunRow, cfg: &ReproConfig) -> 
         )),
         ReproOutcome::NeedsInfo => {
             c.push_str("The report does not contain enough information to write a reproduction. Could you add:\n\n");
-            for m in &run.missing_info {
-                c.push_str(&format!("- {}\n", crate::pipelines::truncate(m, 200)));
+            for m in run.missing_info.iter().take(10) {
+                c.push_str(&format!("- {}\n", sanitize_prose(m, 200)));
             }
         }
-        ReproOutcome::Error => c.push_str(&format!("{}\n", run.reason)),
+        ReproOutcome::Error => c.push_str(&format!("{}\n", sanitize_prose(&run.reason, 300))),
     }
     if outcome != ReproOutcome::NeedsInfo {
         c.push_str(&format!(
@@ -705,7 +893,7 @@ pub fn format_comment(config: &Config, run: &ReproRunRow, cfg: &ReproConfig) -> 
         for f in &run.files {
             c.push_str(&format!(
                 "\n<details>\n<summary>Generated file: <code>{}</code></summary>\n\n{}\n\n</details>\n",
-                html_escape(&f.path),
+                sanitize_prose(&f.path, 200),
                 fence(&f.content, lang_for(&f.path))
             ));
         }
@@ -724,12 +912,6 @@ pub fn format_comment(config: &Config, run: &ReproRunRow, cfg: &ReproConfig) -> 
     }
     c.push_str(&format!("\n{}", config.branding.footer("Reproduced")));
     c
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 // ── Queue (filled by triage, drained by the daemon worker) ───────────────
@@ -786,6 +968,8 @@ pub struct JobContext<'a> {
     /// `None` = no forge access (tests): writes and the trust check are off.
     pub gh: Option<&'a Forge>,
     pub cfg: ReproConfig,
+    /// Global cap (`[triage.repro] max_runs_per_day_global` from TOML).
+    pub global_max: u32,
     /// Apply mode: post the comment / labels / PR.
     pub write: bool,
     pub clone_url: String,
@@ -820,21 +1004,93 @@ pub fn git_auth_env(config: &Config) -> Vec<(String, String)> {
     ]
 }
 
-/// Removes the checkout on drop.
+/// Removes the checkout on drop; failures are logged (and the periodic
+/// sweep retries).
 struct WorkDir(PathBuf);
 
 impl Drop for WorkDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if let Err(e) = std::fs::remove_dir_all(&self.0) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!("Repro: failed to remove checkout {}: {e}", self.0.display());
+            }
+        }
     }
 }
+
+fn dir_size(p: &Path) -> u64 {
+    let Ok(md) = std::fs::symlink_metadata(p) else {
+        return 0;
+    };
+    if !md.is_dir() {
+        return md.len();
+    }
+    std::fs::read_dir(p)
+        .map(|rd| rd.flatten().map(|e| dir_size(&e.path())).sum())
+        .unwrap_or(0)
+}
+
+/// Housekeeping of `repro-work`: remove checkouts older than `max_age`, then
+/// the oldest ones while the total exceeds `max_bytes`. Errors are logged.
+pub fn sweep_work_root(root: &Path, max_age: Duration, max_bytes: u64) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut entries: Vec<(std::time::SystemTime, PathBuf, u64)> = Vec::new();
+    for e in rd.flatten() {
+        let path = e.path();
+        let modified = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if now.duration_since(modified).unwrap_or_default() > max_age {
+            if let Err(err) = std::fs::remove_dir_all(&path) {
+                warn!("Repro: failed to remove stale {}: {err}", path.display());
+            }
+            continue;
+        }
+        let size = dir_size(&path);
+        entries.push((modified, path, size));
+    }
+    let mut total: u64 = entries.iter().map(|e| e.2).sum();
+    entries.sort_by_key(|e| e.0);
+    for (_, path, size) in entries {
+        if total <= max_bytes {
+            break;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => total = total.saturating_sub(size),
+            Err(err) => warn!("Repro: failed to remove {}: {err}", path.display()),
+        }
+    }
+}
+
+/// Every host-side git invocation goes through here: repository-controlled
+/// configuration that could execute code (hooks, fsmonitor, ssh command,
+/// ext transport) is neutralised and the user/system config is ignored.
+pub(crate) const GIT_HARDENING: &[&str] = &[
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.sshCommand=false",
+    "-c",
+    "protocol.ext.allow=never",
+    "-c",
+    "credential.helper=",
+];
 
 async fn git(dir: Option<&Path>, args: &[&str], env: &[(String, String)]) -> Result<String> {
     let mut cmd = tokio::process::Command::new("git");
     if let Some(d) = dir {
         cmd.current_dir(d);
     }
-    cmd.args(args)
+    cmd.args(GIT_HARDENING)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_LFS_SKIP_SMUDGE", "1")
         .stdin(std::process::Stdio::null())
@@ -854,6 +1110,37 @@ async fn git(dir: Option<&Path>, args: &[&str], env: &[(String, String)]) -> Res
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// HEAD commit of the remote default branch, without cloning.
+async fn remote_head(url: &str, env: &[(String, String)]) -> Result<String> {
+    let out = git(None, &["ls-remote", "--", url, "HEAD"], env).await?;
+    out.split_whitespace()
+        .next()
+        .filter(|s| s.len() >= 7 && s.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(String::from)
+        .context("ls-remote returned no HEAD")
+}
+
+async fn clone_default_branch(ctx: &JobContext<'_>, dir: &Path) -> Result<()> {
+    let dir_s = dir.to_string_lossy().to_string();
+    git(
+        None,
+        &[
+            "clone",
+            "--depth",
+            "1",
+            "--no-tags",
+            "--single-branch",
+            "--",
+            &ctx.clone_url,
+            &dir_s,
+        ],
+        &ctx.git_env,
+    )
+    .await
+    .context("cloning the default branch")?;
+    Ok(())
 }
 
 const MANIFESTS: &[&str] = &[
@@ -899,49 +1186,76 @@ async fn snapshot(checkout: &Path) -> Result<RepoSnapshot> {
     })
 }
 
-/// Write the generated files into the checkout, refusing anything that
-/// would land outside it (symlinks included).
-fn write_files(checkout: &Path, files: &[ReproFile]) -> Result<()> {
-    let root = checkout.canonicalize()?;
-    for f in files {
-        let rel = safe_relative_path(&f.path)?;
-        let target = root.join(&rel);
-        let parent = target.parent().context("file without parent")?;
-        std::fs::create_dir_all(parent)?;
-        let real_parent = parent.canonicalize()?;
+/// Create `rel` (a directory path) under `root` one component at a time,
+/// never following a symlink and never descending into `.git`.
+fn ensure_dir(root: &Path, rel: &Path) -> Result<PathBuf> {
+    let mut cur = root.to_path_buf();
+    for c in rel.components() {
+        let Component::Normal(name) = c else {
+            anyhow::bail!("invalid path component in {}", rel.display());
+        };
         anyhow::ensure!(
-            real_parent.starts_with(&root),
-            "generated file {} escapes the checkout",
-            f.path
+            normalized_component(&name.to_string_lossy()) != ".git",
+            "path {} targets git internals",
+            rel.display()
         );
-        if let Ok(md) = std::fs::symlink_metadata(&target) {
-            anyhow::ensure!(
-                !md.file_type().is_symlink(),
-                "generated file {} would overwrite a symlink",
-                f.path
-            );
+        cur.push(name);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(md) if md.file_type().is_symlink() => {
+                anyhow::bail!("{} is a symlink", cur.display())
+            }
+            Ok(md) if md.is_dir() => {}
+            Ok(_) => anyhow::bail!("{} exists and is not a directory", cur.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&cur).with_context(|| format!("creating {}", cur.display()))?;
+            }
+            Err(e) => return Err(e).with_context(|| format!("inspecting {}", cur.display())),
         }
-        std::fs::write(&target, &f.content)?;
     }
-    Ok(())
+    Ok(cur)
 }
 
-fn prepare_scratch(checkout: &Path) -> Result<PathBuf> {
-    let scratch = checkout.join(SCRATCH_DIR);
-    if let Ok(md) = std::fs::symlink_metadata(&scratch) {
-        anyhow::ensure!(
-            md.is_dir() && !md.file_type().is_symlink(),
-            "{SCRATCH_DIR} exists in the repository and is not a plain directory"
-        );
+/// Write the generated files into the checkout as NEW files only: every
+/// path is validated, no component may be a symlink, nothing may exist at
+/// the target (tracked or not), and the final file must resolve inside the
+/// checkout and outside `.git`.
+pub fn write_files(checkout: &Path, files: &[ReproFile]) -> Result<()> {
+    use std::io::Write as _;
+    let md = std::fs::symlink_metadata(checkout)?;
+    anyhow::ensure!(
+        md.is_dir() && !md.file_type().is_symlink(),
+        "checkout is not a plain directory"
+    );
+    let root = checkout.canonicalize()?;
+    let git_dir = root.join(".git");
+    // Validate everything before touching the disk.
+    let rels: Vec<PathBuf> = files
+        .iter()
+        .map(|f| safe_relative_path(&f.path))
+        .collect::<Result<_>>()?;
+    for (f, rel) in files.iter().zip(&rels) {
+        let parent_rel = rel.parent().unwrap_or(Path::new(""));
+        let name = rel.file_name().context("file without name")?;
+        let parent = ensure_dir(&root, parent_rel)?;
+        let target = parent.join(name);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .with_context(|| {
+                format!(
+                    "generated file {} must be a new file (it exists or cannot be created)",
+                    f.path
+                )
+            })?;
+        let real = target.canonicalize()?;
+        if !real.starts_with(&root) || real.starts_with(&git_dir) {
+            let _ = std::fs::remove_file(&target);
+            anyhow::bail!("generated file {} escapes the checkout", f.path);
+        }
+        file.write_all(f.content.as_bytes())?;
     }
-    std::fs::create_dir_all(&scratch)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // The container runs as an unprivileged uid.
-        std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o777))?;
-    }
-    Ok(scratch)
+    Ok(())
 }
 
 fn unique_suffix() -> String {
@@ -959,6 +1273,16 @@ pub async fn run_job(
 ) -> Result<Option<ReproRunRow>> {
     let n = issue.number;
     let cfg = &ctx.cfg;
+    let image = cfg.image(ctx.config).to_string();
+    if let Err(e) = validate_image_ref(&image) {
+        error!("Repro #{n}: {e:#}");
+        return Ok(None);
+    }
+    if cfg.network {
+        warn!(
+            "Repro #{n}: [triage.repro] network = true — the sandbox can reach the host network and cloud metadata endpoints (169.254.169.254); keep it off unless the host is firewalled"
+        );
+    }
 
     if cfg.trusted_authors_only {
         let author = issue.author.as_deref().unwrap_or("");
@@ -972,73 +1296,76 @@ pub async fn run_job(
         }
     }
 
-    if let Err(skip) = check_daily_limit(ctx.db, cfg, chrono::Utc::now())? {
-        info!("Repro #{n}: skipped, {skip}");
-        return Ok(None);
-    }
-
     // Docker must be usable before anything else is spent.
     if let Err(e) = (sandbox.check)().await {
         error!("Repro #{n}: sandbox unavailable, nothing run (no host fallback): {e:#}");
         return Ok(None);
     }
 
-    std::fs::create_dir_all(&ctx.work_root)?;
-    let dir = ctx.work_root.join(format!("issue-{n}-{}", unique_suffix()));
-    let _cleanup = WorkDir(dir.clone());
-    let dir_s = dir.to_string_lossy().to_string();
-    git(
-        None,
-        &[
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.symlinks=true",
-            "clone",
-            "--depth",
-            "1",
-            "--no-tags",
-            "--single-branch",
-            "--",
-            &ctx.clone_url,
-            &dir_s,
-        ],
-        &ctx.git_env,
-    )
-    .await
-    .context("cloning the default branch")?;
-
-    let snap = snapshot(&dir).await?;
+    // Dedupe on the remote HEAD before cloning anything.
+    let head = remote_head(&ctx.clone_url, &ctx.git_env)
+        .await
+        .context("resolving the default-branch HEAD")?;
     let issue_hash = crate::db::schema::compute_issue_hash(&issue.title, issue.body.as_deref());
-    let key = dedupe_key(&issue_hash, &snap.head_sha);
-    if is_duplicate(ctx.db.latest_repro_run(n)?.as_ref(), &key) {
+    let mut key = dedupe_key(&issue_hash, &head);
+    let now = chrono::Utc::now();
+    if is_duplicate(ctx.db.latest_repro_run(n)?.as_ref(), &key, now) {
         info!("Repro #{n}: skipped, {}", SkipReason::Duplicate);
         return Ok(None);
     }
 
+    // Reserve the slot (pending row) atomically against both limits.
     let mut run = ReproRunRow {
         issue_number: n,
-        dedupe_key: key,
-        issue_hash,
-        head_sha: Some(snap.head_sha.clone()),
-        default_branch: Some(snap.default_branch.clone()),
+        outcome: PENDING.into(),
+        reason: "in progress".into(),
+        dedupe_key: key.clone(),
+        issue_hash: issue_hash.clone(),
+        head_sha: Some(head.clone()),
+        created_at: now_rfc3339(),
         ..Default::default()
     };
+    match reserve_slot(ctx.db, cfg, ctx.global_max, &run, now)? {
+        Ok(id) => run.id = id,
+        Err(skip) => {
+            info!("Repro #{n}: skipped, {skip}");
+            return Ok(None);
+        }
+    }
+
+    std::fs::create_dir_all(&ctx.work_root)?;
+    sweep_work_root(&ctx.work_root, WORK_MAX_AGE, WORK_MAX_BYTES);
+    let dir = ctx.work_root.join(format!("issue-{n}-{}", unique_suffix()));
+    let _cleanup = WorkDir(dir.clone());
+    if let Err(e) = clone_default_branch(ctx, &dir).await {
+        return fail(ctx, issue, run, format!("{e:#}")).await.map(Some);
+    }
+    let snap = match snapshot(&dir).await {
+        Ok(s) => s,
+        Err(e) => return fail(ctx, issue, run, format!("{e:#}")).await.map(Some),
+    };
+    if snap.head_sha != head {
+        // The branch moved between ls-remote and clone: record what ran.
+        key = dedupe_key(&issue_hash, &snap.head_sha);
+        run.dedupe_key = key;
+        run.head_sha = Some(snap.head_sha.clone());
+    }
+    run.default_branch = Some(snap.default_branch.clone());
 
     let user_prompt = build_user_prompt(issue, &snap);
     let plan = match planner.plan(SYSTEM_PROMPT, &user_prompt).await {
         Ok(p) => p,
         Err(e) => {
-            run.outcome = ReproOutcome::Error.as_str().into();
-            run.reason = format!("AI call failed: {e:#}");
-            return finish(ctx, issue, run).await.map(Some);
+            return fail(ctx, issue, run, format!("AI call failed: {e:#}"))
+                .await
+                .map(Some)
         }
     };
     let _ = ctx.db.record_llm_invocation("repro", None);
     if let Err(e) = plan.validate() {
-        run.outcome = ReproOutcome::Error.as_str().into();
-        run.reason = format!("Rejected AI plan: {e:#}");
-        return finish(ctx, issue, run).await.map(Some);
+        return fail(ctx, issue, run, format!("Rejected AI plan: {e:#}"))
+            .await
+            .map(Some);
     }
     run.missing_info = plan.missing_info.clone();
     if plan.reproducible {
@@ -1048,34 +1375,35 @@ pub async fn run_job(
     }
 
     let result = if plan.reproducible {
-        let prep = prepare_scratch(&dir).and_then(|s| write_files(&dir, &plan.files).map(|_| s));
-        match prep {
+        let prep =
+            ensure_dir(&dir, Path::new(SCRATCH_DIR)).and_then(|_| write_files(&dir, &plan.files));
+        if let Err(e) = prep {
+            return fail(
+                ctx,
+                issue,
+                run,
+                format!("Could not write the generated files: {e:#}"),
+            )
+            .await
+            .map(Some);
+        }
+        let req = SandboxRequest {
+            job_id: format!("{n}-{}", unique_suffix()),
+            checkout: dir.clone(),
+            image,
+            command: plan.command.trim().to_string(),
+            timeout: Duration::from_secs(cfg.timeout_secs),
+            network: cfg.network,
+            memory_mb: cfg.memory_mb,
+            cpus: cfg.cpus,
+            pids_limit: cfg.pids_limit,
+        };
+        match (sandbox.run)(req).await {
+            Ok(r) => Some(r),
             Err(e) => {
-                run.outcome = ReproOutcome::Error.as_str().into();
-                run.reason = format!("Could not write the generated files: {e:#}");
-                return finish(ctx, issue, run).await.map(Some);
-            }
-            Ok(scratch) => {
-                let req = SandboxRequest {
-                    job_id: format!("{n}-{}", unique_suffix()),
-                    checkout: dir.clone(),
-                    scratch,
-                    image: cfg.image(ctx.config).to_string(),
-                    command: plan.command.trim().to_string(),
-                    timeout: Duration::from_secs(cfg.timeout_secs),
-                    network: cfg.network,
-                    memory_mb: cfg.memory_mb,
-                    cpus: cfg.cpus,
-                    pids_limit: cfg.pids_limit,
-                };
-                match (sandbox.run)(req).await {
-                    Ok(r) => Some(r),
-                    Err(e) => {
-                        run.outcome = ReproOutcome::Error.as_str().into();
-                        run.reason = format!("Sandbox failure: {e:#}");
-                        return finish(ctx, issue, run).await.map(Some);
-                    }
-                }
+                return fail(ctx, issue, run, format!("Sandbox failure: {e:#}"))
+                    .await
+                    .map(Some)
             }
         }
     } else {
@@ -1090,9 +1418,13 @@ pub async fn run_job(
         run.output = Some(trim_output(&r.output, 400, MAX_STORED_OUTPUT_CHARS));
     }
 
-    if outcome == ReproOutcome::Confirmed && cfg.create_test_pr && ctx.write {
+    if outcome == ReproOutcome::Confirmed
+        && cfg.create_test_pr
+        && cfg.trusted_authors_only
+        && ctx.write
+    {
         if let Some(gh) = ctx.gh {
-            match open_test_pr(ctx, gh, issue, &dir, &snap, &plan).await {
+            match open_test_pr(ctx, gh, issue, &snap, &plan).await {
                 Ok(pr) => run.test_pr = pr,
                 Err(e) => warn!("Repro #{n}: draft test PR not opened: {e:#}"),
             }
@@ -1102,10 +1434,20 @@ pub async fn run_job(
     finish(ctx, issue, run).await.map(Some)
 }
 
-/// Publish (comment + labels) when allowed, then store the row.
+async fn fail(
+    ctx: &JobContext<'_>,
+    issue: &Issue,
+    mut run: ReproRunRow,
+    reason: String,
+) -> Result<ReproRunRow> {
+    run.outcome = ReproOutcome::Error.as_str().into();
+    run.reason = reason;
+    finish(ctx, issue, run).await
+}
+
+/// Publish (comment + labels) when allowed, then store the final row.
 async fn finish(ctx: &JobContext<'_>, issue: &Issue, mut run: ReproRunRow) -> Result<ReproRunRow> {
     let n = issue.number;
-    run.created_at = now_rfc3339();
     let outcome = ReproOutcome::parse(&run.outcome).unwrap_or(ReproOutcome::Error);
     info!("Repro #{n}: {} — {}", run.outcome, run.reason);
     if outcome != ReproOutcome::Error && ctx.write {
@@ -1113,8 +1455,7 @@ async fn finish(ctx: &JobContext<'_>, issue: &Issue, mut run: ReproRunRow) -> Re
             run.comment_posted = publish(ctx.config, ctx.db, gh, n, &run, &ctx.cfg).await;
         }
     }
-    let id = ctx.db.insert_repro_run(&run)?;
-    run.id = id;
+    ctx.db.update_repro_run(&run)?;
     Ok(run)
 }
 
@@ -1175,8 +1516,9 @@ pub async fn publish(
     posted
 }
 
-/// Patterns that make a generated test unfit for a PR that CI will run with
-/// repository secrets.
+/// Defense in depth only (the real guards are: new files only, blocked
+/// paths, trusted authors, draft PR). Content patterns that make a test
+/// unfit for a branch whose CI may run with secrets.
 const PR_BLOCKED_PATTERNS: &[&str] = &[
     "curl ",
     "wget ",
@@ -1191,6 +1533,11 @@ const PR_BLOCKED_PATTERNS: &[&str] = &[
     "api_key",
     "base64",
     "/dev/tcp",
+    "socket",
+    "subprocess",
+    "child_process",
+    "exec(",
+    "eval(",
 ];
 
 pub fn pr_safety_violations(files: &[ReproFile]) -> Vec<String> {
@@ -1206,11 +1553,13 @@ pub fn pr_safety_violations(files: &[ReproFile]) -> Vec<String> {
     v
 }
 
+/// Build the draft test PR from a FRESH clone (never from the checkout the
+/// generated code was written into and the sandbox read), with only the new
+/// test files, pushed to a branch that must not exist yet (no force push).
 async fn open_test_pr(
     ctx: &JobContext<'_>,
     gh: &Forge,
     issue: &Issue,
-    dir: &Path,
     snap: &RepoSnapshot,
     plan: &ReproPlan,
 ) -> Result<Option<u64>> {
@@ -1219,7 +1568,11 @@ async fn open_test_pr(
     let files: Vec<ReproFile> = plan
         .files
         .iter()
-        .filter(|f| !f.path.trim_start_matches("./").starts_with(SCRATCH_DIR))
+        .filter(|f| {
+            safe_relative_path(&f.path)
+                .map(|p| !p.starts_with(SCRATCH_DIR))
+                .unwrap_or(false)
+        })
         .cloned()
         .collect();
     if files.is_empty() {
@@ -1229,22 +1582,45 @@ async fn open_test_pr(
     let violations = pr_safety_violations(&files);
     anyhow::ensure!(
         violations.is_empty(),
-        "generated test touches network/env/secrets: {}",
+        "generated test touches network/env/secrets/processes: {}",
         violations.join(", ")
     );
     let branch = format!("wshm/repro-{n}");
+    let refname = format!("refs/heads/{branch}");
+    let existing = git(
+        None,
+        &["ls-remote", "--heads", "--", &ctx.clone_url, &refname],
+        &ctx.git_env,
+    )
+    .await?;
+    anyhow::ensure!(
+        existing.trim().is_empty(),
+        "branch {branch} already exists; not overwriting it"
+    );
+
+    let dir = ctx
+        .work_root
+        .join(format!("issue-{n}-pr-{}", unique_suffix()));
+    let _cleanup = WorkDir(dir.clone());
+    clone_default_branch(ctx, &dir).await?;
+    let head = git(Some(&dir), &["rev-parse", "HEAD"], &[]).await?;
+    anyhow::ensure!(
+        head == snap.head_sha,
+        "default branch moved since the reproduction ran"
+    );
+    write_files(&dir, &files)?;
+    git(Some(&dir), &["checkout", "-q", "-b", &branch], &[]).await?;
+    let mut add = vec!["add", "--"];
     let paths: Vec<String> = files
         .iter()
         .map(|f| safe_relative_path(&f.path).map(|p| p.to_string_lossy().to_string()))
         .collect::<Result<_>>()?;
-    git(Some(dir), &["checkout", "-b", &branch], &[]).await?;
-    let mut add = vec!["add", "--"];
     add.extend(paths.iter().map(String::as_str));
-    git(Some(dir), &add, &[]).await?;
+    git(Some(&dir), &add, &[]).await?;
     let name = format!("user.name={}", ctx.config.branding.name);
     let msg = format!("test: failing reproduction for #{n}");
     git(
-        Some(dir),
+        Some(&dir),
         &[
             "-c",
             &name,
@@ -1253,16 +1629,17 @@ async fn open_test_pr(
             "-c",
             "commit.gpgsign=false",
             "commit",
+            "-q",
             "-m",
             &msg,
         ],
         &[],
     )
     .await?;
-    let refspec = format!("HEAD:refs/heads/{branch}");
+    let refspec = format!("HEAD:{refname}");
     git(
-        Some(dir),
-        &["push", "--force", &ctx.clone_url, &refspec],
+        Some(&dir),
+        &["push", "--", &ctx.clone_url, &refspec],
         &ctx.git_env,
     )
     .await?;
@@ -1273,7 +1650,7 @@ async fn open_test_pr(
     let body = format!(
         "{}Adds a failing test reproducing #{n}, generated automatically. It fails on `{}` @ `{}` and should pass once the bug is fixed.\n\n> Draft: review the test before running CI on it.\n\n{}",
         ctx.config.branding.header(),
-        snap.default_branch,
+        sanitize_prose(&snap.default_branch, 100),
         short_sha(&snap.head_sha),
         ctx.config.branding.footer("Reproduced"),
     );

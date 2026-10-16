@@ -2385,10 +2385,11 @@ labels_needs_info = "needs-info"
 # trusted_authors_only = true   # only reports from collaborators
 # timeout_secs = 300
 # max_runs_per_day = 20
-# network = false               # sandbox without network
+# max_runs_per_day_global = 100 # across all repos (TOML only)
+# network = false               # true exposes the host network and cloud metadata (169.254.169.254)
 # post_comment = true
-# create_test_pr = false        # draft PR with the failing test when confirmed
-# labels = { confirmed = "repro:confirmed", not_reproduced = "repro:not-reproduced", needs_info = "needs-info" }
+# create_test_pr = false        # draft PR with the failing test; requires trusted_authors_only
+# labels = { confirmed = "repro:confirmed", not_reproduced = "repro:not-reproduced", needs_info = "repro:needs-info" }
 
 [pr]
 enabled = true

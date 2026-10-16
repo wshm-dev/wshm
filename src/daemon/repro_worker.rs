@@ -59,6 +59,9 @@ impl Drop for Guard {
 
 async fn run(resolver: Resolver, mut rx: mpsc::Receiver<ReproRequest>) {
     info!("Reproduction worker started (max {MAX_CONCURRENT_REPRO} concurrent)");
+    if let Some(sb) = pro_hooks::repro_sandbox() {
+        (sb.cleanup)().await;
+    }
     let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_REPRO));
     let in_flight: InFlight = Arc::new(StdMutex::new(HashSet::new()));
 
@@ -138,6 +141,8 @@ async fn run_one(
         db: state.db.as_ref(),
         gh: Some(&*gh),
         cfg,
+        // Global cap: TOML value only (not overridable per repo).
+        global_max: config.triage.repro.max_runs_per_day_global,
         write: state.apply(),
         clone_url,
         git_env: repro::git_auth_env(config),

@@ -16,13 +16,32 @@ use super::{Capability, CommentRef, GitProvider, MergedPr, Thread};
 /// for labels, assignees and comments, hence the identical delegations.
 pub struct GitHubProvider {
     client: Client,
+    /// Token owner's login, resolved once (only used to recognise the bot's
+    /// own tagged comments; not exposed as `self_username` so the
+    /// slash-command self-guard keeps its historical GitHub behaviour).
+    me: tokio::sync::OnceCell<String>,
 }
 
 impl GitHubProvider {
     pub fn new(config: &Config) -> Result<Self> {
         Ok(Self {
             client: Client::new(config)?,
+            me: tokio::sync::OnceCell::new(),
         })
+    }
+
+    async fn token_login(&self) -> Option<String> {
+        if !self.client.authenticated {
+            return None;
+        }
+        self.me
+            .get_or_try_init(|| async {
+                self.client.octocrab.current().user().await.map(|u| u.login)
+            })
+            .await
+            .map_err(|e| tracing::warn!("github: cannot resolve the token owner: {e}"))
+            .ok()
+            .cloned()
     }
 
     /// Access the underlying client.
@@ -211,7 +230,10 @@ impl GitProvider for GitHubProvider {
     }
 
     async fn upsert_tagged_comment(&self, number: u64, tag: &str, body: &str) -> Result<()> {
-        self.client.upsert_tagged_comment(number, tag, body).await
+        let me = self.token_login().await;
+        self.client
+            .upsert_tagged_comment(number, tag, body, me.as_deref())
+            .await
     }
 
     async fn is_collaborator(&self, username: &str) -> Result<bool> {

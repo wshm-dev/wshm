@@ -208,8 +208,10 @@ impl Client {
     /// Returns `Some(comment_id)` if found, `None` otherwise.
     /// Searches for both the custom marker and the legacy `<!-- wshm -->` marker.
     pub async fn find_wshm_comment(&self, number: u64, marker: &str) -> Result<Option<u64>> {
-        self.find_comment_where(number, |b| {
-            b.contains(marker) || b.contains(WSHM_COMMENT_MARKER)
+        self.find_comment_where(number, |c| {
+            let b = c.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            (b.contains(marker) || b.contains(WSHM_COMMENT_MARKER))
+                && !b.contains(crate::git_provider::TAGGED_COMMENT_PREFIX)
         })
         .await
     }
@@ -217,10 +219,34 @@ impl Client {
     /// Create or update the comment whose body contains `tag` (strict: the
     /// generic/legacy marker does not match), so a feature can keep its own
     /// comment next to the triage one.
-    pub async fn upsert_tagged_comment(&self, number: u64, tag: &str, body: &str) -> Result<()> {
-        if let Some(id) = self.find_comment_where(number, |b| b.contains(tag)).await? {
-            info!("Updating tagged wshm comment {id} on #{number}");
-            return self.update_comment(id, body).await;
+    /// `me` is the login of the token owner (`None` when unknown, e.g. GitHub
+    /// App installation tokens): only the bot's own tagged comment is updated.
+    pub async fn upsert_tagged_comment(
+        &self,
+        number: u64,
+        tag: &str,
+        body: &str,
+        me: Option<&str>,
+    ) -> Result<()> {
+        let found = self
+            .find_comment_where(number, |c| {
+                crate::git_provider::tagged_comment_matches(
+                    c.get("body").and_then(|v| v.as_str()).unwrap_or(""),
+                    c["user"]["login"].as_str().unwrap_or(""),
+                    tag,
+                    me,
+                )
+            })
+            .await?;
+        match crate::git_provider::tagged_target(found, me) {
+            crate::git_provider::TaggedTarget::Refuse => anyhow::bail!(
+                "a tagged comment exists on #{number} but the bot identity is unknown; not posting"
+            ),
+            crate::git_provider::TaggedTarget::Update(id) => {
+                info!("Updating tagged wshm comment {id} on #{number}");
+                return self.update_comment(id, body).await;
+            }
+            crate::git_provider::TaggedTarget::Create => {}
         }
         crate::retry::with_retry_connect_only("github: create comment", || async {
             self.octocrab
@@ -236,7 +262,7 @@ impl Client {
     async fn find_comment_where(
         &self,
         number: u64,
-        matches: impl Fn(&str) -> bool,
+        matches: impl Fn(&serde_json::Value) -> bool,
     ) -> Result<Option<u64>> {
         let mut url = format!(
             "https://api.github.com/repos/{}/{}/issues/{number}/comments?per_page={pp}",
@@ -252,9 +278,7 @@ impl Client {
             let comments = super::parse_json_array(&body, "comments")?;
 
             for comment in &comments {
-                let comment_body = comment.get("body").and_then(|v| v.as_str()).unwrap_or("");
-
-                if matches(comment_body) {
+                if matches(comment) {
                     if let Some(id) = comment.get("id").and_then(|v| v.as_u64()) {
                         return Ok(Some(id));
                     }

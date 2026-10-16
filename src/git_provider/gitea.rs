@@ -742,16 +742,25 @@ impl GitProvider for GiteaProvider {
 
     async fn upsert_tagged_comment(&self, number: u64, tag: &str, body: &str) -> Result<()> {
         self.rest.require_auth("comment")?;
+        let me = self.self_username().await;
         let mut found = None;
         self.list(&format!("issues/{number}/comments"), |c| {
-            if c["body"].as_str().unwrap_or("").contains(tag) {
+            if super::tagged_comment_matches(
+                c["body"].as_str().unwrap_or(""),
+                c["user"]["login"].as_str().unwrap_or(""),
+                tag,
+                me.as_deref(),
+            ) {
                 found = c["id"].as_u64();
             }
             found.is_none()
         })
         .await?;
-        match found {
-            Some(id) => {
+        match super::tagged_target(found, me.as_deref()) {
+            super::TaggedTarget::Refuse => anyhow::bail!(
+                "a tagged comment exists on #{number} but the bot identity is unknown; not posting"
+            ),
+            super::TaggedTarget::Update(id) => {
                 let existing = CommentRef {
                     thread: Thread::Issue(number),
                     id,
@@ -759,7 +768,7 @@ impl GitProvider for GiteaProvider {
                 };
                 self.update_comment(&existing, body).await
             }
-            None => {
+            super::TaggedTarget::Create => {
                 self.rest
                     .send_json(
                         Method::POST,
