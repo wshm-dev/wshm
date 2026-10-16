@@ -333,6 +333,30 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
     let number = event.number;
     info!("Handling pull_request event: number={number:?}");
 
+    // Closed or merged: remove its diagram page (`[pr.review_diagrams]`),
+    // refresh the cached state, and stop there (nothing to analyze or review
+    // on a closed PR).
+    if event.action == "closed" {
+        if let Some(n) = number {
+            crate::diagrams::cleanup_pr(&state.config, state.db.as_ref(), state.gh().as_ref(), n)
+                .await;
+        }
+        // Refresh just this PR (state closed/merged), not a full sync: every
+        // merge would otherwise re-list every PR of the repo.
+        if let (Some(n), true) = (number, state.features().collect_prs) {
+            match state.gh().fetch_pull(n).await {
+                Ok(Some(pr)) => {
+                    if let Err(e) = state.db.upsert_pull(&pr) {
+                        warn!("Failed to cache closed PR #{n}: {e}");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warn!("Could not refresh closed PR #{n}: {e:#}"),
+            }
+        }
+        return Ok(());
+    }
+
     // Skip if blacklisted or already analyzed (prevent AI credit exhaustion)
     if let Some(n) = number {
         if state.config.prs_blacklist.contains(&n) {
@@ -458,15 +482,31 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
         apply: state.apply(),
     };
 
-    pipelines::pr_analysis::run(
+    // The diagram step comes back as jobs: they run in the background with
+    // their own concurrency limit, after the analysis comment is posted, so
+    // a slow AI never holds this event's permit. Daemon runs never preview.
+    let gh = state.gh();
+    let jobs = pipelines::pr_analysis::run_with(
         &state.config,
         state.db.as_ref(),
-        &*state.gh(),
+        &*gh,
         &args,
         false,
         None,
+        pipelines::pr_analysis::RunOptions {
+            preview: false,
+            diagrams: pipelines::pr_analysis::DiagramMode::Deferred,
+        },
     )
     .await?;
+    for job in jobs {
+        pipelines::pr_analysis::spawn_diagram_job(
+            std::sync::Arc::clone(&state.config),
+            std::sync::Arc::clone(&state.db),
+            std::sync::Arc::clone(&gh),
+            job,
+        );
+    }
 
     // Store in ICM if enabled
     if state.config.daemon.icm_enabled {

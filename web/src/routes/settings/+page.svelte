@@ -44,10 +44,14 @@
 		discoverRepoDomains,
 		fetchRepoSkills,
 		updateRepoSkills,
+		fetchRepoDiagrams,
+		updateRepoDiagrams,
 		fetchRetrySettings,
 		updateRetrySettings,
 		type ReviewDomain,
 		type Skill,
+		type DiagramSettings,
+		type RepoDiagramsResponse,
 		type RepoFeatures,
 		type RetrySettings,
 		type LicenseInfo,
@@ -378,6 +382,79 @@
 		skillsDraft = [...skillsDraft];
 	}
 
+	// PR diagrams ([pr.review_diagrams]): TOML default, per-repo override in
+	// the DB (shared by every pod). Managed in the "Diagrams" tab.
+	const DIAGRAM_KINDS = ['architecture', 'flow', 'changes', 'delta', 'dependency'];
+	let diagramsRepo: string = $state('');
+	let diagramsInfo: RepoDiagramsResponse | null = $state(null);
+	let diagramsDraft: DiagramSettings | null = $state(null);
+	let diagramsLoading: boolean = $state(false);
+	let diagramsSaving: boolean = $state(false);
+	let diagramsMessage: string | null = $state(null);
+	let diagramsMessageErr: boolean = $state(false);
+
+	function setDiagramsInfo(r: RepoDiagramsResponse) {
+		diagramsInfo = r;
+		diagramsDraft = JSON.parse(JSON.stringify(r.effective));
+	}
+	async function loadDiagramsFor(slug: string) {
+		diagramsRepo = slug;
+		diagramsInfo = null;
+		diagramsDraft = null;
+		diagramsMessage = null;
+		if (!slug) return;
+		diagramsLoading = true;
+		try {
+			setDiagramsInfo(await fetchRepoDiagrams(slug));
+		} catch (e) {
+			diagramsMessage = e instanceof Error ? e.message : 'Failed to load diagram settings';
+			diagramsMessageErr = true;
+		}
+		diagramsLoading = false;
+	}
+	async function saveDiagrams(reset: boolean) {
+		if (!diagramsRepo || !diagramsDraft) return;
+		diagramsSaving = true;
+		diagramsMessage = null;
+		try {
+			let body: DiagramSettings | null = null;
+			if (!reset) {
+				body = JSON.parse(JSON.stringify(diagramsDraft)) as DiagramSettings;
+				const p = body.publish as unknown as Record<string, unknown>;
+				// TOML-only (destinations, credentials routing, private-repo
+				// safeguard): the server rejects them in a per-repo override.
+				for (const k of ['dir', 'pages_repo', 'allow_private', 'public_url', 'bucket', 'region', 'endpoint', 'container', 'account']) {
+					delete p[k];
+				}
+				const int = (v: unknown) => Math.max(0, Math.floor(Number(v) || 0));
+				body.publish.retention_days = int(body.publish.retention_days);
+				body.publish.max_pages = int(body.publish.max_pages);
+				body.publish.max_diff_kb = int(body.publish.max_diff_kb);
+				body.active_days = int(body.active_days);
+				body.max_mermaid_chars = int(body.max_mermaid_chars);
+				body.timeout_secs = Math.max(1, int(body.timeout_secs));
+				body.max_summary_calls = int(body.max_summary_calls);
+			}
+			setDiagramsInfo(await updateRepoDiagrams(diagramsRepo, body));
+			diagramsMessage = reset ? 'Override removed: the TOML settings apply.' : 'Saved.';
+			diagramsMessageErr = false;
+		} catch (e) {
+			diagramsMessage = e instanceof Error ? e.message : 'save failed';
+			diagramsMessageErr = true;
+		}
+		diagramsSaving = false;
+	}
+	function fmtBytes(n: number): string {
+		if (n < 1024) return `${n} B`;
+		if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+		return `${(n / 1024 / 1024).toFixed(1)} MB`;
+	}
+	function toggleDiagramKind(kind: string) {
+		if (!diagramsDraft) return;
+		const has = diagramsDraft.kinds.includes(kind);
+		diagramsDraft.kinds = has ? diagramsDraft.kinds.filter((k) => k !== kind) : [...diagramsDraft.kinds, kind];
+	}
+
 	async function openFeaturesModal(slug: string) {
 		featuresSlug = slug;
 		featuresDraft = null;
@@ -692,6 +769,7 @@
 		<Tabs.Trigger value="users">{$t('settings.tabs.users')}</Tabs.Trigger>
 		<Tabs.Trigger value="domains">Domains</Tabs.Trigger>
 		<Tabs.Trigger value="skills">Skills</Tabs.Trigger>
+		<Tabs.Trigger value="diagrams">Diagrams</Tabs.Trigger>
 	</Tabs.List>
 
 	<!-- ========================= REPOSITORIES ========================= -->
@@ -1588,6 +1666,211 @@
 						{/if}
 					{:else}
 						<p class="text-xs text-muted-foreground">Select a repository to manage its skills.</p>
+					{/if}
+				</Card.Content>
+			</Card.Root>
+		</div>
+	</Tabs.Content>
+
+	<!-- ========================= DIAGRAMS ========================= -->
+	<Tabs.Content value="diagrams" class="mt-2">
+		<div class="w-full space-y-4">
+			<Card.Root>
+				<Card.Header>
+					<Card.Title>PR diagrams</Card.Title>
+					<Card.Description class="text-xs">
+						Architecture diagram added to the PR analysis comment (Mermaid), plus an optional
+						interactive page. Defaults come from <code>[pr.review_diagrams]</code> in the TOML; what you
+						save here overrides them for this repository only (stored in the database, shared by every
+						pod). Takes effect on the next PR pass — no restart needed.
+					</Card.Description>
+				</Card.Header>
+				<Card.Content class="space-y-3">
+					<div>
+						<Label class="text-xs mb-1">Repository</Label>
+						<select
+							class="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+							value={diagramsRepo}
+							onchange={(e) => loadDiagramsFor((e.currentTarget as HTMLSelectElement).value)}
+						>
+							<option value="" disabled>Select a repository…</option>
+							{#each reposList?.repos ?? [] as r}
+								<option value={r.slug}>{r.slug}</option>
+							{/each}
+						</select>
+					</div>
+
+					{#if diagramsMessage}
+						{@render statusAlert(diagramsMessage, diagramsMessageErr)}
+					{/if}
+
+					{#if diagramsRepo}
+						{#if diagramsLoading}
+							<p class="text-xs text-muted-foreground">{$t('common.loading')}</p>
+						{:else if diagramsDraft}
+							<p class="text-[0.7rem] text-muted-foreground">
+								{#if diagramsInfo?.override}
+									<Badge variant="secondary">per-repo override</Badge> saved in the database.
+								{:else}
+									Using the TOML settings (no per-repo override).
+								{/if}
+							</p>
+							{#if diagramsInfo}
+								<p class="text-[0.7rem] text-muted-foreground">
+									Storage: {diagramsInfo.stats.pages} published page{diagramsInfo.stats.pages === 1 ? '' : 's'}
+									({fmtBytes(diagramsInfo.stats.page_bytes)}), {diagramsInfo.stats.graphs} cached
+									graph{diagramsInfo.stats.graphs === 1 ? '' : 's'} ({fmtBytes(diagramsInfo.stats.db_bytes)} in the database).
+								</p>
+							{/if}
+
+							<div class="grid gap-3 sm:grid-cols-2">
+								<label class="flex items-center gap-2 text-xs">
+									<input type="checkbox" class="h-4 w-4" bind:checked={diagramsDraft.enabled} />
+									Enabled
+								</label>
+								<label class="flex items-center gap-2 text-xs">
+									<input type="checkbox" class="h-4 w-4" bind:checked={diagramsDraft.diff_viewer} />
+									Embed the diff in the interactive page
+								</label>
+								<div>
+									<Label class="text-xs mb-1">Text</Label>
+									<select class="w-full rounded-md border bg-background px-2 py-1.5 text-xs" bind:value={diagramsDraft.text}>
+										<option value="short">short — 1-sentence story, short captions</option>
+										<option value="normal">normal — + component details and table</option>
+										<option value="full">full — 2-3 sentences per step</option>
+									</select>
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Language</Label>
+									<Input class="h-8" placeholder="en" bind:value={diagramsDraft.language} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">In the comment</Label>
+									<select class="w-full rounded-md border bg-background px-2 py-1.5 text-xs" bind:value={diagramsDraft.comment}>
+										<option value="mermaid">mermaid — diagram, story and walkthrough</option>
+										<option value="none">none — link to the page only</option>
+									</select>
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Skip PRs idle for more than (days, 0 = never)</Label>
+									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.active_days} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Max Mermaid size (chars, 0 = no cap)</Label>
+									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.max_mermaid_chars} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Time budget of the diagram step (seconds)</Label>
+									<Input class="h-8" type="number" min="1" bind:value={diagramsDraft.timeout_secs} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Max summary calls for large diffs</Label>
+									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.max_summary_calls} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Kinds</Label>
+									<div class="flex flex-wrap gap-3 text-[0.7rem] text-muted-foreground">
+										{#each DIAGRAM_KINDS as k}
+											<label class="flex items-center gap-1">
+												<input
+													type="checkbox"
+													class="h-3.5 w-3.5"
+													checked={diagramsDraft.kinds.includes(k)}
+													onchange={() => toggleDiagramKind(k)}
+												/>
+												{k}{k === 'architecture' ? '' : ' (soon)'}
+											</label>
+										{/each}
+									</div>
+								</div>
+							</div>
+
+							<h5 class="text-xs uppercase text-muted-foreground font-semibold pt-2">Interactive page</h5>
+							<div class="grid gap-3 sm:grid-cols-2">
+								<div>
+									<Label class="text-xs mb-1">Publish to</Label>
+									<select class="w-full rounded-md border bg-background px-2 py-1.5 text-xs" bind:value={diagramsDraft.publish.target}>
+										<option value="off">off</option>
+										<option value="local">local directory</option>
+										<option value="github-pages">GitHub Pages (gh-pages branch)</option>
+										<option value="wshm">hosted by wshm (Pro){diagramsInfo?.hosting_available ? '' : ' — not licensed'}</option>
+										<option value="s3">S3 / S3-compatible</option>
+										<option value="gcs">Google Cloud Storage</option>
+										<option value="azure">Azure Blob Storage</option>
+									</select>
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Public URL (TOML only)</Label>
+									<Input class="h-8" disabled value={diagramsDraft.publish.public_url ?? '(not set in the TOML)'} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Key prefix</Label>
+									<Input class="h-8" bind:value={diagramsDraft.publish.prefix} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Retention (days, 0 = until the PR closes)</Label>
+									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.publish.retention_days} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Max pages (oldest evicted first)</Label>
+									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.publish.max_pages} />
+								</div>
+								<div>
+									<Label class="text-xs mb-1">Max embedded diff (KB, bigger = link to Files changed)</Label>
+									<Input class="h-8" type="number" min="0" bind:value={diagramsDraft.publish.max_diff_kb} />
+								</div>
+								{#if diagramsDraft.publish.target === 'local'}
+									<div>
+										<Label class="text-xs mb-1">Directory (TOML only)</Label>
+										<Input class="h-8" disabled value={diagramsDraft.publish.dir ?? '(not set in the TOML)'} />
+									</div>
+								{/if}
+								{#if diagramsDraft.publish.target === 'github-pages'}
+									<div>
+										<Label class="text-xs mb-1">Pages repository (TOML only)</Label>
+										<Input class="h-8" disabled value={diagramsDraft.publish.pages_repo ?? '(not set in the TOML)'} />
+										<p class="text-[0.7rem] text-muted-foreground mt-1">
+											If this repository is public, its file tree and git history list every page:
+											the random token in the file name does not prevent enumeration there.
+										</p>
+									</div>
+								{/if}
+								{#if ['s3', 'gcs', 'azure'].includes(diagramsDraft.publish.target)}
+									{#each (diagramsDraft.publish.target === 'azure' ? ['account', 'container'] : ['bucket', 'region', 'endpoint']) as field}
+										<div>
+											<Label class="text-xs mb-1">{field} (TOML only)</Label>
+											<Input
+												class="h-8"
+												disabled
+												value={(diagramsDraft.publish as unknown as Record<string, string | null>)[field] ?? '(not set in the TOML)'}
+											/>
+										</div>
+									{/each}
+									<p class="text-[0.7rem] text-muted-foreground sm:col-span-2">
+										Pages are uploaded as text/html; the link uses the public URL above (else the
+										provider's canonical URL). Credentials come from the provider's usual chain
+										(environment, workload identity), never from these settings.
+									</p>
+								{/if}
+								<label class="flex items-center gap-2 text-xs sm:col-span-2">
+									<input type="checkbox" class="h-4 w-4" disabled checked={diagramsDraft.publish.allow_private} />
+									Allow a public target for a private repository (TOML only: <code>publish.allow_private</code>)
+								</label>
+							</div>
+
+							<div class="flex gap-2">
+								<Button size="sm" onclick={() => saveDiagrams(false)} disabled={diagramsSaving}>
+									{diagramsSaving ? $t('common.loading') : $t('common.save')}
+								</Button>
+								{#if diagramsInfo?.override}
+									<Button size="sm" variant="outline" onclick={() => saveDiagrams(true)} disabled={diagramsSaving}>
+										Reset to TOML
+									</Button>
+								{/if}
+							</div>
+						{/if}
+					{:else}
+						<p class="text-xs text-muted-foreground">Select a repository to manage its diagram settings.</p>
 					{/if}
 				</Card.Content>
 			</Card.Root>

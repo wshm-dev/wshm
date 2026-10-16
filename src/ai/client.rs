@@ -295,6 +295,9 @@ impl AiClient {
         let output = tokio::process::Command::new("claude")
             .args(["-p", &prompt, "--output-format", "text"])
             .env("CLAUDE_MODEL", &self.provider.model)
+            // A caller that gives up (timeout, dropped task) must not leave
+            // the CLI running.
+            .kill_on_drop(true)
             .output()
             .await
             .context("Failed to run `claude -p`. Is claude CLI installed? (npm install -g @anthropic-ai/claude-code)")?;

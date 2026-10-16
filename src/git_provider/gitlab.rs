@@ -793,6 +793,17 @@ impl GitProvider for GitLabProvider {
         Ok(out)
     }
 
+    async fn fetch_repo_private(&self) -> Result<bool> {
+        let project = self
+            .rest
+            .get_json(&format!("{}/projects/{}", self.api, self.project))
+            .await?;
+        match project["visibility"].as_str() {
+            Some(v) => Ok(v != "public"),
+            None => anyhow::bail!("GitLab: project has no 'visibility' field"),
+        }
+    }
+
     async fn is_collaborator(&self, username: &str) -> Result<bool> {
         let Some(id) = self.user_id(username).await? else {
             return Ok(false);

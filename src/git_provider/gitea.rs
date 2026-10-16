@@ -769,6 +769,21 @@ impl GitProvider for GiteaProvider {
         Ok(out)
     }
 
+    async fn fetch_repo_private(&self) -> Result<bool> {
+        let repo = self
+            .rest
+            .get_json(&format!(
+                "{}/repos/{}/{}",
+                self.api,
+                urlencoding::encode(&self.owner),
+                urlencoding::encode(&self.repo)
+            ))
+            .await?;
+        repo["private"]
+            .as_bool()
+            .ok_or_else(|| anyhow::anyhow!("{}: repo has no 'private' field", self.flavor))
+    }
+
     async fn is_collaborator(&self, username: &str) -> Result<bool> {
         if username.is_empty()
             || !username

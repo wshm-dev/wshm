@@ -26,3 +26,6 @@ web/build/
 .DS_Store
 *.swp
 *.swo
+
+# Diagram viewer bundle sources (the built bundle lives in src/diagrams/assets)
+web/diagram-viewer/node_modules/
