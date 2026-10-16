@@ -1431,19 +1431,8 @@ pub struct ExportConfig {
     pub webhooks: Vec<WebhookConfig>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct StorageConfig {
-    pub provider: String,
-
-    #[serde(default)]
-    pub bucket: Option<String>,
-
-    #[serde(default)]
-    pub prefix: Option<String>,
-
-    #[serde(default)]
-    pub region: Option<String>,
-}
+/// `[export.storage]`: same shape as every object storage target.
+pub type StorageConfig = crate::storage::StorageTargetConfig;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct DatabaseExportConfig {

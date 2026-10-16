@@ -15,6 +15,7 @@ pub mod pro_hooks;
 pub mod retry;
 pub mod run;
 pub mod secrets;
+pub mod storage;
 pub mod telemetry;
 pub mod tui;
 pub mod update;
