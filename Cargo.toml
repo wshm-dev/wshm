@@ -12,9 +12,19 @@ path = "src/main.rs"
 [features]
 default = []
 
-# Export sinks (cloud storage)
-export-s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
-export-gcs = ["dep:google-cloud-storage"]
+# Object storage providers for `wshm_core::storage` (export sinks and page
+# publishing). The local-directory provider is always available; each cloud
+# provider pulls its `object_store` backend only when enabled.
+storage-s3 = ["object_store/aws"]
+storage-gcs = ["object_store/gcp"]
+storage-azure = ["object_store/azure"]
+storage-all = ["storage-s3", "storage-gcs", "storage-azure"]
+
+# Export sinks (cloud storage). Kept as aliases of the storage-* features so
+# existing `--features export-s3` builds keep working.
+export-s3 = ["storage-s3"]
+export-gcs = ["storage-gcs"]
+export-azure = ["storage-azure"]
 
 # Export sinks (databases)
 # Note: PostgreSQL backend and SQLite→Postgres migration are wshm-pro
@@ -31,7 +41,7 @@ vault-gcp = ["dep:google-cloud-secretmanager-v1"]
 
 # Convenience bundles
 export-all = [
-    "export-s3", "export-gcs",
+    "export-s3", "export-gcs", "export-azure",
     "export-elastic", "export-opensearch", "export-mongodb",
     "export-mysql",
 ]
@@ -89,10 +99,12 @@ rand = "0.8"
 # Encrypted secret vault (AES-256-GCM with master key from WSHM_MASTER_KEY).
 aes-gcm = "0.10"
 
-# Optional: Export - Cloud Storage
-aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
+# Object storage (wshm_core::storage). Only the local filesystem backend is
+# built by default; cloud backends are enabled by the storage-* features.
+object_store = { version = "0.14", default-features = false, features = ["fs"] }
+
+# Optional: Vault - AWS shared config loader (used by vault-aws)
 aws-config = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process", "sso"] }
-google-cloud-storage = { version = "1", optional = true }
 
 # Optional: Export - Databases
 elasticsearch = { version = "9.1.0-alpha.1", optional = true }
