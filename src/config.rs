@@ -107,6 +107,13 @@ pub struct Config {
     #[serde(default)]
     pub labels: Vec<LabelDef>,
 
+    /// `[[skills]]` — versionable SEED for the DB-backed skills list. Copied
+    /// into `app_settings` at startup by [`seed_skills`]; after that the DB
+    /// (edited in Settings → Skills) is the source of truth and these
+    /// entries never overwrite it. Pipelines read [`load_skills`], not this.
+    #[serde(default)]
+    pub skills: Vec<SkillDef>,
+
     /// Resolved at runtime, not from config file
     #[serde(skip)]
     pub repo_owner: String,
@@ -1070,7 +1077,7 @@ pub fn domains_prompt(domains: &[DomainDef], custom: Option<&str>) -> String {
 /// triage/PR-review calls rather than a whole Claude session. Users write
 /// these in Settings; `skills_prompt` renders the ones that match the
 /// current pipeline into the user prompt, right after domains.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct SkillDef {
     /// Short human name (e.g. "rust-error-handling").
     pub name: String,
@@ -1082,9 +1089,9 @@ pub struct SkillDef {
     /// The actual instructions appended to the prompt verbatim.
     pub content: String,
 
-    /// Which pipelines this skill applies to: any of "triage", "pr_review",
-    /// "review" (inline code review), "diagrams" (PR diagrams). Empty means
-    /// all of them.
+    /// Which pipelines this skill applies to: any of [`SKILL_PIPELINES`]
+    /// ("triage", "pr_review", "review" = inline code review, "diagrams").
+    /// Empty means all of them.
     #[serde(default)]
     pub pipelines: Vec<String>,
 
@@ -1093,8 +1100,35 @@ pub struct SkillDef {
     pub enabled: bool,
 }
 
+/// Pipeline names a [`SkillDef::pipelines`] entry may target.
+pub const SKILL_PIPELINES: &[&str] = &["triage", "pr_review", "review", "diagrams"];
+
+/// Strip pipeline values that aren't in [`SKILL_PIPELINES`], returning one
+/// human-readable warning per change. A skill whose every pipeline was
+/// unknown is disabled rather than left with an empty list (empty = ALL
+/// pipelines, which would widen a typo into "apply everywhere").
+pub fn sanitize_skill_pipelines(skill: &mut SkillDef) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let had_any = !skill.pipelines.is_empty();
+    let name = skill.name.clone();
+    skill.pipelines.retain(|p| {
+        let ok = SKILL_PIPELINES.contains(&p.as_str());
+        if !ok {
+            warnings.push(format!("skill '{name}': unknown pipeline '{p}' removed"));
+        }
+        ok
+    });
+    if had_any && skill.pipelines.is_empty() && skill.enabled {
+        skill.enabled = false;
+        warnings.push(format!(
+            "skill '{name}': no known pipeline left, disabled (expected any of {SKILL_PIPELINES:?})"
+        ));
+    }
+    warnings
+}
+
 /// Build the AI-prompt fragment listing the skills that apply to `pipeline`
-/// ("triage" or "pr_review"). Mirrors [`domains_prompt`]'s DB-backed,
+/// (one of [`SKILL_PIPELINES`]). Mirrors [`domains_prompt`]'s DB-backed,
 /// stateless-pods-safe pattern — see its doc comment for why this isn't TOML.
 /// Returns empty when no enabled skill matches.
 pub fn skills_prompt(skills: &[SkillDef], pipeline: &str) -> String {
@@ -1150,6 +1184,166 @@ looks correct and reasonably simple, say so briefly instead of inventing issues.
         pipelines: vec![],
         enabled: true,
     }]
+}
+
+/// What [`seed_skills`] did, for logging and tests.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SkillSeedOutcome {
+    /// Names written into the DB list by this call.
+    pub added: Vec<String>,
+    /// True when this call created the `SKILLS_KEY` row (first ever seed).
+    pub created: bool,
+}
+
+/// Seed the DB-backed skills list from the TOML `[[skills]]` (see
+/// [`Config::skills`]). TOML is the versionable default, the DB the source of
+/// truth once seeded:
+///
+/// - `SKILLS_KEY` never written → write the TOML skills, or [`default_skills`]
+///   when the TOML defines none.
+/// - `SKILLS_KEY` exists → append only TOML skills whose name is neither in
+///   the list nor already seeded once (`SKILLS_SEEDED_KEY`), so a skill
+///   edited, disabled or deleted in the dashboard is never overwritten,
+///   re-enabled or resurrected.
+///
+/// Idempotent and safe when several pods start at once: the first write is an
+/// atomic insert-if-absent and later merges are compare-and-swap retried on
+/// conflict, so a concurrent dashboard save or another pod's seed is never
+/// clobbered. An unparseable stored list is left untouched.
+pub fn seed_skills(
+    db: &dyn crate::db::backend::DatabaseBackend,
+    toml_skills: &[SkillDef],
+) -> Result<SkillSeedOutcome> {
+    use crate::db::settings::{SKILLS_KEY, SKILLS_SEEDED_KEY};
+    const MAX_ATTEMPTS: usize = 8;
+
+    // First occurrence wins on duplicate names in the TOML. Unknown pipeline
+    // values are stripped here so a TOML typo can never land in the DB list
+    // (where it would make every Settings save carry an invalid value).
+    let sanitized: Vec<SkillDef> = toml_skills
+        .iter()
+        .cloned()
+        .map(|mut s| {
+            for w in sanitize_skill_pipelines(&mut s) {
+                tracing::warn!("[[skills]] {w}");
+            }
+            s
+        })
+        .collect();
+    let mut seeds: Vec<&SkillDef> = Vec::new();
+    for s in &sanitized {
+        if s.name.trim().is_empty() {
+            tracing::warn!("[[skills]] entry with an empty name ignored");
+            continue;
+        }
+        if seeds.iter().any(|x| x.name == s.name) {
+            tracing::warn!(skill = %s.name, "duplicate [[skills]] name ignored");
+            continue;
+        }
+        seeds.push(s);
+    }
+
+    let mut outcome = SkillSeedOutcome::default();
+    let mut done = false;
+    for _ in 0..MAX_ATTEMPTS {
+        match db.get_app_setting(SKILLS_KEY)? {
+            None => {
+                let initial: Vec<SkillDef> = if seeds.is_empty() {
+                    default_skills()
+                } else {
+                    seeds.iter().map(|s| (*s).clone()).collect()
+                };
+                let json = serde_json::to_string(&initial)?;
+                if db.set_app_setting_if_absent(SKILLS_KEY, &json)? {
+                    outcome.created = true;
+                    outcome.added = initial.into_iter().map(|s| s.name).collect();
+                    done = true;
+                    break;
+                }
+                // Another pod (or the dashboard) won the race: merge into it.
+            }
+            Some(raw) => {
+                let Ok(mut current) = serde_json::from_str::<Vec<SkillDef>>(&raw) else {
+                    tracing::warn!("stored skills list is not valid JSON; TOML seeding skipped");
+                    return Ok(outcome);
+                };
+                let seeded = load_seeded_names(db)?;
+                let missing: Vec<SkillDef> = seeds
+                    .iter()
+                    .filter(|s| {
+                        !current.iter().any(|c| c.name == s.name) && !seeded.contains(&s.name)
+                    })
+                    .map(|s| (*s).clone())
+                    .collect();
+                if missing.is_empty() {
+                    done = true;
+                    break;
+                }
+                let names: Vec<String> = missing.iter().map(|s| s.name.clone()).collect();
+                current.extend(missing);
+                let json = serde_json::to_string(&current)?;
+                if db.compare_and_set_app_setting(SKILLS_KEY, &raw, &json)? {
+                    outcome.added = names;
+                    done = true;
+                    break;
+                }
+                // Value changed under us (dashboard save / other pod): retry.
+            }
+        }
+    }
+    if !done {
+        anyhow::bail!("skills seeding gave up after {MAX_ATTEMPTS} concurrent-update retries");
+    }
+
+    // Remember every TOML name now represented in the DB list, so deleting
+    // one in the dashboard later is respected on the next start.
+    if !seeds.is_empty() {
+        for _ in 0..MAX_ATTEMPTS {
+            let raw = db.get_app_setting(SKILLS_SEEDED_KEY)?;
+            let mut names: Vec<String> = raw
+                .as_deref()
+                .and_then(|r| serde_json::from_str(r).ok())
+                .unwrap_or_default();
+            let before = names.len();
+            for s in &seeds {
+                if !names.contains(&s.name) {
+                    names.push(s.name.clone());
+                }
+            }
+            if names.len() == before && raw.is_some() {
+                break;
+            }
+            let json = serde_json::to_string(&names)?;
+            let ok = match raw.as_deref() {
+                None => db.set_app_setting_if_absent(SKILLS_SEEDED_KEY, &json)?,
+                Some(r) => db.compare_and_set_app_setting(SKILLS_SEEDED_KEY, r, &json)?,
+            };
+            if ok {
+                break;
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+fn load_seeded_names(db: &dyn crate::db::backend::DatabaseBackend) -> Result<Vec<String>> {
+    Ok(db
+        .get_app_setting(crate::db::settings::SKILLS_SEEDED_KEY)?
+        .and_then(|r| serde_json::from_str(&r).ok())
+        .unwrap_or_default())
+}
+
+/// [`seed_skills`] for startup paths: logs instead of failing, so a DB hiccup
+/// never blocks the daemon or a CLI command (pipelines still fall back to
+/// [`load_skills`]'s defaults).
+pub fn seed_skills_logged(db: &dyn crate::db::backend::DatabaseBackend, toml_skills: &[SkillDef]) {
+    match seed_skills(db, toml_skills) {
+        Ok(o) if !o.added.is_empty() => {
+            tracing::info!(added = ?o.added, created = o.created, "skills seeded from config")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("skills seeding failed: {e:#}"),
+    }
 }
 
 /// A "grand domain" — a broad area of the codebase/product (e.g. codex, bun,
@@ -1882,6 +2076,13 @@ pub struct GlobalDaemonConfig {
 
     #[serde(default = "default_poll_interval")]
     pub poll_interval: u64,
+
+    /// Multi-pod: how often (seconds) each pod re-reads the persisted repo
+    /// registry (features, apply mode, added/removed repos) so a change made
+    /// through one pod reaches the others without a restart. Only active when
+    /// the persistence layer is shared (Pro on Postgres). `0` disables it.
+    #[serde(default = "default_registry_sync_secs")]
+    pub registry_sync_secs: u64,
 }
 
 impl Default for GlobalDaemonConfig {
@@ -1892,15 +2093,20 @@ impl Default for GlobalDaemonConfig {
             apply: false,
             poll: false,
             poll_interval: default_poll_interval(),
+            registry_sync_secs: default_registry_sync_secs(),
         }
     }
+}
+
+fn default_registry_sync_secs() -> u64 {
+    30
 }
 
 fn default_poll_interval() -> u64 {
     30
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct RepoEntry {
     /// Repository slug: "owner/repo"
     pub slug: String,
@@ -2552,6 +2758,18 @@ full_sync_interval_hours = 24
 # description = "Minor or cosmetic"
 # when = "Edge case or low-impact improvement"
 
+# Skills: standing instructions appended to AI prompts. This is only the
+# SEED: at startup, skills are copied into the database (once per name) and
+# from then on are edited in Settings -> Skills. Editing/removing an entry
+# here never overwrites what was changed in the dashboard.
+# pipelines: any of "triage", "pr_review", "review", "diagrams" (empty = all)
+# [[skills]]
+# name = "rust-error-handling"
+# description = "Shown in Settings only, not sent to the AI"
+# content = "Flag unwrap()/expect() on fallible paths in non-test code."
+# pipelines = ["pr_review", "review"]
+# enabled = true
+
 # [assign]
 # enabled = true
 #
@@ -2788,6 +3006,7 @@ impl Default for Config {
             issues_blacklist: Vec::new(),
             prs_blacklist: Vec::new(),
             labels: Vec::new(),
+            skills: Vec::new(),
             repo_owner: String::new(),
             repo_name: String::new(),
             wshm_dir: PathBuf::from(".wshm"),
@@ -2963,6 +3182,259 @@ mod tests {
         assert!(!pr.contains("triage-only"));
 
         assert_eq!(skills_prompt(&[], "triage"), "");
+    }
+
+    #[test]
+    fn test_skills_prompt_diagrams_pipeline() {
+        let skills = vec![skill("diag", &["diagrams"], true), skill("all", &[], true)];
+        let d = skills_prompt(&skills, "diagrams");
+        assert!(d.contains("diag") && d.contains("all"));
+        assert!(!skills_prompt(&skills, "triage").contains("### diag"));
+        assert!(SKILL_PIPELINES.contains(&"diagrams"));
+    }
+
+    #[test]
+    fn test_toml_skills_parse() {
+        let cfg: Config = toml::from_str(
+            r#"
+[[skills]]
+name = "a"
+content = "do a"
+pipelines = ["diagrams"]
+
+[[skills]]
+name = "b"
+content = "do b"
+enabled = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.skills.len(), 2);
+        assert_eq!(cfg.skills[0].pipelines, vec!["diagrams"]);
+        assert!(cfg.skills[0].enabled, "enabled defaults to true");
+        assert!(!cfg.skills[1].enabled);
+        assert!(toml::from_str::<Config>("").unwrap().skills.is_empty());
+    }
+
+    fn stored(db: &crate::db::Database) -> Vec<SkillDef> {
+        serde_json::from_str(
+            &db.get_app_setting(crate::db::settings::SKILLS_KEY)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn names(v: &[SkillDef]) -> Vec<&str> {
+        v.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    #[test]
+    fn test_seed_fresh_writes_toml_skills_only() {
+        let db = crate::db::Database::open_memory().unwrap();
+        let o = seed_skills(&db, &[skill("a", &[], true), skill("b", &[], true)]).unwrap();
+        assert!(o.created);
+        assert_eq!(o.added, vec!["a", "b"]);
+        assert_eq!(
+            names(&stored(&db)),
+            vec!["a", "b"],
+            "no default when TOML defines skills"
+        );
+    }
+
+    #[test]
+    fn test_seed_fresh_without_toml_writes_defaults() {
+        let db = crate::db::Database::open_memory().unwrap();
+        let o = seed_skills(&db, &[]).unwrap();
+        assert!(o.created);
+        assert_eq!(names(&stored(&db)), names(&default_skills()));
+        // Idempotent.
+        assert_eq!(seed_skills(&db, &[]).unwrap(), SkillSeedOutcome::default());
+    }
+
+    #[test]
+    fn test_seed_is_idempotent() {
+        let db = crate::db::Database::open_memory().unwrap();
+        let toml = [skill("a", &[], true)];
+        seed_skills(&db, &toml).unwrap();
+        let before = db.get_app_setting(crate::db::settings::SKILLS_KEY).unwrap();
+        let o = seed_skills(&db, &toml).unwrap();
+        assert_eq!(o, SkillSeedOutcome::default());
+        assert_eq!(
+            db.get_app_setting(crate::db::settings::SKILLS_KEY).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn test_seed_never_overwrites_or_reenables_dashboard_edits() {
+        let db = crate::db::Database::open_memory().unwrap();
+        seed_skills(&db, &[skill("a", &[], true)]).unwrap();
+        // Dashboard edit: disable + rewrite "a".
+        let mut edited = skill("a", &["triage"], false);
+        edited.content = "user text".into();
+        db.set_app_setting(
+            crate::db::settings::SKILLS_KEY,
+            &serde_json::to_string(&[edited.clone()]).unwrap(),
+        )
+        .unwrap();
+        // TOML still has the original, plus a new skill "c".
+        let o = seed_skills(&db, &[skill("a", &[], true), skill("c", &[], true)]).unwrap();
+        assert!(!o.created);
+        assert_eq!(o.added, vec!["c"]);
+        let s = stored(&db);
+        assert_eq!(names(&s), vec!["a", "c"]);
+        assert_eq!(s[0], edited, "edited/disabled skill untouched");
+    }
+
+    #[test]
+    fn test_seed_existing_list_adds_missing_without_defaults() {
+        let db = crate::db::Database::open_memory().unwrap();
+        // Pre-existing list saved before TOML seeding existed (even empty).
+        db.set_app_setting(crate::db::settings::SKILLS_KEY, "[]")
+            .unwrap();
+        let o = seed_skills(&db, &[skill("a", &[], true)]).unwrap();
+        assert_eq!(o.added, vec!["a"]);
+        assert_eq!(names(&stored(&db)), vec!["a"]);
+        // Existing empty list + no TOML: defaults NOT re-added.
+        let db2 = crate::db::Database::open_memory().unwrap();
+        db2.set_app_setting(crate::db::settings::SKILLS_KEY, "[]")
+            .unwrap();
+        seed_skills(&db2, &[]).unwrap();
+        assert!(stored(&db2).is_empty());
+    }
+
+    #[test]
+    fn test_seed_respects_dashboard_deletion() {
+        let db = crate::db::Database::open_memory().unwrap();
+        let toml = [skill("a", &[], true), skill("b", &[], true)];
+        seed_skills(&db, &toml).unwrap();
+        // User deletes "a" in the dashboard.
+        db.set_app_setting(
+            crate::db::settings::SKILLS_KEY,
+            &serde_json::to_string(&[skill("b", &[], true)]).unwrap(),
+        )
+        .unwrap();
+        let o = seed_skills(&db, &toml).unwrap();
+        assert!(o.added.is_empty(), "deleted TOML skill must not come back");
+        assert_eq!(names(&stored(&db)), vec!["b"]);
+    }
+
+    #[test]
+    fn test_seed_dedups_toml_names_and_skips_empty() {
+        let db = crate::db::Database::open_memory().unwrap();
+        let mut dup = skill("a", &[], true);
+        dup.content = "second".into();
+        seed_skills(&db, &[skill("a", &[], true), dup, skill("  ", &[], true)]).unwrap();
+        let s = stored(&db);
+        assert_eq!(names(&s), vec!["a"]);
+        assert_eq!(s[0].content, "do a things");
+    }
+
+    #[test]
+    fn test_seed_leaves_corrupt_list_untouched() {
+        let db = crate::db::Database::open_memory().unwrap();
+        db.set_app_setting(crate::db::settings::SKILLS_KEY, "not json")
+            .unwrap();
+        seed_skills(&db, &[skill("a", &[], true)]).unwrap();
+        assert_eq!(
+            db.get_app_setting(crate::db::settings::SKILLS_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("not json")
+        );
+    }
+
+    #[test]
+    fn test_sanitize_skill_pipelines() {
+        let mut s = skill("x", &["triage", "bogus"], true);
+        let w = sanitize_skill_pipelines(&mut s);
+        assert_eq!(s.pipelines, vec!["triage"]);
+        assert!(s.enabled);
+        assert_eq!(w.len(), 1);
+
+        // Only unknown values: disabled, never widened to "all pipelines".
+        let mut s = skill("y", &["diagram"], true);
+        sanitize_skill_pipelines(&mut s);
+        assert!(s.pipelines.is_empty() && !s.enabled);
+
+        let mut s = skill("z", &[], true);
+        assert!(sanitize_skill_pipelines(&mut s).is_empty());
+        assert!(s.enabled);
+    }
+
+    #[test]
+    fn test_seed_strips_unknown_pipelines() {
+        let db = crate::db::Database::open_memory().unwrap();
+        seed_skills(
+            &db,
+            &[
+                skill("a", &["review", "nope"], true),
+                skill("b", &["typo"], true),
+            ],
+        )
+        .unwrap();
+        let s = stored(&db);
+        assert_eq!(s[0].pipelines, vec!["review"]);
+        assert!(s[0].enabled);
+        assert!(s[1].pipelines.is_empty() && !s[1].enabled);
+        assert!(s.iter().all(|k| k
+            .pipelines
+            .iter()
+            .all(|p| SKILL_PIPELINES.contains(&p.as_str()))));
+    }
+
+    /// Two "pods" seeding the same shared DB concurrently: the atomic
+    /// insert-if-absent + CAS retry must converge on one list with every
+    /// TOML skill exactly once.
+    #[test]
+    fn test_seed_concurrent_pods_converge() {
+        let dir = std::env::temp_dir().join(format!(
+            "wshm-seed-race-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("state.db");
+        crate::db::Database::open_path(&path).unwrap();
+        let toml_a = vec![skill("a", &[], true), skill("shared", &[], true)];
+        let toml_b = vec![skill("b", &[], true), skill("shared", &[], true)];
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                let t = if i % 2 == 0 {
+                    toml_a.clone()
+                } else {
+                    toml_b.clone()
+                };
+                std::thread::spawn(move || {
+                    let db = crate::db::Database::open_path(&path).unwrap();
+                    seed_skills(&db, &t).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let db = crate::db::Database::open_path(&path).unwrap();
+        let mut n: Vec<String> = stored(&db).into_iter().map(|s| s.name).collect();
+        n.sort();
+        assert_eq!(n, vec!["a", "b", "shared"]);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sqlite_setting_primitives() {
+        let db = crate::db::Database::open_memory().unwrap();
+        assert!(db.set_app_setting_if_absent("k", "1").unwrap());
+        assert!(!db.set_app_setting_if_absent("k", "2").unwrap());
+        assert!(!db.compare_and_set_app_setting("k", "2", "3").unwrap());
+        assert!(db.compare_and_set_app_setting("k", "1", "3").unwrap());
+        assert_eq!(db.get_app_setting("k").unwrap().as_deref(), Some("3"));
+        assert!(!db.compare_and_set_app_setting("missing", "x", "y").unwrap());
     }
 }
 

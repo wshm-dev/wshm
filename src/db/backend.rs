@@ -193,6 +193,32 @@ pub trait DatabaseBackend: Send + Sync {
         Ok(())
     }
 
+    /// Insert `value` only if `key` has never been written. Returns `true`
+    /// when this call created the row. Real backends implement it as a
+    /// single atomic `INSERT … ON CONFLICT DO NOTHING` so several pods
+    /// seeding at once can't clobber each other; this default is a
+    /// non-atomic read-then-write fallback.
+    fn set_app_setting_if_absent(&self, key: &str, value: &str) -> Result<bool> {
+        if self.get_app_setting(key)?.is_some() {
+            return Ok(false);
+        }
+        self.set_app_setting(key, value)?;
+        Ok(true)
+    }
+
+    /// Replace `key`'s value with `new` only if it still equals `expected`
+    /// (compare-and-swap). Returns `true` when the swap happened, `false`
+    /// when someone else changed (or removed) the value in between — the
+    /// caller re-reads and retries. Real backends do this in one
+    /// conditional `UPDATE`; this default is a non-atomic fallback.
+    fn compare_and_set_app_setting(&self, key: &str, expected: &str, new: &str) -> Result<bool> {
+        if self.get_app_setting(key)?.as_deref() != Some(expected) {
+            return Ok(false);
+        }
+        self.set_app_setting(key, new)?;
+        Ok(true)
+    }
+
     // ── Admin / maintenance ─────────────────────────────────────
 
     /// Wipe every triage result and PR analysis. Used by the `revert` flow
@@ -548,6 +574,14 @@ impl DatabaseBackend for super::Database {
 
     fn set_app_setting(&self, key: &str, value: &str) -> Result<()> {
         self.set_app_setting(key, value)
+    }
+
+    fn set_app_setting_if_absent(&self, key: &str, value: &str) -> Result<bool> {
+        self.set_app_setting_if_absent(key, value)
+    }
+
+    fn compare_and_set_app_setting(&self, key: &str, expected: &str, new: &str) -> Result<bool> {
+        self.compare_and_set_app_setting(key, expected, new)
     }
 
     fn clear_triage_and_analyses(&self) -> Result<()> {
