@@ -341,8 +341,18 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
             crate::diagrams::cleanup_pr(&state.config, state.db.as_ref(), state.gh().as_ref(), n)
                 .await;
         }
-        if state.features().collect_prs {
-            gh_sync::sync_pulls_now(&*state.gh(), state.db.as_ref()).await?;
+        // Refresh just this PR (state closed/merged), not a full sync: every
+        // merge would otherwise re-list every PR of the repo.
+        if let (Some(n), true) = (number, state.features().collect_prs) {
+            match state.gh().fetch_pull(n).await {
+                Ok(Some(pr)) => {
+                    if let Err(e) = state.db.upsert_pull(&pr) {
+                        warn!("Failed to cache closed PR #{n}: {e}");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warn!("Could not refresh closed PR #{n}: {e:#}"),
+            }
         }
         return Ok(());
     }

@@ -579,12 +579,49 @@ pub fn unknown_json_keys(reference: &serde_json::Value, over: &serde_json::Value
     out
 }
 
-/// `[pr.review_diagrams]` keys that only the TOML may set: where files are
-/// written or committed, and the private-repo safeguard. A per-repo DB
-/// override (editable from the dashboard) must not redirect output or
-/// expose private code.
-pub const REVIEW_DIAGRAMS_TOML_ONLY: &[&str] =
-    &["publish.dir", "publish.pages_repo", "publish.allow_private"];
+/// `[pr.review_diagrams]` keys that only the TOML may set: every destination
+/// (directory, Pages repo, bucket/container/account, endpoint, region, public
+/// URL) and the private-repo safeguard. A per-repo DB override (editable from
+/// the dashboard) must not redirect output, send the pod's cloud credentials
+/// to another host (`endpoint`), or expose private code; it may only pick
+/// the target among the configured ones.
+pub const REVIEW_DIAGRAMS_TOML_ONLY: &[&str] = &[
+    "publish.dir",
+    "publish.pages_repo",
+    "publish.allow_private",
+    "publish.endpoint",
+    "publish.bucket",
+    "publish.account",
+    "publish.container",
+    "publish.region",
+    "publish.public_url",
+];
+
+/// Validate a per-repo override as the API receives it: an object with
+/// known keys only, no TOML-only key, and a valid merged config.
+pub fn validate_review_diagrams_override(
+    toml: &ReviewDiagramsConfig,
+    over: &serde_json::Value,
+) -> std::result::Result<(), String> {
+    if !over.is_object() {
+        return Err("expected a JSON object or null".into());
+    }
+    let reference = serde_json::to_value(ReviewDiagramsConfig::default()).unwrap_or_default();
+    let unknown = unknown_json_keys(&reference, over);
+    if !unknown.is_empty() {
+        return Err(format!("unknown setting(s): {}", unknown.join(", ")));
+    }
+    let toml_only = toml_only_keys(over);
+    if !toml_only.is_empty() {
+        return Err(format!(
+            "TOML-only setting(s), not allowed in the per-repo override: {}",
+            toml_only.join(", ")
+        ));
+    }
+    apply_review_diagrams_override(toml, over)
+        .map(|_| ())
+        .map_err(|e| format!("invalid diagrams settings: {e}"))
+}
 
 /// TOML-only keys present in a per-repo override.
 pub fn toml_only_keys(over: &serde_json::Value) -> Vec<String> {
@@ -2644,7 +2681,9 @@ risk_labels = true
 # timeout_secs = 120             # budget of the background diagram step
 # max_summary_calls = 3          # per-file summary calls for diffs > 40 KB
 #
-# Interactive page (React Flow viewer). Off by default.
+# Interactive page (React Flow viewer). Off by default. Destinations (dir,
+# pages_repo, bucket, region, endpoint, account, container, public_url) and
+# allow_private are TOML-only: the per-repo override can only pick `target`.
 # [pr.review_diagrams.publish]
 # target = "off"                 # "off" | "local" | "github-pages" | "wshm" | "s3" | "gcs" | "azure"
 # prefix = "wshm-diagrams"
@@ -3537,6 +3576,37 @@ mod review_diagrams_tests {
         assert!(!eff.publish.allow_private);
         assert_eq!(eff.publish.target, DiagramPublishTarget::Local);
         assert!(toml_only_keys(&serde_json::json!({"text": "full"})).is_empty());
+    }
+
+    #[test]
+    fn override_api_rejects_destinations_and_credentials_routing() {
+        let toml = ReviewDiagramsConfig::default();
+        for key in [
+            "dir",
+            "pages_repo",
+            "allow_private",
+            "endpoint",
+            "bucket",
+            "account",
+            "container",
+            "region",
+            "public_url",
+        ] {
+            let mut publish = serde_json::Map::new();
+            publish.insert("target".into(), "gcs".into());
+            publish.insert(key.into(), serde_json::json!("https://attacker.example"));
+            let body = serde_json::json!({ "publish": publish });
+            let err = validate_review_diagrams_override(&toml, &body).unwrap_err();
+            assert!(err.contains(&format!("publish.{key}")), "{key}: {err}");
+        }
+        // Choosing the target among the configured ones stays allowed.
+        assert!(validate_review_diagrams_override(
+            &toml,
+            &serde_json::json!({"text": "full", "publish": {"target": "gcs", "max_pages": 10}})
+        )
+        .is_ok());
+        assert!(validate_review_diagrams_override(&toml, &serde_json::json!({"nope": 1})).is_err());
+        assert!(validate_review_diagrams_override(&toml, &serde_json::json!([1])).is_err());
     }
 
     #[test]

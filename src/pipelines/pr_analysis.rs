@@ -48,29 +48,112 @@ pub struct DiagramJob {
 /// the event processor's permits so a slow AI never stalls event handling.
 static DIAGRAM_JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
-/// Spawn a diagram job in the background (daemon).
+/// Max diagram jobs waiting or running, all repos together. Beyond it new
+/// jobs are dropped (the next push of the PR schedules one again).
+const MAX_PENDING_JOBS: usize = 32;
+
+/// Latest job id per `repo#pr`: a newer job for the same PR supersedes the
+/// queued one, which then exits without any AI call.
+static PENDING_JOBS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+    std::sync::LazyLock::new(Default::default);
+static JOB_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Register a job for `key`, superseding any older one. `None` when the
+/// queue is full.
+fn register_job(key: &str) -> Option<u64> {
+    let mut m = PENDING_JOBS.lock().ok()?;
+    if m.len() >= MAX_PENDING_JOBS && !m.contains_key(key) {
+        return None;
+    }
+    let id = JOB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    m.insert(key.to_string(), id);
+    Some(id)
+}
+
+fn is_latest_job(key: &str, id: u64) -> bool {
+    PENDING_JOBS
+        .lock()
+        .map(|m| m.get(key) == Some(&id))
+        .unwrap_or(false)
+}
+
+fn release_job(key: &str, id: u64) {
+    if let Ok(mut m) = PENDING_JOBS.lock() {
+        if m.get(key) == Some(&id) {
+            m.remove(key);
+        }
+    }
+}
+
+/// Spawn a diagram job in the background (daemon). One job per PR at a
+/// time in the queue (the newest wins), at most [`MAX_PENDING_JOBS`] queued.
 pub fn spawn_diagram_job(
     config: std::sync::Arc<Config>,
     db: std::sync::Arc<dyn DatabaseBackend>,
     gh: std::sync::Arc<GhClient>,
     job: DiagramJob,
 ) {
+    let key = format!("{}#{}", config.repo_slug(), job.pr.number);
+    let Some(id) = register_job(&key) else {
+        tracing::warn!("PR #{}: diagram queue full, job dropped", job.pr.number);
+        return;
+    };
     tokio::spawn(async move {
         let Ok(_permit) = DIAGRAM_JOBS.acquire().await else {
+            release_job(&key, id);
             return;
         };
-        finish_diagram(&config, db.as_ref(), gh.as_ref(), job).await;
+        if is_latest_job(&key, id) {
+            finish_diagram(&config, db.as_ref(), gh.as_ref(), job).await;
+        } else {
+            info!(
+                "PR #{}: diagram job superseded by a newer one",
+                job.pr.number
+            );
+        }
+        release_job(&key, id);
     });
 }
 
+/// How a diagram job ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagramOutcome {
+    /// Nothing done, no AI call (dry-run, stale head, closed PR...).
+    Skipped(&'static str),
+    /// No diagram, or the same one as already posted.
+    Unchanged,
+    Posted,
+    Previewed,
+    Failed,
+}
+
+/// Is the job still worth running (or posting)? Checked before any AI call
+/// and again before editing the comment.
+fn job_skip_reason(db: &dyn DatabaseBackend, job: &DiagramJob) -> Option<&'static str> {
+    if !job.apply && !job.preview {
+        return Some("dry-run");
+    }
+    match db.get_pull(job.pr.number).ok().flatten() {
+        None => Some("PR not in the cache"),
+        Some(p) if p.state != "open" => Some("PR no longer open"),
+        Some(p) if p.head_sha != job.pr.head_sha => Some("stale head"),
+        Some(_) => None,
+    }
+}
+
 /// Run a diagram job: bounded by `[pr.review_diagrams].timeout_secs`, never
-/// fails. Edits the comment only when the PR head did not move meanwhile.
+/// fails. No AI call unless the PR is still open at the same head; edits
+/// the comment only if that still holds after generation.
 pub async fn finish_diagram(
     config: &Config,
     db: &dyn DatabaseBackend,
     gh: &GhClient,
     job: DiagramJob,
-) {
+) -> DiagramOutcome {
+    if let Some(why) = job_skip_reason(db, &job) {
+        info!("PR #{}: diagram skipped ({why})", job.pr.number);
+        return DiagramOutcome::Skipped(why);
+    }
     let ai = match AiBackend::from_config(config, config.model_for("pr")) {
         Ok(a) => a,
         Err(e) => {
@@ -78,40 +161,39 @@ pub async fn finish_diagram(
                 "PR #{}: diagram skipped, no AI backend: {e:#}",
                 job.pr.number
             );
-            return;
+            return DiagramOutcome::Failed;
         }
     };
     let section =
         crate::diagrams::comment_section(config, &ai, db, gh, &job.pr, Some(&job.diff), job.apply)
             .await;
     if section.is_none() || section == job.posted_section {
-        return;
+        return DiagramOutcome::Unchanged;
     }
     let comment = format_analysis_comment(&job.analysis, config, section.as_deref());
     if job.apply {
-        let head = db
-            .get_pull(job.pr.number)
-            .ok()
-            .flatten()
-            .and_then(|p| p.head_sha);
-        if head != job.pr.head_sha {
-            info!(
-                "PR #{}: new head since the analysis, stale diagram not posted",
-                job.pr.number
-            );
-            return;
+        if let Some(why) = job_skip_reason(db, &job) {
+            info!("PR #{}: diagram not posted ({why})", job.pr.number);
+            return DiagramOutcome::Skipped(why);
         }
         match gh.comment_pr(job.pr.number, &comment).await {
-            Ok(()) => info!(
-                "PR #{}: architecture diagram added to the analysis comment",
-                job.pr.number
-            ),
-            Err(e) => tracing::warn!("PR #{}: could not add the diagram: {e:#}", job.pr.number),
+            Ok(()) => {
+                info!(
+                    "PR #{}: architecture diagram added to the analysis comment",
+                    job.pr.number
+                );
+                DiagramOutcome::Posted
+            }
+            Err(e) => {
+                tracing::warn!("PR #{}: could not add the diagram: {e:#}", job.pr.number);
+                DiagramOutcome::Failed
+            }
         }
-    } else if job.preview {
+    } else {
         println!(
             "--- comment preview, updated with the diagram (dry-run, not posted) ---\n{comment}\n--- end of preview ---"
         );
+        DiagramOutcome::Previewed
     }
 }
 
@@ -204,7 +286,9 @@ pub async fn run_with(
                 // previewed: no AI spent on a comment nobody will see.
                 if let Some(job) = job.filter(|j| j.apply || j.preview) {
                     match opts.diagrams {
-                        DiagramMode::Inline => finish_diagram(config, db, gh, job).await,
+                        DiagramMode::Inline => {
+                            finish_diagram(config, db, gh, job).await;
+                        }
                         DiagramMode::Deferred if job.apply => jobs.push(job),
                         _ => {}
                     }
@@ -610,6 +694,65 @@ mod tests {
         assert!(c.contains("Adds X.\n\n### 🗺️ Architecture\n\nS\n\n### Review Checklist\n"));
         let without = format_analysis_comment(&analysis(), &config, None);
         assert!(without.contains("Adds X.\n\n### Review Checklist\n"));
+    }
+
+    fn job(apply: bool, preview: bool) -> DiagramJob {
+        let pr: PullRequest = serde_json::from_value(serde_json::json!({
+            "number": 5, "title": "t", "body": null, "state": "open", "labels": [],
+            "author": null, "head_sha": "old", "base_sha": null, "head_ref": null,
+            "base_ref": null, "mergeable": null, "ci_status": null,
+            "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z"
+        }))
+        .unwrap();
+        DiagramJob {
+            pr,
+            diff: "diff --git a/x b/x\n+1\n".into(),
+            analysis: analysis(),
+            posted_section: None,
+            apply,
+            preview,
+        }
+    }
+
+    async fn outcome(db_head: &str, db_state: &str, j: DiagramJob) -> DiagramOutcome {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let db = crate::db::Database::open_memory().unwrap();
+        let mut cached = j.pr.clone();
+        cached.head_sha = Some(db_head.into());
+        cached.state = db_state.into();
+        db.upsert_pull(&cached).unwrap();
+        let config = Config::default();
+        let gh = crate::git_provider::github::GitHubProvider::new(&config).unwrap();
+        finish_diagram(&config, &db, &gh, j).await
+    }
+
+    #[tokio::test]
+    async fn stale_closed_or_dry_run_jobs_make_no_ai_call() {
+        assert_eq!(
+            outcome("new", "open", job(true, false)).await,
+            DiagramOutcome::Skipped("stale head")
+        );
+        assert_eq!(
+            outcome("old", "closed", job(true, false)).await,
+            DiagramOutcome::Skipped("PR no longer open")
+        );
+        assert_eq!(
+            outcome("old", "open", job(false, false)).await,
+            DiagramOutcome::Skipped("dry-run")
+        );
+    }
+
+    #[test]
+    fn newer_job_supersedes_the_queued_one() {
+        let key = "test/repo#supersede";
+        let first = register_job(key).unwrap();
+        let second = register_job(key).unwrap();
+        assert!(!is_latest_job(key, first));
+        assert!(is_latest_job(key, second));
+        release_job(key, first); // no effect on the newer one
+        assert!(is_latest_job(key, second));
+        release_job(key, second);
+        assert!(!is_latest_job(key, second));
     }
 
     #[test]

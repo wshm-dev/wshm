@@ -813,7 +813,9 @@ fn translate_gitlab(gl_event: &str, p: &Value) -> Option<(String, String, Value)
 fn should_process_event(event_type: &str, action: &str) -> bool {
     match event_type {
         "issues" => action == "opened",
-        "pull_request" => action == "opened" || action == "synchronize",
+        // `closed` (incl. merged): cleanup of the PR's diagram page, cheap
+        // (one PR refresh, no analysis).
+        "pull_request" => matches!(action, "opened" | "synchronize" | "closed"),
         "issue_comment" => action == "created",
         _ => false,
     }
@@ -984,5 +986,14 @@ mod forge_webhook_tests {
             ("pull_request", "synchronize")
         );
         assert!(should_process_event(&ev, &action));
+    }
+
+    #[test]
+    fn closed_pull_requests_are_processed_for_cleanup() {
+        assert!(should_process_event("pull_request", "closed"));
+        assert!(should_process_event("pull_request", "opened"));
+        assert!(should_process_event("pull_request", "synchronize"));
+        assert!(!should_process_event("pull_request", "labeled"));
+        assert!(!should_process_event("issues", "closed"));
     }
 }

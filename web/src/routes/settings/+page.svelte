@@ -421,12 +421,10 @@
 			if (!reset) {
 				body = JSON.parse(JSON.stringify(diagramsDraft)) as DiagramSettings;
 				const p = body.publish as unknown as Record<string, unknown>;
-				// TOML-only: the server rejects them in a per-repo override.
-				delete p.dir;
-				delete p.pages_repo;
-				delete p.allow_private;
-				for (const k of ['public_url', 'bucket', 'region', 'endpoint', 'container', 'account']) {
-					if (typeof p[k] === 'string' && (p[k] as string).trim() === '') p[k] = null;
+				// TOML-only (destinations, credentials routing, private-repo
+				// safeguard): the server rejects them in a per-repo override.
+				for (const k of ['dir', 'pages_repo', 'allow_private', 'public_url', 'bucket', 'region', 'endpoint', 'container', 'account']) {
+					delete p[k];
 				}
 				const int = (v: unknown) => Math.max(0, Math.floor(Number(v) || 0));
 				body.publish.retention_days = int(body.publish.retention_days);
@@ -1802,13 +1800,8 @@
 									</select>
 								</div>
 								<div>
-									<Label class="text-xs mb-1">Public URL</Label>
-									<Input
-										class="h-8"
-										placeholder={diagramsDraft.publish.target === 'wshm' ? 'https://wshm.example.com (daemon URL)' : 'https://diagrams.example.com'}
-										value={diagramsDraft.publish.public_url ?? ''}
-										oninput={(e) => diagramsDraft && (diagramsDraft.publish.public_url = (e.currentTarget as HTMLInputElement).value)}
-									/>
+									<Label class="text-xs mb-1">Public URL (TOML only)</Label>
+									<Input class="h-8" disabled value={diagramsDraft.publish.public_url ?? '(not set in the TOML)'} />
 								</div>
 								<div>
 									<Label class="text-xs mb-1">Key prefix</Label>
@@ -1845,11 +1838,11 @@
 								{#if ['s3', 'gcs', 'azure'].includes(diagramsDraft.publish.target)}
 									{#each (diagramsDraft.publish.target === 'azure' ? ['account', 'container'] : ['bucket', 'region', 'endpoint']) as field}
 										<div>
-											<Label class="text-xs mb-1">{field}</Label>
+											<Label class="text-xs mb-1">{field} (TOML only)</Label>
 											<Input
 												class="h-8"
-												value={(diagramsDraft.publish as unknown as Record<string, string | null>)[field] ?? ''}
-												oninput={(e) => diagramsDraft && ((diagramsDraft.publish as unknown as Record<string, string | null>)[field] = (e.currentTarget as HTMLInputElement).value)}
+												disabled
+												value={(diagramsDraft.publish as unknown as Record<string, string | null>)[field] ?? '(not set in the TOML)'}
 											/>
 										</div>
 									{/each}

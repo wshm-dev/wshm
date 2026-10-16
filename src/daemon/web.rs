@@ -3022,26 +3022,10 @@ async fn api_repo_diagrams_put(
     let stored = if body.is_null() {
         String::new()
     } else {
-        if !body.is_object() {
-            return bad("expected a JSON object or null".into());
-        }
-        let reference = serde_json::to_value(crate::config::ReviewDiagramsConfig::default())
-            .unwrap_or_default();
-        let unknown = crate::config::unknown_json_keys(&reference, &body);
-        if !unknown.is_empty() {
-            return bad(format!("unknown setting(s): {}", unknown.join(", ")));
-        }
-        let toml_only = crate::config::toml_only_keys(&body);
-        if !toml_only.is_empty() {
-            return bad(format!(
-                "TOML-only setting(s), not allowed in the per-repo override: {}",
-                toml_only.join(", ")
-            ));
-        }
         if let Err(e) =
-            crate::config::apply_review_diagrams_override(&ds.config.pr.review_diagrams, &body)
+            crate::config::validate_review_diagrams_override(&ds.config.pr.review_diagrams, &body)
         {
-            return bad(format!("invalid diagrams settings: {e}"));
+            return bad(e);
         }
         body.to_string()
     };

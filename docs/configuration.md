@@ -65,6 +65,9 @@ timeout_secs = 120                # budget of the diagram step (runs after the c
 max_summary_calls = 3             # per-file summary calls for diffs > 40 KB
 
 # Interactive page (React Flow viewer), deleted when the PR is closed.
+# Destinations (dir, pages_repo, bucket, region, endpoint, account,
+# container, public_url) and allow_private are TOML-only: the per-repo
+# override from the dashboard can only choose `target` and the caps.
 [pr.review_diagrams.publish]
 target = "off"                    # off | local | github-pages | wshm (Pro) | s3 | gcs | azure
 # s3/gcs/azure: bucket / region / endpoint (S3, GCS) or account / container

@@ -77,6 +77,37 @@ fn lang_attr(lang: &str) -> String {
     }
 }
 
+/// Replace the leading `<` of every ASCII-case-insensitive occurrence of
+/// `pat` (which starts with `<`) by `lt`, keeping the rest as written.
+fn escape_lt_ci(s: &str, pat: &str, lt: &str) -> String {
+    let lower = s.to_ascii_lowercase();
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    for (i, _) in lower.match_indices(pat) {
+        out.push_str(&s[last..i]);
+        out.push_str(lt);
+        last = i + 1;
+    }
+    out.push_str(&s[last..]);
+    out
+}
+
+/// JS safe inside an inline `<script>`: `</script`, `<script` and `<!--`
+/// would end the element or switch the HTML parser into its "script data
+/// escaped" states. In the bundle they only occur in string and regex
+/// literals, where `\x3C` means the same `<`.
+fn inline_js_safe(js: &str) -> String {
+    let js = escape_lt_ci(js, "</script", "\\x3C");
+    let js = escape_lt_ci(&js, "<script", "\\x3C");
+    escape_lt_ci(&js, "<!--", "\\x3C")
+}
+
+/// CSS safe inside an inline `<style>`: `</style` would end the element
+/// (CSS escape `\3C ` keeps the `<` inside a string).
+fn inline_css_safe(css: &str) -> String {
+    escape_lt_ci(css, "</style", "\\3C ")
+}
+
 /// Fill `{{wshm:name}}` markers in ONE pass over the template: substituted
 /// values are never scanned again, so a value containing a marker (e.g. a
 /// hostile title) stays plain data.
@@ -177,14 +208,8 @@ pub fn render(g: &Graph, o: &PageOptions) -> String {
             )
         }
         Assets::Inline => (
-            format!(
-                "<style>{}</style>",
-                VIEWER_CSS.replace("</style", "<\\/style")
-            ),
-            format!(
-                "<script>{}</script>",
-                VIEWER_JS.replace("</script", "<\\/script")
-            ),
+            format!("<style>{}</style>", inline_css_safe(VIEWER_CSS)),
+            format!("<script>{}</script>", inline_js_safe(VIEWER_JS)),
         ),
     };
     fill(
@@ -304,9 +329,36 @@ mod tests {
                 && !html.contains("fonts.googleapis")
         );
         assert!(html.len() > VIEWER_JS.len());
-        // The inlined bundle cannot end the script element early.
+        // The inlined bundle cannot end the script element early nor put
+        // the parser in an escaped state.
         let script_start = html.rfind("<script>").unwrap();
-        assert_eq!(html[script_start..].matches("</script").count(), 1);
+        let tail = html[script_start + "<script>".len()..].to_ascii_lowercase();
+        assert_eq!(tail.matches("</script").count(), 1, "only our closing tag");
+        assert!(!tail.contains("<script") && !tail.contains("<!--"));
+        let style = html.find("<style>").unwrap();
+        let style_end = html.find("</style>").unwrap();
+        assert!(!html[style + 7..style_end]
+            .to_ascii_lowercase()
+            .contains("</style"));
+    }
+
+    #[test]
+    fn the_real_bundle_needs_and_gets_neutralization() {
+        // The committed bundle does contain these (React, highlight.js):
+        // the test proves the neutralization is exercised, not vacuous.
+        let lower = VIEWER_JS.to_ascii_lowercase();
+        assert!(lower.contains("<script") && lower.contains("<!--"));
+        let safe = inline_js_safe(VIEWER_JS).to_ascii_lowercase();
+        assert!(!safe.contains("<script") && !safe.contains("</script") && !safe.contains("<!--"));
+        assert_eq!(
+            inline_js_safe("a=\"</SCRIPT>\""),
+            "a=\"\\x3C/SCRIPT>\"",
+            "case kept"
+        );
+        assert_eq!(
+            inline_css_safe("x{content:'</style>'}"),
+            "x{content:'\\3C /style>'}"
+        );
     }
 
     #[test]
