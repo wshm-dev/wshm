@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::db::backend::DatabaseBackend;
 use crate::db::pulls::{PrAnalysisRow, PullRequest};
 use crate::export::{EventKind, ExportEvent, ExportManager};
-use crate::github::Client as GhClient;
+use crate::git_provider::Forge as GhClient;
 
 #[derive(Serialize)]
 struct PrAnalysisOutput {
@@ -306,7 +306,8 @@ async fn analyze_pr(
         if config.assign.enabled {
             if let Some(assignee) = crate::config::AssignConfig::pick(&config.assign.prs) {
                 info!("Auto-assigning PR #{} to {assignee}", pr.number);
-                gh.add_assignees(pr.number, &[assignee.to_string()]).await?;
+                gh.add_pr_assignees(pr.number, &[assignee.to_string()])
+                    .await?;
             }
         }
 

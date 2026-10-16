@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::db::backend::DatabaseBackend;
 use crate::db::issues::Issue;
 use crate::export::{EventKind, ExportEvent, ExportManager};
-use crate::github::Client as GhClient;
+use crate::git_provider::Forge as GhClient;
 use crate::pro_hooks;
 
 #[derive(Serialize)]

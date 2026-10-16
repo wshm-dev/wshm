@@ -23,6 +23,9 @@ pub const REVIEW_PROMPT_KEY: &str = "review_prompt";
 pub const REVIEW_DOMAINS_LIMIT_KEY: &str = "review_domains_limit";
 /// Setting key: configured AI review skills, as a JSON array of `SkillDef`.
 pub const SKILLS_KEY: &str = "skills";
+/// Setting key: Azure DevOps work item types treated as issues (JSON array
+/// of strings); overrides `[azure_devops] work_item_types`.
+pub const AZURE_WORK_ITEM_TYPES_KEY: &str = "azure_work_item_types";
 
 impl Database {
     /// Read a setting value, or `None` if unset.

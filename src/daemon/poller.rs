@@ -121,6 +121,13 @@ async fn poll_events(
     state: &DaemonState,
     last_event_id: &mut Option<String>,
 ) -> anyhow::Result<Vec<WebhookEvent>> {
+    let gh = state.gh();
+    let Some(client) = gh.as_github() else {
+        // GitLab / Gitea / Forgejo / Azure DevOps have no GitHub-style
+        // repository events feed: diff the forge state instead.
+        return poll_forge_changes(state, last_event_id).await;
+    };
+
     let url = format!(
         "https://api.github.com/repos/{}/{}/events?per_page=30",
         state.config.repo_owner, state.config.repo_name
@@ -131,9 +138,9 @@ async fn poll_events(
     // the GET and the body read share one retried closure so a mid-body
     // EOF re-issues the whole request.
     let (headers, body) = crate::retry::with_retry("poller: github events", || async {
-        let response = state.gh().octocrab._get(&url).await?;
+        let response = client.octocrab._get(&url).await?;
         let headers = response.headers().clone();
-        let body = state.gh().octocrab.body_to_string(response).await?;
+        let body = client.octocrab.body_to_string(response).await?;
         Ok::<_, anyhow::Error>((headers, body))
     })
     .await?;
@@ -270,4 +277,265 @@ async fn poll_events(
     }
 
     Ok(result)
+}
+
+/// Last head SHA seen by the generic poller, per (repo, PR), so a push is
+/// detected even when the periodic sync already refreshed the DB cache.
+static SEEN_HEADS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(String, u64), String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Cursor prefix distinguishing the generic poller's timestamp from a
+/// GitHub event id in the shared sync-log slot.
+const FORGE_CURSOR_PREFIX: &str = "ts:";
+
+/// Polling for forges without an events API: everything created/updated in
+/// the window `(cursor, poll start]` becomes the same events a webhook would
+/// produce — `issues.opened`, `pull_request.opened` / `.synchronize` (head
+/// SHA changed) and, where the provider supports it, `issue_comment.created`
+/// with a GitHub-shaped payload for the slash-command handler.
+///
+/// The first poll only records the cursor: the backlog is handled by the
+/// scheduler's sync + triage, not replayed as events.
+async fn poll_forge_changes(
+    state: &DaemonState,
+    cursor: &mut Option<String>,
+) -> anyhow::Result<Vec<WebhookEvent>> {
+    use crate::git_provider::Capability;
+
+    let gh = state.gh();
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let since = match cursor
+        .as_deref()
+        .and_then(|c| c.strip_prefix(FORGE_CURSOR_PREFIX))
+    {
+        Some(ts) => ts.to_string(),
+        None => {
+            let c = format!("{FORGE_CURSOR_PREFIX}{now}");
+            store_last_event_id(state, &c);
+            *cursor = Some(c);
+            return Ok(Vec::new());
+        }
+    };
+    let in_window = |ts: &str| {
+        let parse = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok();
+        match (parse(ts), parse(&since), parse(&now)) {
+            (Some(t), Some(lo), Some(hi)) => t > lo && t <= hi,
+            _ => false,
+        }
+    };
+    let slug = state.config.repo_slug();
+    let mut raw: Vec<(&'static str, &'static str, u64, serde_json::Value)> = Vec::new();
+
+    for issue in gh.fetch_all_issues(Some(&since)).await? {
+        if issue.state == "open" && in_window(&issue.created_at) {
+            raw.push((
+                "issues",
+                "opened",
+                issue.number,
+                serde_json::json!({"action": "opened", "issue": {"number": issue.number}}),
+            ));
+        }
+    }
+
+    for pr in gh.fetch_pulls_incremental("open", Some(&since)).await? {
+        let head = pr.head_sha.clone().unwrap_or_default();
+        let key = (slug.clone(), pr.number);
+        let previous = SEEN_HEADS
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&key).cloned())
+            .or_else(|| {
+                state
+                    .db
+                    .get_pull(pr.number)
+                    .ok()
+                    .flatten()
+                    .and_then(|p| p.head_sha)
+            });
+        if let Ok(mut m) = SEEN_HEADS.lock() {
+            m.insert(key, head.clone());
+        }
+        let action = if in_window(&pr.created_at) {
+            "opened"
+        } else if in_window(&pr.updated_at)
+            && !head.is_empty()
+            && previous.as_deref().is_some_and(|p| p != head)
+        {
+            "synchronize"
+        } else {
+            continue;
+        };
+        raw.push((
+            "pull_request",
+            action,
+            pr.number,
+            serde_json::json!({"action": action, "pull_request": {"number": pr.number}}),
+        ));
+    }
+
+    if gh.supports(Capability::CommentPolling) {
+        let prefix = &state.config.branding.command_prefix;
+        let marker = state.config.branding.comment_marker();
+        for c in gh.fetch_comments_since(&since).await? {
+            if !in_window(&c.created_at)
+                || !c.body.contains(prefix.as_str())
+                || c.body.contains(&marker)
+            {
+                continue;
+            }
+            let mut issue = serde_json::json!({"number": c.number});
+            if c.is_pr {
+                issue["pull_request"] = serde_json::json!({});
+            }
+            raw.push((
+                "issue_comment",
+                "created",
+                c.number,
+                serde_json::json!({
+                    "action": "created",
+                    "issue": issue,
+                    "comment": {"id": c.id, "body": c.body, "user": {"login": c.author}},
+                    "sender": {"login": c.author},
+                }),
+            ));
+        }
+    }
+
+    let c = format!("{FORGE_CURSOR_PREFIX}{now}");
+    store_last_event_id(state, &c);
+    *cursor = Some(c);
+
+    let mut result = Vec::with_capacity(raw.len());
+    for (event_type, action, number, payload) in raw {
+        let payload_str = payload.to_string();
+        match state
+            .db
+            .insert_webhook_event(event_type, action, Some(number), &payload_str)
+        {
+            Ok(id) => result.push(WebhookEvent {
+                id,
+                event_type: event_type.to_string(),
+                action: action.to_string(),
+                number: Some(number),
+                payload: payload_str,
+            }),
+            Err(e) => error!("Failed to store polled event: {e}"),
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git_provider::gitea::GiteaProvider;
+    use crate::git_provider::http::{Auth, Rest};
+    use crate::git_provider::mock::{MockServer, Reply};
+    use serde_json::json;
+
+    const R: &str = "/api/v1/repos/acme/widgets";
+
+    fn pr(number: u64, head: &str, created: &str, updated: &str) -> serde_json::Value {
+        json!({"number": number, "title": "t", "state": "open", "head": {"sha": head, "ref": "f"},
+               "base": {"sha": "b", "ref": "main"}, "created_at": created, "updated_at": updated})
+    }
+
+    #[tokio::test]
+    async fn generic_poller_synthesizes_webhook_events() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            &format!("{R}/issues"),
+            Reply::json(json!([
+                {"number": 1, "title": "new", "state": "open",
+                 "created_at": "2026-05-01T10:05:00Z", "updated_at": "2026-05-01T10:05:00Z"},
+                {"number": 2, "title": "old", "state": "open",
+                 "created_at": "2026-04-01T00:00:00Z", "updated_at": "2026-05-01T10:06:00Z"}
+            ])),
+        );
+        server.on(
+            "GET",
+            &format!("{R}/pulls"),
+            Reply::json(json!([
+                pr(3, "h3", "2026-05-01T10:06:00Z", "2026-05-01T10:06:00Z"),
+                pr(4, "new", "2026-04-01T00:00:00Z", "2026-05-01T10:07:00Z"),
+                pr(5, "same", "2026-04-01T00:00:00Z", "2026-05-01T10:07:00Z")
+            ])),
+        );
+        server.on(
+            "GET",
+            &format!("{R}/issues/comments"),
+            Reply::json(json!([
+                {"id": 7, "body": "/wshm triage", "user": {"login": "bob"},
+                 "created_at": "2026-05-01T10:08:00Z",
+                 "issue_url": "https://h/acme/widgets/issues/2", "pull_request_url": ""},
+                {"id": 8, "body": "/wshm help <!-- wshm -->", "user": {"login": "bot"},
+                 "created_at": "2026-05-01T10:08:00Z",
+                 "issue_url": "https://h/acme/widgets/issues/2", "pull_request_url": ""}
+            ])),
+        );
+        let config = crate::config::Config {
+            git_provider: Some("gitea".into()),
+            repo_owner: "acme".into(),
+            repo_name: "widgets".into(),
+            ..Default::default()
+        };
+        let gh = Arc::new(GiteaProvider::with_rest(
+            Rest::new("Gitea", Auth::None).unwrap(),
+            &server.url(),
+            "acme",
+            "widgets",
+            config.branding.comment_marker(),
+            "gitea",
+        ));
+        let db = Arc::new(crate::Database::open_memory().unwrap());
+        for (n, head) in [(4, "old"), (5, "same")] {
+            let mut p = crate::git_provider::GitProvider::fetch_pulls(gh.as_ref())
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|p| p.number == n)
+                .unwrap();
+            p.head_sha = Some(head.into());
+            db.upsert_pull(&p).unwrap();
+        }
+        let state = DaemonState::new(db, gh, Arc::new(config), false);
+
+        // First poll only records a cursor.
+        let mut cursor = None;
+        assert!(poll_events(&state, &mut cursor).await.unwrap().is_empty());
+        assert!(cursor.as_deref().unwrap().starts_with(FORGE_CURSOR_PREFIX));
+
+        let mut cursor = Some(format!("{FORGE_CURSOR_PREFIX}2026-05-01T10:00:00Z"));
+        let events = poll_events(&state, &mut cursor).await.unwrap();
+        let summary: Vec<(String, String, Option<u64>)> = events
+            .iter()
+            .map(|e| (e.event_type.clone(), e.action.clone(), e.number))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("issues".into(), "opened".into(), Some(1)),
+                ("pull_request".into(), "opened".into(), Some(3)),
+                ("pull_request".into(), "synchronize".into(), Some(4)),
+                ("issue_comment".into(), "created".into(), Some(2)),
+            ]
+        );
+        let comment: serde_json::Value = serde_json::from_str(&events[3].payload).unwrap();
+        assert_eq!(comment["comment"]["user"]["login"], "bob");
+        assert!(comment["issue"].get("pull_request").is_none());
+        assert_ne!(cursor.as_deref(), Some("ts:2026-05-01T10:00:00Z"));
+
+        // Same head again: no second synchronize.
+        let mut cursor = Some(format!("{FORGE_CURSOR_PREFIX}2026-05-01T10:00:00Z"));
+        let again = poll_events(&state, &mut cursor).await.unwrap();
+        assert!(!again.iter().any(|e| e.action == "synchronize"));
+        assert!(state
+            .db
+            .as_ref()
+            .get_sync_entry(POLLER_SYNC_KEY)
+            .unwrap()
+            .is_some());
+    }
 }

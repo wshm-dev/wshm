@@ -139,6 +139,7 @@ async fn handle_webhook(
         .get("x-github-delivery")
         .or_else(|| headers.get("x-gitea-delivery"))
         .or_else(|| headers.get("x-forgejo-delivery"))
+        .or_else(|| headers.get("x-gitlab-event-uuid"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     // When a webhook secret is configured the HMAC already proved authenticity,
@@ -160,6 +161,16 @@ async fn handle_webhook(
             Json(json!({"status": "duplicate", "delivery_id": delivery_id})),
         )
             .into_response();
+    }
+
+    let config = &state.daemon.config;
+    if !format_matches_provider(&headers, config) {
+        return provider_mismatch(&config.repo_slug());
+    }
+    if headers.contains_key("x-gitlab-event")
+        && payload["repository"]["full_name"].as_str() != Some(config.repo_slug().as_str())
+    {
+        return provider_mismatch(&config.repo_slug());
     }
 
     // Filter: only process relevant events
@@ -403,6 +414,7 @@ async fn handle_webhook_multi(
         .get("x-github-delivery")
         .or_else(|| headers.get("x-gitea-delivery"))
         .or_else(|| headers.get("x-forgejo-delivery"))
+        .or_else(|| headers.get("x-gitlab-event-uuid"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     // When a webhook secret is configured the HMAC already proved authenticity,
@@ -456,6 +468,12 @@ async fn handle_webhook_multi(
         }
     };
     drop(repos_guard);
+
+    // Routing used a sender-supplied name: the delivery format must also be
+    // the one that repo's forge actually emits.
+    if !format_matches_provider(&headers, &daemon.config) {
+        return provider_mismatch(&repo_slug);
+    }
 
     // Filter relevant events
     if !should_process_event(&event_type, &action) {
@@ -540,6 +558,13 @@ fn validate_webhook(
             .into_response());
     }
 
+    // GitLab authenticates with a shared token header instead of an HMAC
+    // and has its own event names/payloads: translated to the GitHub shapes
+    // the rest of the pipeline expects.
+    if let Some(gl_event) = headers.get("x-gitlab-event").and_then(|v| v.to_str().ok()) {
+        return validate_gitlab_webhook(gl_event, headers, body);
+    }
+
     // Validate HMAC signature. Without a configured secret the endpoint
     // cannot authenticate the sender, so we refuse to process the delivery
     // rather than silently accepting forged issues/PRs/comments into the
@@ -611,8 +636,178 @@ fn validate_webhook(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // Gitea/Forgejo send GitHub-compatible headers and payloads, but name a
+    // PR push `synchronized`.
+    let action = if action == "synchronized" {
+        "synchronize".to_string()
+    } else {
+        action
+    };
 
     Ok((event_type, action, payload))
+}
+
+/// Validate and translate a GitLab webhook (`X-Gitlab-Event`,
+/// `X-Gitlab-Token`): https://docs.gitlab.com/user/project/integrations/webhooks/
+#[allow(clippy::result_large_err)]
+fn validate_gitlab_webhook(
+    gl_event: &str,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<(String, String, Value), axum::response::Response> {
+    let payload: Value = serde_json::from_slice(body).map_err(|e| {
+        warn!("Failed to parse GitLab webhook payload: {e}");
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid JSON"})),
+        )
+            .into_response()
+    })?;
+    // GitLab's token is sent in clear to (and visible to Maintainers of) the
+    // GitLab project, so it must never be the GitHub HMAC key: it has its
+    // own secret, per repo (secret store `gitlab_webhook_token`, repo scope
+    // then global) or WSHM_GITLAB_WEBHOOK_TOKEN.
+    let path = payload["project"]["path_with_namespace"].as_str();
+    let expected = crate::secrets::resolve(
+        crate::secrets::global().as_ref(),
+        path,
+        GITLAB_WEBHOOK_TOKEN_KEY,
+        "WSHM_GITLAB_WEBHOOK_TOKEN",
+    )
+    .filter(|t| !t.trim().is_empty());
+    match expected {
+        Some(expected) => {
+            let token = headers
+                .get("x-gitlab-token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if !constant_time_eq(&expected, token) {
+                warn!("Invalid GitLab webhook token");
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "invalid token"})),
+                )
+                    .into_response());
+            }
+        }
+        None => {
+            let allow_unsigned = std::env::var("WSHM_ALLOW_UNSIGNED_WEBHOOKS")
+                .ok()
+                .filter(|v| v == "1" || v == "true")
+                .is_some();
+            if !allow_unsigned {
+                warn!(
+                    "Rejecting GitLab webhook: no GitLab token configured (secret \
+                     `{GITLAB_WEBHOOK_TOKEN_KEY}` or WSHM_GITLAB_WEBHOOK_TOKEN)"
+                );
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error": "gitlab webhook token not configured"})),
+                )
+                    .into_response());
+            }
+        }
+    }
+    Ok(translate_gitlab(gl_event, &payload)
+        .unwrap_or_else(|| (format!("gitlab:{gl_event}"), String::new(), payload)))
+}
+
+/// Secret-store key of the GitLab webhook token (distinct from the GitHub
+/// HMAC secret).
+pub const GITLAB_WEBHOOK_TOKEN_KEY: &str = "gitlab_webhook_token";
+
+/// A delivery's wire format must match the target repo's forge: GitLab
+/// format only for gitlab repos, GitHub format (GitHub, Gitea, Forgejo)
+/// only for those. Azure DevOps webhooks are not supported. Stops a sender
+/// of one forge from driving a repo hosted on another.
+fn format_matches_provider(headers: &HeaderMap, config: &crate::config::Config) -> bool {
+    let gitlab_format = headers.contains_key("x-gitlab-event");
+    match crate::git_provider::provider_id(config) {
+        "gitlab" => gitlab_format,
+        "github" | "gitea" | "forgejo" => !gitlab_format,
+        _ => false,
+    }
+}
+
+fn provider_mismatch(repo: &str) -> axum::response::Response {
+    warn!("Rejecting webhook for {repo}: delivery format does not match the repo's git_provider");
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"error": "webhook format does not match repo provider", "repo": repo})),
+    )
+        .into_response()
+}
+
+/// Constant-time string comparison (via HMAC verification).
+fn constant_time_eq(expected: &str, given: &str) -> bool {
+    let Ok(mut a) = Hmac::<Sha256>::new_from_slice(b"wshm-token-compare") else {
+        return false;
+    };
+    a.update(expected.as_bytes());
+    let tag = a.finalize().into_bytes();
+    let Ok(mut b) = Hmac::<Sha256>::new_from_slice(b"wshm-token-compare") else {
+        return false;
+    };
+    b.update(given.as_bytes());
+    b.verify_slice(&tag).is_ok()
+}
+
+/// Map a GitLab Issue / Merge Request / Note hook to the GitHub event the
+/// processor handles (`issues.opened`, `pull_request.opened|synchronize`,
+/// `issue_comment.created`). `None` for everything else.
+fn translate_gitlab(gl_event: &str, p: &Value) -> Option<(String, String, Value)> {
+    let full_name = p["project"]["path_with_namespace"].as_str()?.to_string();
+    let attrs = &p["object_attributes"];
+    let repo = json!({ "full_name": full_name });
+    match gl_event {
+        "Issue Hook" if attrs["action"] == "open" => {
+            let iid = attrs["iid"].as_u64()?;
+            Some((
+                "issues".into(),
+                "opened".into(),
+                json!({"action": "opened", "issue": {"number": iid}, "repository": repo}),
+            ))
+        }
+        "Merge Request Hook" => {
+            let iid = attrs["iid"].as_u64()?;
+            let action = match attrs["action"].as_str()? {
+                "open" | "reopen" => "opened",
+                // `oldrev` is only present when the update pushed commits.
+                "update" if attrs.get("oldrev").is_some_and(|v| !v.is_null()) => "synchronize",
+                _ => return None,
+            };
+            Some((
+                "pull_request".into(),
+                action.into(),
+                json!({"action": action, "pull_request": {"number": iid}, "repository": repo}),
+            ))
+        }
+        // Only new notes: an edited note must not re-run its command.
+        "Note Hook" if attrs["action"].as_str().is_none_or(|a| a == "create") => {
+            let (number, is_pr) = match attrs["noteable_type"].as_str()? {
+                "Issue" => (p["issue"]["iid"].as_u64()?, false),
+                "MergeRequest" => (p["merge_request"]["iid"].as_u64()?, true),
+                _ => return None,
+            };
+            let user = p["user"]["username"].as_str().unwrap_or("").to_string();
+            let mut issue = json!({ "number": number });
+            if is_pr {
+                issue["pull_request"] = json!({});
+            }
+            Some((
+                "issue_comment".into(),
+                "created".into(),
+                json!({
+                    "action": "created",
+                    "issue": issue,
+                    "comment": {"id": attrs["id"], "body": attrs["note"], "user": {"login": user}},
+                    "sender": {"login": user},
+                    "repository": repo,
+                }),
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn should_process_event(event_type: &str, action: &str) -> bool {
@@ -658,4 +853,136 @@ fn verify_signature(secret: &str, body: &[u8], sig_header: &str) -> bool {
     mac.update(body);
     // Constant-time comparison via hmac::Mac::verify_slice
     mac.verify_slice(&expected_bytes).is_ok()
+}
+
+#[cfg(test)]
+mod forge_webhook_tests {
+    use super::*;
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn gitlab_token_is_checked() {
+        let body = Bytes::from(
+            json!({"project": {"path_with_namespace": "g/p"},
+                   "object_attributes": {"action": "open", "iid": 3}})
+            .to_string(),
+        );
+        // Only this test touches this variable.
+        std::env::set_var("WSHM_GITLAB_WEBHOOK_TOKEN", "gl-token");
+        let ok = headers(&[
+            ("x-gitlab-event", "Issue Hook"),
+            ("x-gitlab-token", "gl-token"),
+        ]);
+        let (ev, action, payload) = validate_webhook(Some("s3cret"), &ok, &body).unwrap();
+        assert_eq!((ev.as_str(), action.as_str()), ("issues", "opened"));
+        assert_eq!(extract_number(&ev, &payload), Some(3));
+        assert_eq!(payload["repository"]["full_name"], "g/p");
+
+        let bad = headers(&[("x-gitlab-event", "Issue Hook"), ("x-gitlab-token", "nope")]);
+        assert!(validate_webhook(Some("s3cret"), &bad, &body).is_err());
+        // The GitHub HMAC secret is not a valid GitLab token.
+        let github_secret = headers(&[
+            ("x-gitlab-event", "Issue Hook"),
+            ("x-gitlab-token", "s3cret"),
+        ]);
+        assert!(validate_webhook(Some("s3cret"), &github_secret, &body).is_err());
+        let missing = headers(&[("x-gitlab-event", "Issue Hook")]);
+        assert!(validate_webhook(Some("s3cret"), &missing, &body).is_err());
+    }
+
+    #[test]
+    fn delivery_format_must_match_repo_provider() {
+        let cfg = |p: Option<&str>| crate::config::Config {
+            git_provider: p.map(String::from),
+            repo_owner: "rtk-ai".into(),
+            repo_name: "rtk".into(),
+            ..Default::default()
+        };
+        let gitlab = headers(&[("x-gitlab-event", "Note Hook")]);
+        let github = headers(&[("x-github-event", "issue_comment")]);
+        // A GitLab-format hook can never drive a GitHub (or Gitea) repo...
+        assert!(!format_matches_provider(&gitlab, &cfg(None)));
+        assert!(!format_matches_provider(&gitlab, &cfg(Some("gitea"))));
+        // ...nor a GitHub-format one a GitLab repo; Azure takes neither.
+        assert!(!format_matches_provider(&github, &cfg(Some("gitlab"))));
+        assert!(!format_matches_provider(
+            &github,
+            &cfg(Some("azure-devops"))
+        ));
+        assert!(format_matches_provider(&gitlab, &cfg(Some("gitlab"))));
+        assert!(format_matches_provider(&github, &cfg(None)));
+        assert!(format_matches_provider(&github, &cfg(Some("forgejo"))));
+    }
+
+    #[test]
+    fn gitlab_note_edit_is_ignored() {
+        let p = json!({"project": {"path_with_namespace": "g/p"}, "user": {"username": "bob"},
+                       "object_attributes": {"id": 9, "note": "/wshm fix", "noteable_type": "Issue", "action": "update"},
+                       "issue": {"iid": 2}});
+        assert!(translate_gitlab("Note Hook", &p).is_none());
+        let mut created = p.clone();
+        created["object_attributes"]["action"] = json!("create");
+        assert!(translate_gitlab("Note Hook", &created).is_some());
+    }
+
+    #[test]
+    fn gitlab_mr_and_note_translation() {
+        let project = json!({"path_with_namespace": "g/p"});
+        let (ev, action, _) = translate_gitlab(
+            "Merge Request Hook",
+            &json!({"project": project, "object_attributes": {"action": "update", "iid": 5, "oldrev": "abc"}}),
+        )
+        .unwrap();
+        assert_eq!(
+            (ev.as_str(), action.as_str()),
+            ("pull_request", "synchronize")
+        );
+        // A title edit (no oldrev) is not a push.
+        assert!(translate_gitlab(
+            "Merge Request Hook",
+            &json!({"project": project, "object_attributes": {"action": "update", "iid": 5}}),
+        )
+        .is_none());
+
+        let (ev, action, payload) = translate_gitlab(
+            "Note Hook",
+            &json!({"project": project, "user": {"username": "bob"},
+                    "object_attributes": {"id": 9, "note": "/wshm analyze", "noteable_type": "MergeRequest"},
+                    "merge_request": {"iid": 5}}),
+        )
+        .unwrap();
+        assert_eq!((ev.as_str(), action.as_str()), ("issue_comment", "created"));
+        assert_eq!(payload["issue"]["number"], 5);
+        assert!(payload["issue"].get("pull_request").is_some());
+        assert_eq!(payload["comment"]["user"]["login"], "bob");
+        assert_eq!(payload["comment"]["body"], "/wshm analyze");
+    }
+
+    #[test]
+    fn gitea_synchronized_is_normalized() {
+        let secret = "k";
+        let body = Bytes::from(
+            json!({"action": "synchronized", "pull_request": {"number": 2}}).to_string(),
+        );
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(&body);
+        let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        let h = headers(&[
+            ("x-github-event", "pull_request"),
+            ("x-hub-signature-256", &sig),
+        ]);
+        let (ev, action, _) = validate_webhook(Some(secret), &h, &body).unwrap();
+        assert_eq!(
+            (ev.as_str(), action.as_str()),
+            ("pull_request", "synchronize")
+        );
+        assert!(should_process_event(&ev, &action));
+    }
 }
