@@ -208,6 +208,36 @@ impl Client {
     /// Returns `Some(comment_id)` if found, `None` otherwise.
     /// Searches for both the custom marker and the legacy `<!-- wshm -->` marker.
     pub async fn find_wshm_comment(&self, number: u64, marker: &str) -> Result<Option<u64>> {
+        self.find_comment_where(number, |b| {
+            b.contains(marker) || b.contains(WSHM_COMMENT_MARKER)
+        })
+        .await
+    }
+
+    /// Create or update the comment whose body contains `tag` (strict: the
+    /// generic/legacy marker does not match), so a feature can keep its own
+    /// comment next to the triage one.
+    pub async fn upsert_tagged_comment(&self, number: u64, tag: &str, body: &str) -> Result<()> {
+        if let Some(id) = self.find_comment_where(number, |b| b.contains(tag)).await? {
+            info!("Updating tagged wshm comment {id} on #{number}");
+            return self.update_comment(id, body).await;
+        }
+        crate::retry::with_retry_connect_only("github: create comment", || async {
+            self.octocrab
+                .issues(&self.owner, &self.repo)
+                .create_comment(number, body)
+                .await
+                .with_context(|| format!("Failed to comment on issue #{number}"))?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+    }
+
+    async fn find_comment_where(
+        &self,
+        number: u64,
+        matches: impl Fn(&str) -> bool,
+    ) -> Result<Option<u64>> {
         let mut url = format!(
             "https://api.github.com/repos/{}/{}/issues/{number}/comments?per_page={pp}",
             self.owner,
@@ -224,7 +254,7 @@ impl Client {
             for comment in &comments {
                 let comment_body = comment.get("body").and_then(|v| v.as_str()).unwrap_or("");
 
-                if comment_body.contains(marker) || comment_body.contains(WSHM_COMMENT_MARKER) {
+                if matches(comment_body) {
                     if let Some(id) = comment.get("id").and_then(|v| v.as_u64()) {
                         return Ok(Some(id));
                     }

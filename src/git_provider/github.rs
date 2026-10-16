@@ -210,6 +210,10 @@ impl GitProvider for GitHubProvider {
         self.client.delete_comment(comment.id).await
     }
 
+    async fn upsert_tagged_comment(&self, number: u64, tag: &str, body: &str) -> Result<()> {
+        self.client.upsert_tagged_comment(number, tag, body).await
+    }
+
     async fn is_collaborator(&self, username: &str) -> Result<bool> {
         self.client.is_collaborator(username).await
     }

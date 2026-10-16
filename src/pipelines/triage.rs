@@ -594,6 +594,15 @@ async fn triage_issue(
             }
         }
 
+        // Automatic reproduction (#229): hand off to the daemon's bounded
+        // background worker; never blocks triage. The worker checks the
+        // per-repo `repro_issues` switch (off by default) and the rest.
+        crate::pipelines::repro::notify_triaged(
+            &config.repo_slug(),
+            issue.number,
+            &classification.category,
+        );
+
         info!("Applied triage to issue #{}", issue.number);
 
         // Emit export event

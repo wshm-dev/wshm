@@ -318,6 +318,11 @@ pub struct TriageConfig {
     /// Override the AI system prompt for triage. If not set, uses the built-in default.
     #[serde(default)]
     pub system_prompt: Option<String>,
+
+    /// `[triage.repro]`: tuning for automatic bug reproduction. Activation is
+    /// the per-repo `repro_issues` feature switch, not this section.
+    #[serde(default)]
+    pub repro: crate::pipelines::repro::ReproConfig,
 }
 
 impl Default for TriageConfig {
@@ -336,6 +341,7 @@ impl Default for TriageConfig {
             retriage_interval_hours: 0,
             suggested_actions: true,
             system_prompt: None,
+            repro: Default::default(),
         }
     }
 }
@@ -1917,6 +1923,11 @@ pub struct RepoFeatures {
     pub auto_pr: bool,
     #[serde(default)]
     pub auto_merge: bool,
+    /// Try to reproduce newly triaged bug reports in the (Pro) Docker
+    /// sandbox and report the outcome on the issue. Off by default; tuned by
+    /// `[triage.repro]`. Nothing runs unless this is on for the repo.
+    #[serde(default)]
+    pub repro_issues: bool,
 
     /// Fine-grained filters applied per action.
     #[serde(default)]
@@ -1935,6 +1946,7 @@ impl Default for RepoFeatures {
             review_post_comments: true,
             auto_pr: false,
             auto_merge: false,
+            repro_issues: false,
             filters: RepoFilters::default(),
         }
     }
@@ -2364,6 +2376,19 @@ labels_wontfix = "wontfix"
 labels_needs_info = "needs-info"
 # retriage_interval_hours = 24   # re-evaluate triaged issues every 24h (0 = disabled)
 # suggested_actions = true        # append "Suggested Actions" to triage comments (set false to disable)
+
+# Automatic bug reproduction (Pro, Docker sandbox). Enabled per repo with
+# `repro_issues = true` in [repos.features] (Settings → Repos); this section
+# only tunes it. Values can be overridden per repo in the DB.
+# [triage.repro]
+# categories = ["bug"]
+# trusted_authors_only = true   # only reports from collaborators
+# timeout_secs = 300
+# max_runs_per_day = 20
+# network = false               # sandbox without network
+# post_comment = true
+# create_test_pr = false        # draft PR with the failing test when confirmed
+# labels = { confirmed = "repro:confirmed", not_reproduced = "repro:not-reproduced", needs_info = "needs-info" }
 
 [pr]
 enabled = true

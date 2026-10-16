@@ -554,6 +554,8 @@ export interface RepoFeatures {
 	review_post_comments: boolean;
 	auto_pr: boolean;
 	auto_merge: boolean;
+	/** Automatic reproduction of triaged bug reports (Pro sandbox). Off by default. */
+	repro_issues?: boolean;
 	filters: RepoFilters;
 	/// Master apply-mode toggle. `true` posts to GitHub; `false` is
 	/// DRY-RUN (compute results visible in the dashboard, no writes).
@@ -564,6 +566,38 @@ export interface RepoFeatures {
 
 export async function fetchRepoFeatures(slug: string): Promise<RepoFeatures> {
 	return apiGet<RepoFeatures>(`/repos/${encodeURIComponent(slug)}/features`);
+}
+
+/** Generated file of an automatic reproduction. */
+export interface ReproFile {
+	path: string;
+	content: string;
+}
+
+/** Latest automatic reproduction of an issue (#229). */
+export interface ReproRun {
+	id: number;
+	issue_number: number;
+	outcome: 'confirmed' | 'not-reproduced' | 'needs-info' | 'error';
+	reason: string;
+	head_sha: string | null;
+	default_branch: string | null;
+	command: string | null;
+	files: ReproFile[];
+	expected_failure: string | null;
+	output: string | null;
+	exit_code: number | null;
+	missing_info: string[];
+	comment_posted: boolean;
+	test_pr: number | null;
+	created_at: string;
+}
+
+export async function fetchIssueRepro(
+	slug: string,
+	number: number
+): Promise<{ enabled: boolean; run: ReproRun | null }> {
+	return apiGet(`/repos/${encodeURIComponent(slug)}/issues/${number}/repro`);
 }
 
 export async function updateRepoFeatures(

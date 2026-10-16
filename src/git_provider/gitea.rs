@@ -740,6 +740,38 @@ impl GitProvider for GiteaProvider {
             .await
     }
 
+    async fn upsert_tagged_comment(&self, number: u64, tag: &str, body: &str) -> Result<()> {
+        self.rest.require_auth("comment")?;
+        let mut found = None;
+        self.list(&format!("issues/{number}/comments"), |c| {
+            if c["body"].as_str().unwrap_or("").contains(tag) {
+                found = c["id"].as_u64();
+            }
+            found.is_none()
+        })
+        .await?;
+        match found {
+            Some(id) => {
+                let existing = CommentRef {
+                    thread: Thread::Issue(number),
+                    id,
+                    parent_id: None,
+                };
+                self.update_comment(&existing, body).await
+            }
+            None => {
+                self.rest
+                    .send_json(
+                        Method::POST,
+                        &self.url(&format!("issues/{number}/comments")),
+                        &json!({ "body": body }),
+                    )
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
     async fn fetch_comments_since(&self, since: &str) -> Result<Vec<PolledComment>> {
         let mut out = Vec::new();
         self.list(

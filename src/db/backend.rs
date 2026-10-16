@@ -193,6 +193,29 @@ pub trait DatabaseBackend: Send + Sync {
         Ok(true)
     }
 
+    // ── Issue reproduction (#229) ───────────────────────────────
+    //
+    // Defaults fail closed: a backend that does not store runs cannot
+    // enforce `max_runs_per_day` or dedupe, so reproduction must not run.
+
+    /// Append one reproduction attempt. Returns the new row id.
+    fn insert_repro_run(&self, run: &super::repro::ReproRunRow) -> Result<i64> {
+        let _ = run;
+        anyhow::bail!("repro_runs is not supported by this database backend")
+    }
+
+    /// Latest reproduction attempt for an issue.
+    fn latest_repro_run(&self, issue_number: u64) -> Result<Option<super::repro::ReproRunRow>> {
+        let _ = issue_number;
+        anyhow::bail!("repro_runs is not supported by this database backend")
+    }
+
+    /// Attempts created at or after `since` (RFC 3339 UTC, second precision).
+    fn count_repro_runs_since(&self, since: &str) -> Result<u64> {
+        let _ = since;
+        anyhow::bail!("repro_runs is not supported by this database backend")
+    }
+
     // ── Admin / maintenance ─────────────────────────────────────
 
     /// Wipe every triage result and PR analysis. Used by the `revert` flow
@@ -560,6 +583,18 @@ impl DatabaseBackend for super::Database {
 
     fn clear_triage_and_analyses(&self) -> Result<()> {
         self.clear_triage_and_analyses()
+    }
+
+    fn insert_repro_run(&self, run: &super::repro::ReproRunRow) -> Result<i64> {
+        super::Database::insert_repro_run(self, run)
+    }
+
+    fn latest_repro_run(&self, issue_number: u64) -> Result<Option<super::repro::ReproRunRow>> {
+        super::Database::latest_repro_run(self, issue_number)
+    }
+
+    fn count_repro_runs_since(&self, since: &str) -> Result<u64> {
+        super::Database::count_repro_runs_since(self, since)
     }
 
     fn as_sqlite_db(&self) -> Option<&super::Database> {

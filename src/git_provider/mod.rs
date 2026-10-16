@@ -265,6 +265,16 @@ pub trait GitProvider: Send + Sync {
     /// Delete a comment. Already-deleted is not an error.
     async fn delete_comment(&self, comment: &CommentRef) -> Result<()>;
 
+    /// Create or update the issue comment whose body contains `tag`. Unlike
+    /// [`Self::comment_issue`] (one generic wshm comment per thread), the
+    /// match is strict, so a feature (issue reproduction) keeps its own
+    /// comment next to the triage one. `body` is posted verbatim and must
+    /// already carry `tag` and the wshm marker.
+    async fn upsert_tagged_comment(&self, number: u64, tag: &str, body: &str) -> Result<()> {
+        let _ = (number, tag, body);
+        Err(unsupported(self.provider_name(), "tagged comments"))
+    }
+
     /// Comments created after `since` (RFC 3339) on any issue/PR of the
     /// repo. Requires [`Capability::CommentPolling`].
     async fn fetch_comments_since(&self, since: &str) -> Result<Vec<PolledComment>> {
@@ -364,6 +374,22 @@ pub const FORGE_AUTH_KEYS: [&str; 8] = [
     "forgejo_token",
     "azure_devops_token",
 ];
+
+/// HTTPS clone URL of the configured repository (no credentials).
+pub fn clone_url(config: &crate::config::Config) -> Option<String> {
+    let owner = &config.repo_owner;
+    let repo = &config.repo_name;
+    let provider = provider_id(config);
+    let base = forge_base_url(config, provider);
+    match provider {
+        "github" | "gitlab" | "gitea" | "forgejo" => Some(format!("{base}/{owner}/{repo}.git")),
+        "azure-devops" | "azure" => {
+            let (project, name) = repo.split_once('/').unwrap_or((repo, repo));
+            Some(format!("{base}/{owner}/{project}/_git/{name}"))
+        }
+        _ => None,
+    }
+}
 
 /// Build a public web URL for an issue on the configured forge.
 ///

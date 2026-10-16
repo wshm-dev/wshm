@@ -742,6 +742,40 @@ impl GitProvider for GitLabProvider {
             .await
     }
 
+    async fn upsert_tagged_comment(&self, number: u64, tag: &str, body: &str) -> Result<()> {
+        self.rest.require_auth("GitLab comment")?;
+        let mut found = None;
+        self.list(&format!("issues/{number}/notes?sort=asc"), |note| {
+            if note["system"].as_bool() != Some(true)
+                && note["body"].as_str().unwrap_or("").contains(tag)
+            {
+                found = note["id"].as_u64();
+            }
+            found.is_none()
+        })
+        .await?;
+        match found {
+            Some(id) => {
+                let existing = CommentRef {
+                    thread: Thread::Issue(number),
+                    id,
+                    parent_id: None,
+                };
+                self.update_comment(&existing, body).await
+            }
+            None => {
+                self.rest
+                    .send_json(
+                        Method::POST,
+                        &self.url(&format!("issues/{number}/notes")),
+                        &json!({ "body": body }),
+                    )
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
     async fn fetch_comments_since(&self, since: &str) -> Result<Vec<PolledComment>> {
         // Project events, action=commented. `after` is a day (exclusive),
         // so ask from the previous day and filter precisely below.

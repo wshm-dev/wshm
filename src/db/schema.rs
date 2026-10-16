@@ -126,6 +126,33 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         ",
     )?;
 
+    // Automatic bug-report reproduction results (#229), append-only.
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS repro_runs (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_number     INTEGER NOT NULL,
+            outcome          TEXT NOT NULL,
+            reason           TEXT NOT NULL DEFAULT '',
+            dedupe_key       TEXT NOT NULL,
+            issue_hash       TEXT NOT NULL,
+            head_sha         TEXT,
+            default_branch   TEXT,
+            command          TEXT,
+            files_json       TEXT NOT NULL DEFAULT '[]',
+            expected_failure TEXT,
+            output           TEXT,
+            exit_code        INTEGER,
+            missing_info     TEXT NOT NULL DEFAULT '[]',
+            comment_posted   INTEGER NOT NULL DEFAULT 0,
+            test_pr          INTEGER,
+            created_at       TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_repro_runs_issue ON repro_runs(issue_number, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_repro_runs_time ON repro_runs(created_at);
+        ",
+    )?;
+
     // Migration: add reactions columns to issues
     let has_reactions: bool = conn
         .prepare("SELECT reactions_plus1 FROM issues LIMIT 0")

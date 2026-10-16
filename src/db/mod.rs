@@ -4,6 +4,7 @@ pub mod history;
 pub mod issues;
 pub mod licenses;
 pub mod pulls;
+pub mod repro;
 pub mod reviews;
 pub mod schema;
 pub mod search;

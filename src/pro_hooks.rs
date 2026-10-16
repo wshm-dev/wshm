@@ -201,3 +201,33 @@ pub async fn run_auto_update() {
 // NOTE: In OSS build, daemon and web functionality are not available.
 // This hook is preserved for Pro builds which will provide the daemon types.
 // In OSS, these types and functions are not used.
+
+// --- Issue reproduction sandbox hook (#229) ---
+// Running AI-generated reproduction code is Pro-only, exactly like the
+// auto-fix sandbox: wshm-core owns the pipeline (gating, prompt, outcome
+// classification, comment, DB), wshm-pro registers the Docker runner. In the
+// OSS build no runner is registered and reproduction never runs — there is
+// deliberately no host-execution fallback.
+
+/// Pair of entry points into the Pro Docker sandbox.
+#[derive(Clone, Copy)]
+pub struct ReproSandbox {
+    /// Fails with a clear message when the container runtime is unusable
+    /// (daemon down, binary missing). Checked before any AI call.
+    pub check: fn() -> BoxFuture<'static, anyhow::Result<()>>,
+    /// Run one generated reproduction in an isolated container.
+    pub run: fn(
+        crate::pipelines::repro::SandboxRequest,
+    ) -> BoxFuture<'static, anyhow::Result<crate::pipelines::repro::SandboxResult>>,
+}
+
+static REPRO_SANDBOX: OnceLock<ReproSandbox> = OnceLock::new();
+
+pub fn set_repro_sandbox(s: ReproSandbox) {
+    let _ = REPRO_SANDBOX.set(s);
+}
+
+/// The registered reproduction sandbox, or `None` in the OSS build.
+pub fn repro_sandbox() -> Option<ReproSandbox> {
+    REPRO_SANDBOX.get().copied()
+}
