@@ -97,6 +97,36 @@ pub struct PolledComment {
     pub created_at: String,
 }
 
+/// Prefix of feature-specific comment tags (`<!-- wshm:repro -->`). A comment
+/// carrying one is never the generic wshm comment that `comment_issue`
+/// updates, so a tagged comment cannot be clobbered by triage.
+pub const TAGGED_COMMENT_PREFIX: &str = "<!-- wshm:";
+
+/// Whether an existing comment is the target of a tagged upsert: it carries
+/// `tag` and, when the bot identity is known, was written by the bot (a
+/// third party pasting the tag must not be able to capture the comment).
+pub fn tagged_comment_matches(body: &str, author: &str, tag: &str, me: Option<&str>) -> bool {
+    body.contains(tag) && me.is_none_or(|m| author.eq_ignore_ascii_case(m))
+}
+
+/// Outcome of looking for the bot's tagged comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaggedTarget {
+    Update(u64),
+    Create,
+    /// A tagged comment exists but the bot identity is unknown, so it cannot
+    /// be told apart from a forged one: refuse instead of guessing.
+    Refuse,
+}
+
+pub fn tagged_target(found: Option<u64>, me: Option<&str>) -> TaggedTarget {
+    match (found, me) {
+        (Some(id), Some(_)) => TaggedTarget::Update(id),
+        (Some(_), None) => TaggedTarget::Refuse,
+        (None, _) => TaggedTarget::Create,
+    }
+}
+
 /// Error for an operation the platform has no equivalent for.
 pub fn unsupported(provider: &str, what: &str) -> anyhow::Error {
     anyhow::anyhow!("{what} is not supported on {provider}")
@@ -271,6 +301,16 @@ pub trait GitProvider: Send + Sync {
     /// Delete a comment. Already-deleted is not an error.
     async fn delete_comment(&self, comment: &CommentRef) -> Result<()>;
 
+    /// Create or update the issue comment whose body contains `tag`. Unlike
+    /// [`Self::comment_issue`] (one generic wshm comment per thread), the
+    /// match is strict, so a feature (issue reproduction) keeps its own
+    /// comment next to the triage one. `body` is posted verbatim and must
+    /// already carry `tag` and the wshm marker.
+    async fn upsert_tagged_comment(&self, number: u64, tag: &str, body: &str) -> Result<()> {
+        let _ = (number, tag, body);
+        Err(unsupported(self.provider_name(), "tagged comments"))
+    }
+
     /// Comments created after `since` (RFC 3339) on any issue/PR of the
     /// repo. Requires [`Capability::CommentPolling`].
     async fn fetch_comments_since(&self, since: &str) -> Result<Vec<PolledComment>> {
@@ -370,6 +410,22 @@ pub const FORGE_AUTH_KEYS: [&str; 8] = [
     "forgejo_token",
     "azure_devops_token",
 ];
+
+/// HTTPS clone URL of the configured repository (no credentials).
+pub fn clone_url(config: &crate::config::Config) -> Option<String> {
+    let owner = &config.repo_owner;
+    let repo = &config.repo_name;
+    let provider = provider_id(config);
+    let base = forge_base_url(config, provider);
+    match provider {
+        "github" | "gitlab" | "gitea" | "forgejo" => Some(format!("{base}/{owner}/{repo}.git")),
+        "azure-devops" | "azure" => {
+            let (project, name) = repo.split_once('/').unwrap_or((repo, repo));
+            Some(format!("{base}/{owner}/{project}/_git/{name}"))
+        }
+        _ => None,
+    }
+}
 
 /// Build a public web URL for an issue on the configured forge.
 ///

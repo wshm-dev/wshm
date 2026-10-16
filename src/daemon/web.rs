@@ -27,6 +27,9 @@ use std::sync::Arc;
 
 use super::MultiDaemonState;
 
+#[path = "web_repro.rs"]
+mod repro_api;
+
 // ---------------------------------------------------------------------------
 // Embedded SPA assets
 // ---------------------------------------------------------------------------
@@ -2632,6 +2635,7 @@ async fn api_repo_features_patch(
     patch_bool!(review_post_comments);
     patch_bool!(auto_pr);
     patch_bool!(auto_merge);
+    patch_bool!(repro_issues);
 
     // Filters: full replace if a `filters` object is in the body.
     if let Some(f_body) = body.get("filters") {
@@ -4325,6 +4329,14 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         .route(
             "/api/v1/repos/{slug}/skills",
             get(api_repo_skills_get).patch(api_repo_skills_patch),
+        )
+        .route(
+            "/api/v1/repos/{slug}/repro",
+            get(repro_api::api_repo_repro_get).patch(repro_api::api_repo_repro_patch),
+        )
+        .route(
+            "/api/v1/repos/{slug}/issues/{number}/repro",
+            get(repro_api::api_issue_repro_get),
         )
         .route(
             "/api/v1/repos/{slug}/diagrams",

@@ -3,6 +3,7 @@ pub mod log_buffer;
 pub mod memory;
 pub mod poller;
 pub mod processor;
+pub mod repro_worker;
 pub mod scheduler;
 pub mod server;
 pub mod systemd;
@@ -598,6 +599,9 @@ pub async fn run(mut config: Config, args: DaemonArgs) -> Result<()> {
         processor::run(processor_state, rx).await;
     });
 
+    // Bounded background reproduction of triaged bug reports (#229).
+    let _repro_worker = repro_worker::spawn(repro_worker::Resolver::Single(Arc::clone(&state)));
+
     // Spawn the periodic scheduler
     let scheduler_state = Arc::clone(&state);
     let scheduler_handle = tokio::spawn(async move {
@@ -999,6 +1003,9 @@ pub async fn run_multi_with_extensions(
     let processor_handle = tokio::spawn(async move {
         processor::run_multi(processor_multi, rx).await;
     });
+
+    // Bounded background reproduction of triaged bug reports (#229).
+    let _repro_worker = repro_worker::spawn(repro_worker::Resolver::Multi(Arc::clone(&multi)));
 
     // Spawn a scheduler per repo
     let mut scheduler_handles = Vec::new();

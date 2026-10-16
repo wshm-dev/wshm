@@ -64,6 +64,7 @@ pub fn is_usage_limit_error(e: &anyhow::Error) -> bool {
 pub mod merge_queue;
 pub mod pr_analysis;
 pub mod pr_health;
+pub mod repro;
 pub mod status;
 pub mod triage;
 
