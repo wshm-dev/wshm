@@ -117,11 +117,6 @@ pub fn embeddable_diff(diff: &str, diff_viewer: bool, max_diff_kb: u32) -> Optio
     (diff_viewer && !diff.is_empty() && diff.len() <= max_diff_kb as usize * 1024).then_some(diff)
 }
 
-/// "Files changed" page of a PR. Single forge-specific spot of the page.
-pub fn files_url(repo: &str, pr: u64) -> String {
-    format!("https://github.com/{repo}/pull/{pr}/files")
-}
-
 /// How the vendored assets are delivered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Assets {

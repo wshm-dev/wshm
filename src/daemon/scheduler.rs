@@ -89,7 +89,7 @@ pub async fn run(state: Arc<DaemonState>) {
 
         if diagram_sweep_due(last_diagram_sweep, Instant::now()) {
             last_diagram_sweep = Some(Instant::now());
-            crate::diagrams::sweep(&state.config, state.db.as_ref(), &state.gh()).await;
+            crate::diagrams::sweep(&state.config, state.db.as_ref(), state.gh().as_ref()).await;
         }
 
         let features = state.features();
@@ -101,7 +101,7 @@ pub async fn run(state: Arc<DaemonState>) {
             continue;
         }
         info!("Periodic sync triggered (incremental)");
-        match github::sync::incremental_sync_full(&state.gh(), state.db.as_ref()).await {
+        match github::sync::incremental_sync_full(&*state.gh(), state.db.as_ref()).await {
             Ok(_) => {
                 info!("Periodic sync complete");
 
@@ -153,7 +153,7 @@ pub async fn run(state: Arc<DaemonState>) {
             match pipelines::triage::run_with_filters(
                 &state.config,
                 state.db.as_ref(),
-                &state.gh(),
+                &*state.gh(),
                 &args,
                 pipelines::triage::OutputFormat::Text,
                 None,
@@ -205,7 +205,7 @@ pub async fn run(state: Arc<DaemonState>) {
             match pipelines::triage::run_with_filters(
                 &state.config,
                 state.db.as_ref(),
-                &state.gh(),
+                &*state.gh(),
                 &args,
                 pipelines::triage::OutputFormat::Text,
                 None,

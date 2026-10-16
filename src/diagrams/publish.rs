@@ -5,7 +5,8 @@ use tracing::{info, warn};
 
 use crate::config::{DiagramPublishConfig, DiagramPublishTarget};
 use crate::db::diagrams::PrDiagramRow;
-use crate::github::Client as GhClient;
+use crate::git_provider::Forge as GhClient;
+use crate::storage::{ObjectTarget, StorageTargetConfig};
 
 /// Branch of `pages_repo` the pages are committed to.
 pub const PAGES_BRANCH: &str = "gh-pages";
@@ -130,6 +131,47 @@ fn valid_repo_full(s: &str) -> bool {
     ok(it.next()) && ok(it.next()) && it.next().is_none()
 }
 
+/// Object storage settings of an `s3` / `gcs` / `azure` target. The page key
+/// already carries `publish.prefix`, so the store itself has none.
+/// Credentials come from the provider's standard chain, never from here.
+pub fn storage_config(cfg: &DiagramPublishConfig) -> Option<StorageTargetConfig> {
+    let provider = match cfg.target {
+        DiagramPublishTarget::S3 => "s3",
+        DiagramPublishTarget::Gcs => "gcs",
+        DiagramPublishTarget::Azure => "azure",
+        _ => return None,
+    };
+    Some(StorageTargetConfig {
+        provider: provider.to_string(),
+        bucket: cfg.bucket.clone(),
+        prefix: None,
+        region: cfg.region.clone(),
+        endpoint: cfg.endpoint.clone(),
+        account: cfg.account.clone(),
+        container: cfg.container.clone(),
+        dir: None,
+        public_url: cfg.public_url.clone(),
+    })
+}
+
+const HTML: &str = "text/html; charset=utf-8";
+
+/// Upload a page; returns its public URL (configured `public_url`, else the
+/// provider's canonical URL; `None` for custom endpoints without one).
+pub async fn put_object(target: &ObjectTarget, key: &str, html: &str) -> Result<Option<String>> {
+    target.put(key, html.as_bytes().to_vec(), HTML).await?;
+    Ok(target.public_url(key))
+}
+
+fn github(gh: &GhClient) -> Result<&crate::github::Client> {
+    gh.as_github().with_context(|| {
+        format!(
+            "target \"github-pages\" needs the GitHub provider (this repo uses {})",
+            gh.provider_name()
+        )
+    })
+}
+
 /// Publish `html`. `Ok(None)` when the target is off, not available, refused
 /// (private repo) or skipped in dry-run; every such case is logged.
 /// `previous` lets a republish keep the same key/token, hence the same link.
@@ -145,15 +187,8 @@ pub async fn publish(
     dry_run: bool,
 ) -> Result<Option<Published>> {
     let name = target_name(cfg.target);
-    match cfg.target {
-        DiagramPublishTarget::Off => return Ok(None),
-        DiagramPublishTarget::S3 | DiagramPublishTarget::Gcs | DiagramPublishTarget::Azure => {
-            warn!(
-                "PR diagram page: target '{name}' requires object storage support (pending) — page not published"
-            );
-            return Ok(None);
-        }
-        _ => {}
+    if cfg.target == DiagramPublishTarget::Off {
+        return Ok(None);
     }
     if is_private && is_public_target(cfg) && !cfg.allow_private {
         warn!(
@@ -206,14 +241,15 @@ pub async fn publish(
                 .context(
                     "publish.pages_repo (owner/repo) is required for target = \"github-pages\"",
                 )?;
-            gh.put_file_content(
-                repo,
-                PAGES_BRANCH,
-                &key,
-                html.as_bytes(),
-                &format!("wshm: architecture page for {repo_slug}#{pr}"),
-            )
-            .await?;
+            github(gh)?
+                .put_file_content(
+                    repo,
+                    PAGES_BRANCH,
+                    &key,
+                    html.as_bytes(),
+                    &format!("wshm: architecture page for {repo_slug}#{pr}"),
+                )
+                .await?;
             let base = cfg.public_url.clone().or_else(|| pages_url(repo));
             info!("PR diagram page committed to {repo}@{PAGES_BRANCH}:{key}");
             Ok(Some(Published {
@@ -252,7 +288,23 @@ pub async fn publish(
                 bytes: html.len() as u64,
             }))
         }
-        _ => bail!("unreachable publish target {name}"),
+        DiagramPublishTarget::S3 | DiagramPublishTarget::Gcs | DiagramPublishTarget::Azure => {
+            let target =
+                ObjectTarget::from_config(&storage_config(cfg).expect("object storage target"))?;
+            let url = put_object(&target, &key, html).await?;
+            info!("PR diagram page uploaded to {name}:{key}");
+            if url.is_none() {
+                warn!("PR diagram page: no public URL for {name} (set publish.public_url), no link in the comment");
+            }
+            Ok(Some(Published {
+                target: name,
+                url,
+                key,
+                token: Some(token),
+                bytes: html.len() as u64,
+            }))
+        }
+        DiagramPublishTarget::Off => Ok(None),
     }
 }
 
@@ -288,14 +340,23 @@ pub async fn delete_page(
                 );
                 return Ok(());
             };
-            if gh
+            if github(gh)?
                 .delete_file_content(repo, PAGES_BRANCH, key, "wshm: remove architecture page")
                 .await?
             {
                 info!("Deleted PR diagram page {repo}@{PAGES_BRANCH}:{key}");
             }
         }
-        // `wshm`: the HTML lives in the row itself.
+        "s3" | "gcs" | "azure" => {
+            // The current settings must still point at that store.
+            let Some(sc) = storage_config(cfg).filter(|c| c.provider == target) else {
+                warn!("PR diagram page {key}: publish target is no longer '{target}', object left in place");
+                return Ok(());
+            };
+            ObjectTarget::from_config(&sc)?.delete(key).await?;
+            info!("Deleted PR diagram page {target}:{key}");
+        }
+        // `wshm`: rendered on request, nothing stored besides the row.
         _ => {}
     }
     Ok(())
@@ -354,6 +415,59 @@ mod tests {
             hosted_path("o/r", 3, "t", true),
             "/api/v1/diagrams/o/r/3?k=t"
         );
+    }
+
+    #[test]
+    fn object_storage_settings_map_to_the_store() {
+        let cfg = DiagramPublishConfig {
+            target: DiagramPublishTarget::S3,
+            prefix: "pages".into(),
+            bucket: Some("b".into()),
+            region: Some("eu-west-3".into()),
+            endpoint: Some("https://s3.example".into()),
+            public_url: Some("https://cdn.example".into()),
+            ..Default::default()
+        };
+        let sc = storage_config(&cfg).unwrap();
+        assert_eq!(sc.provider, "s3");
+        assert_eq!(sc.bucket.as_deref(), Some("b"));
+        assert_eq!(sc.prefix, None, "the page key already has the prefix");
+        assert_eq!(sc.public_url.as_deref(), Some("https://cdn.example"));
+        let azure = DiagramPublishConfig {
+            target: DiagramPublishTarget::Azure,
+            account: Some("acct".into()),
+            container: Some("c".into()),
+            ..Default::default()
+        };
+        let sc = storage_config(&azure).unwrap();
+        assert_eq!(
+            (
+                sc.provider.as_str(),
+                sc.account.as_deref(),
+                sc.container.as_deref()
+            ),
+            ("azure", Some("acct"), Some("c"))
+        );
+        assert!(storage_config(&DiagramPublishConfig::default()).is_none());
+    }
+
+    #[tokio::test]
+    async fn pages_go_to_the_object_store_and_back_out() {
+        let store = std::sync::Arc::new(object_store::memory::InMemory::new());
+        let target = ObjectTarget::from_store(store, "s3", "", Some("https://cdn.example/"));
+        let key = page_key("wshm-diagrams", "o/r", 7, "abc");
+        let url = put_object(&target, &key, "<html>x</html>").await.unwrap();
+        assert_eq!(
+            url.as_deref(),
+            Some("https://cdn.example/wshm-diagrams/o/r/pr-7-abc.html")
+        );
+        let (body, ct) = target.get_with_content_type(&key).await.unwrap();
+        assert_eq!(body, b"<html>x</html>");
+        assert_eq!(ct.as_deref(), Some("text/html; charset=utf-8"));
+        target.delete(&key).await.unwrap();
+        assert!(target.get_with_content_type(&key).await.is_err());
+        // Keys the store would reject never reach it.
+        assert!(put_object(&target, "a/../b.html", "x").await.is_err());
     }
 
     #[test]

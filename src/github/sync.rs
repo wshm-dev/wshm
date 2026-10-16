@@ -3,10 +3,10 @@ use chrono::Utc;
 use tracing::info;
 
 use crate::db::backend::DatabaseBackend;
-use crate::github::Client;
+use crate::git_provider::{Capability, Forge};
 
 /// Full sync: fetch ALL issues and ALL PRs (open + closed). Used on first run or manual sync.
-pub async fn full_sync(gh: &Client, db: &dyn DatabaseBackend) -> Result<()> {
+pub async fn full_sync(gh: &Forge, db: &dyn DatabaseBackend) -> Result<()> {
     info!("Starting full sync...");
     sync_issues(gh, db, None).await?;
     sync_pulls(gh, db).await?;
@@ -20,7 +20,7 @@ pub async fn full_sync(gh: &Client, db: &dyn DatabaseBackend) -> Result<()> {
 ///
 /// First call (no sync log) → fetches everything once.
 /// Subsequent calls → only fetches what changed.
-pub async fn incremental_sync_full(gh: &Client, db: &dyn DatabaseBackend) -> Result<()> {
+pub async fn incremental_sync_full(gh: &Forge, db: &dyn DatabaseBackend) -> Result<()> {
     info!("Starting incremental sync...");
 
     let issues_since = db
@@ -53,7 +53,7 @@ pub async fn incremental_sync_full(gh: &Client, db: &dyn DatabaseBackend) -> Res
 
 /// Forever-incremental PR sync: stops paginating once we hit PRs older than `since`.
 async fn sync_pulls_incremental(
-    gh: &Client,
+    gh: &Forge,
     db: &dyn DatabaseBackend,
     since: Option<&str>,
 ) -> Result<()> {
@@ -70,7 +70,7 @@ async fn sync_pulls_incremental(
 }
 
 #[allow(dead_code)]
-pub async fn incremental_sync(gh: &Client, db: &dyn DatabaseBackend, table: &str) -> Result<()> {
+pub async fn incremental_sync(gh: &Forge, db: &dyn DatabaseBackend, table: &str) -> Result<()> {
     let entry = db.get_sync_entry(table)?;
 
     let since = entry.as_ref().map(|e| {
@@ -104,16 +104,16 @@ pub async fn incremental_sync(gh: &Client, db: &dyn DatabaseBackend, table: &str
 }
 
 /// Force sync issues now (bypass throttle). Used when we know there's a new event.
-pub async fn sync_issues_now(gh: &Client, db: &dyn DatabaseBackend) -> Result<()> {
+pub async fn sync_issues_now(gh: &Forge, db: &dyn DatabaseBackend) -> Result<()> {
     sync_issues(gh, db, None).await
 }
 
 /// Force sync pulls now (bypass throttle). Used when we know there's a new event.
-pub async fn sync_pulls_now(gh: &Client, db: &dyn DatabaseBackend) -> Result<()> {
+pub async fn sync_pulls_now(gh: &Forge, db: &dyn DatabaseBackend) -> Result<()> {
     sync_pulls(gh, db).await
 }
 
-async fn sync_issues(gh: &Client, db: &dyn DatabaseBackend, since: Option<&str>) -> Result<()> {
+async fn sync_issues(gh: &Forge, db: &dyn DatabaseBackend, since: Option<&str>) -> Result<()> {
     info!("Syncing issues...");
     // Fetch ALL states (open+closed) so closed issues get updated in local DB
     let issues = gh.fetch_all_issues(since).await?;
@@ -128,7 +128,7 @@ async fn sync_issues(gh: &Client, db: &dyn DatabaseBackend, since: Option<&str>)
     Ok(())
 }
 
-async fn sync_pulls(gh: &Client, db: &dyn DatabaseBackend) -> Result<()> {
+async fn sync_pulls(gh: &Forge, db: &dyn DatabaseBackend) -> Result<()> {
     info!("Syncing pull requests...");
     let mut pulls = gh.fetch_pulls().await?;
     sync_pulls_finalize(gh, db, &mut pulls).await
@@ -136,7 +136,7 @@ async fn sync_pulls(gh: &Client, db: &dyn DatabaseBackend) -> Result<()> {
 
 /// Shared finalize step: fetch mergeable status, upsert, update sync log.
 async fn sync_pulls_finalize(
-    gh: &Client,
+    gh: &Forge,
     db: &dyn DatabaseBackend,
     pulls: &mut [crate::db::pulls::PullRequest],
 ) -> Result<()> {
@@ -187,38 +187,45 @@ async fn sync_pulls_finalize(
     // awaiting-re-review buckets). Best-effort: a Search API failure
     // (anonymous rate limit, transient error) must not fail the sync —
     // the previous decisions simply stay in place until the next pass.
-    match gh.fetch_review_decisions().await {
-        Ok(decisions) => match db.set_review_decisions(&decisions) {
-            Ok(0) => {}
-            Ok(n) => info!("Review decisions updated for {n} PR(s)"),
-            Err(e) => tracing::warn!("Failed to store review decisions: {e}"),
-        },
-        Err(e) => tracing::warn!("Failed to fetch review decisions: {e}"),
+    // Platforms without the data say so via `supports` (no request made).
+    if gh.supports(Capability::ReviewDecisions) {
+        match gh.fetch_review_decisions().await {
+            Ok(decisions) => match db.set_review_decisions(&decisions) {
+                Ok(0) => {}
+                Ok(n) => info!("Review decisions updated for {n} PR(s)"),
+                Err(e) => tracing::warn!("Failed to store review decisions: {e}"),
+            },
+            Err(e) => tracing::warn!("Failed to fetch review decisions: {e}"),
+        }
     }
 
     // 👍 (+1) reaction counts size the PR nodes in the label graph. Same
     // best-effort contract as review decisions: a Search API failure leaves
     // the previous counts untouched.
-    match gh.fetch_pull_reactions().await {
-        Ok(reactions) => match db.set_pull_reactions(&reactions) {
-            Ok(0) => {}
-            Ok(n) => info!("PR reactions updated for {n} PR(s)"),
-            Err(e) => tracing::warn!("Failed to store PR reactions: {e}"),
-        },
-        Err(e) => tracing::warn!("Failed to fetch PR reactions: {e}"),
+    if gh.supports(Capability::Reactions) {
+        match gh.fetch_pull_reactions().await {
+            Ok(reactions) => match db.set_pull_reactions(&reactions) {
+                Ok(0) => {}
+                Ok(n) => info!("PR reactions updated for {n} PR(s)"),
+                Err(e) => tracing::warn!("Failed to store PR reactions: {e}"),
+            },
+            Err(e) => tracing::warn!("Failed to fetch PR reactions: {e}"),
+        }
     }
 
     // CI status backs the CI column on the PRs and Merge Queue views — never
     // populated by the /pulls list itself. Same best-effort contract as
     // review decisions/reactions: a Search API failure leaves prior statuses
     // untouched.
-    match gh.fetch_ci_statuses().await {
-        Ok(statuses) => match db.set_ci_statuses(&statuses) {
-            Ok(0) => {}
-            Ok(n) => info!("CI statuses updated for {n} PR(s)"),
-            Err(e) => tracing::warn!("Failed to store CI statuses: {e}"),
-        },
-        Err(e) => tracing::warn!("Failed to fetch CI statuses: {e}"),
+    if gh.supports(Capability::CiStatus) {
+        match gh.fetch_ci_statuses().await {
+            Ok(statuses) => match db.set_ci_statuses(&statuses) {
+                Ok(0) => {}
+                Ok(n) => info!("CI statuses updated for {n} PR(s)"),
+                Err(e) => tracing::warn!("Failed to store CI statuses: {e}"),
+            },
+            Err(e) => tracing::warn!("Failed to fetch CI statuses: {e}"),
+        }
     }
 
     let now = Utc::now().to_rfc3339();

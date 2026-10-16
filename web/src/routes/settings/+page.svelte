@@ -1792,9 +1792,9 @@
 										<option value="local">local directory</option>
 										<option value="github-pages">GitHub Pages (gh-pages branch)</option>
 										<option value="wshm">hosted by wshm (Pro){diagramsInfo?.hosting_available ? '' : ' — not licensed'}</option>
-										<option value="s3">S3 (pending)</option>
-										<option value="gcs">GCS (pending)</option>
-										<option value="azure">Azure Blob (pending)</option>
+										<option value="s3">S3 / S3-compatible</option>
+										<option value="gcs">Google Cloud Storage</option>
+										<option value="azure">Azure Blob Storage</option>
 									</select>
 								</div>
 								<div>
@@ -1850,8 +1850,9 @@
 										</div>
 									{/each}
 									<p class="text-[0.7rem] text-muted-foreground sm:col-span-2">
-										Object storage publishing is not available yet: the page is skipped with a warning.
-										Credentials come from the provider's usual chain, never from these settings.
+										Pages are uploaded as text/html; the link uses the public URL above (else the
+										provider's canonical URL). Credentials come from the provider's usual chain
+										(environment, workload identity), never from these settings.
 									</p>
 								{/if}
 								<label class="flex items-center gap-2 text-xs sm:col-span-2">

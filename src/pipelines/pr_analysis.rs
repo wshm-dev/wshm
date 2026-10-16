@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::db::backend::DatabaseBackend;
 use crate::db::pulls::{PrAnalysisRow, PullRequest};
 use crate::export::{EventKind, ExportEvent, ExportManager};
-use crate::github::Client as GhClient;
+use crate::git_provider::Forge as GhClient;
 
 /// What to do with the (slow) diagram step of `[pr.review_diagrams]`. The
 /// analysis comment is always posted first, without waiting for it.
@@ -59,7 +59,7 @@ pub fn spawn_diagram_job(
         let Ok(_permit) = DIAGRAM_JOBS.acquire().await else {
             return;
         };
-        finish_diagram(&config, db.as_ref(), &gh, job).await;
+        finish_diagram(&config, db.as_ref(), gh.as_ref(), job).await;
     });
 }
 
@@ -399,7 +399,7 @@ async fn analyze_pr(
     // Architecture diagram (`[pr.review_diagrams]`): only a cached one here
     // (DB read, no AI). Generation is a separate, bounded step that runs
     // after the comment is posted (see `DiagramJob`).
-    let diagram = crate::diagrams::cached_section(config, db, pr, diff.as_deref());
+    let diagram = crate::diagrams::cached_section(config, db, gh, pr, diff.as_deref());
 
     // Store in DB
     let now = chrono::Utc::now().to_rfc3339();
@@ -454,7 +454,8 @@ async fn analyze_pr(
         if config.assign.enabled {
             if let Some(assignee) = crate::config::AssignConfig::pick(&config.assign.prs) {
                 info!("Auto-assigning PR #{} to {assignee}", pr.number);
-                gh.add_assignees(pr.number, &[assignee.to_string()]).await?;
+                gh.add_pr_assignees(pr.number, &[assignee.to_string()])
+                    .await?;
             }
         }
 

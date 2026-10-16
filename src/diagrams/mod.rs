@@ -25,7 +25,7 @@ use crate::config::{Config, DiagramPublishTarget, ReviewDiagramsConfig, DIAGRAM_
 use crate::db::backend::DatabaseBackend;
 use crate::db::diagrams::PrDiagramRow;
 use crate::db::pulls::PullRequest;
-use crate::github::Client as GhClient;
+use crate::git_provider::Forge as GhClient;
 use graph::Graph;
 
 fn sha256_hex(s: &str) -> String {
@@ -213,7 +213,7 @@ async fn generate(
 }
 
 fn section_options<'a>(
-    config: &Config,
+    gh: &GhClient,
     dc: &'a ReviewDiagramsConfig,
     page_url: Option<&'a str>,
     diff_len: usize,
@@ -225,7 +225,7 @@ fn section_options<'a>(
         page_url,
         page_has_diff: dc.diff_viewer && diff_len <= dc.publish.max_diff_kb as usize * 1024,
         max_mermaid_chars: dc.max_mermaid_chars as usize,
-        supports_mermaid: forge_supports_mermaid(config),
+        supports_mermaid: forge_supports_mermaid(gh),
     }
 }
 
@@ -235,6 +235,7 @@ fn section_options<'a>(
 pub fn cached_section(
     config: &Config,
     db: &dyn DatabaseBackend,
+    gh: &GhClient,
     pr: &PullRequest,
     diff: Option<&str>,
 ) -> Option<String> {
@@ -250,7 +251,7 @@ pub fn cached_section(
     let graph: Graph = serde_json::from_str(&row.graph_json).ok()?;
     render::comment_section(
         &graph,
-        &section_options(config, &dc, row.page_url.as_deref(), diff.len()),
+        &section_options(gh, &dc, row.page_url.as_deref(), diff.len()),
     )
 }
 
@@ -292,12 +293,21 @@ pub async fn comment_section(
 }
 
 /// Single hook point for the forge capability: whether PR comments render
-/// Mermaid. GitHub, GitLab, Gitea/Forgejo do; Azure DevOps does not. Until
-/// the multi-forge work (wshm#227) exposes `supports_mermaid()` on the
-/// provider, every repo here is a GitHub repo, hence `true`. When it is
-/// false, the comment shows the page link instead of the diagram.
-pub fn forge_supports_mermaid(_config: &Config) -> bool {
-    true
+/// Mermaid (GitHub, GitLab, Gitea/Forgejo yes; Azure DevOps no). When it is
+/// false the comment links to the interactive page if one is published,
+/// otherwise it keeps the story and walkthrough text only.
+pub fn forge_supports_mermaid(gh: &GhClient) -> bool {
+    gh.supports_mermaid()
+}
+
+/// "Files changed" view of a PR on the configured forge.
+pub fn files_url(config: &Config, pr: u64) -> Option<String> {
+    let url = crate::git_provider::web_url_for_pr(config, pr)?;
+    Some(match crate::git_provider::provider_id(config) {
+        "gitlab" => format!("{url}/diffs"),
+        "azure-devops" | "azure" => format!("{url}?_a=files"),
+        _ => format!("{url}/files"),
+    })
 }
 
 /// Is the PR recent enough to (re)generate its diagram? `updated_at` moves
@@ -486,7 +496,7 @@ pub fn etag_matches(if_none_match: Option<&str>, etag: &str) -> bool {
 /// allowed and small enough, otherwise the viewer links to "Files changed".
 pub fn render_page(
     dc: &ReviewDiagramsConfig,
-    repo_slug: &str,
+    config: &Config,
     pr: u64,
     graph: &Graph,
     diff: Option<&str>,
@@ -494,15 +504,20 @@ pub fn render_page(
 ) -> String {
     let embedded =
         diff.and_then(|d| page::embeddable_diff(d, dc.diff_viewer, dc.publish.max_diff_kb));
-    let files = page::files_url(repo_slug, pr);
+    let repo_slug = config.repo_slug();
+    let files = files_url(config, pr);
     page::render(
         graph,
         &page::PageOptions {
             language: &dc.language,
-            repo: repo_slug,
+            repo: &repo_slug,
             pr,
             diff: embedded,
-            files_url: embedded.is_none().then_some(files.as_str()),
+            files_url: if embedded.is_none() {
+                files.as_deref()
+            } else {
+                None
+            },
             assets,
         },
     )
@@ -624,7 +639,7 @@ async fn build_section(
         } else {
             page::Assets::Inline
         };
-        let html = render_page(&dc, &repo_slug, pr.number, &graph, Some(diff), assets);
+        let html = render_page(&dc, config, pr.number, &graph, Some(diff), assets);
         match publish::publish(
             &dc.publish,
             gh,
@@ -667,7 +682,7 @@ async fn build_section(
 
     Ok(render::comment_section(
         &graph,
-        &section_options(config, &dc, page_url.as_deref(), diff.len()),
+        &section_options(gh, &dc, page_url.as_deref(), diff.len()),
     ))
 }
 
@@ -900,7 +915,7 @@ mod tests {
         let db = crate::db::Database::open_memory().unwrap();
         let _ = rustls::crypto::ring::default_provider().install_default();
         let config = Config::default();
-        let gh = GhClient::new(&config).unwrap();
+        let gh = crate::git_provider::github::GitHubProvider::new(&config).unwrap();
         db.upsert_pull(&pull(1, "open")).unwrap();
         db.upsert_pull(&pull(2, "closed")).unwrap();
         db.upsert_pull(&pull(3, "open")).unwrap();
@@ -919,6 +934,63 @@ mod tests {
         let r3 = db.get_pr_diagram(3).unwrap().unwrap();
         assert!(r3.page_target.is_none() && r3.page_url.is_none());
         assert!(db.get_pr_diagram(4).unwrap().is_none());
+    }
+
+    #[test]
+    fn mermaid_follows_the_forge_and_azure_gets_a_link() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let graph: Graph = serde_json::from_value(serde_json::json!({
+            "title": "t", "story": "Story.", "layers": ["A", "B"],
+            "nodes": [
+                {"id": "a", "label": "A", "file": "a.rs", "layer": 0, "status": "modified", "summary": "s"},
+                {"id": "b", "label": "B", "file": "b.rs", "layer": 1, "status": "new", "summary": "s"}
+            ],
+            "edges": [{"source": "a", "target": "b", "label": "call", "step": 1, "status": "modified", "caption": "c"}]
+        }))
+        .unwrap();
+        let dc = ReviewDiagramsConfig::default();
+        for (id, mermaid, files) in [
+            (
+                "gitlab",
+                true,
+                "https://gitlab.com/acme/proj/repo/-/merge_requests/9/diffs",
+            ),
+            (
+                "gitea",
+                true,
+                "https://gitea.com/acme/proj/repo/pulls/9/files",
+            ),
+            (
+                "azure-devops",
+                false,
+                "https://dev.azure.com/acme/proj/_git/repo/pullrequest/9?_a=files",
+            ),
+        ] {
+            let config = Config {
+                git_provider: Some(id.into()),
+                repo_owner: "acme".into(),
+                repo_name: "proj/repo".into(),
+                ..Default::default()
+            };
+            let gh = crate::git_provider::build_provider(&config).unwrap();
+            assert_eq!(forge_supports_mermaid(gh.as_ref()), mermaid, "{id}");
+            assert_eq!(files_url(&config, 9).as_deref(), Some(files), "{id}");
+            for url in [Some("https://pages.example/p.html"), None] {
+                let s =
+                    render::comment_section(&graph, &section_options(gh.as_ref(), &dc, url, 10))
+                        .unwrap();
+                assert_eq!(s.contains("```mermaid"), mermaid, "{id}");
+                assert_eq!(
+                    s.contains("](https://pages.example/p.html)"),
+                    url.is_some(),
+                    "{id}"
+                );
+                assert!(
+                    s.contains("Story.") && s.contains("<b>Walkthrough</b>"),
+                    "{id}"
+                );
+            }
+        }
     }
 
     #[test]

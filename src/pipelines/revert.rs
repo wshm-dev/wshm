@@ -2,7 +2,7 @@ use anyhow::Result;
 use tracing::info;
 
 use crate::db::backend::DatabaseBackend;
-use crate::github::Client as GhClient;
+use crate::git_provider::{Forge as GhClient, Thread};
 
 /// Revert all wshm actions: remove comments, remove wshm-applied labels, clear triage/analysis results.
 pub async fn run(db: &dyn DatabaseBackend, gh: &GhClient, apply: bool) -> Result<()> {
@@ -15,13 +15,16 @@ pub async fn run(db: &dyn DatabaseBackend, gh: &GhClient, apply: bool) -> Result
     // Process issues
     for issue in &open_issues {
         // Find and remove wshm comment
-        if let Ok(Some(comment_id)) = gh.find_wshm_comment(issue.number, &gh.comment_marker).await {
+        if let Ok(Some(comment_id)) = gh
+            .find_comment_with_marker(Thread::Issue(issue.number), gh.comment_marker())
+            .await
+        {
             if apply {
                 info!(
                     "Deleting wshm comment {comment_id} on issue #{}",
                     issue.number
                 );
-                gh.delete_comment(comment_id).await?;
+                gh.delete_comment(&comment_id).await?;
             } else {
                 println!(
                     "[DRY-RUN] Would delete wshm comment on issue #{}",
@@ -54,10 +57,13 @@ pub async fn run(db: &dyn DatabaseBackend, gh: &GhClient, apply: bool) -> Result
 
     // Process PRs
     for pr in &open_pulls {
-        if let Ok(Some(comment_id)) = gh.find_wshm_comment(pr.number, &gh.comment_marker).await {
+        if let Ok(Some(comment_id)) = gh
+            .find_comment_with_marker(Thread::Pull(pr.number), gh.comment_marker())
+            .await
+        {
             if apply {
                 info!("Deleting wshm comment {comment_id} on PR #{}", pr.number);
-                gh.delete_comment(comment_id).await?;
+                gh.delete_comment(&comment_id).await?;
             } else {
                 println!("[DRY-RUN] Would delete wshm comment on PR #{}", pr.number);
             }

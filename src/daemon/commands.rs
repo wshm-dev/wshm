@@ -18,8 +18,8 @@ use tracing::info;
 
 use crate::cli::{PrArgs, TriageArgs};
 use crate::config::Config;
+use crate::git_provider::Forge as GhClient;
 use crate::github::sync as gh_sync;
-use crate::github::Client as GhClient;
 use crate::pipelines;
 use crate::pro_hooks;
 
@@ -244,7 +244,11 @@ pub async fn execute(
         SlashCommand::Unlabel(label) => {
             info!("Slash command: unlabel #{number} '{label}'");
             if apply {
-                gh.remove_label(number, label).await?;
+                if is_pr {
+                    gh.remove_pr_label(number, label).await?;
+                } else {
+                    gh.remove_label(number, label).await?;
+                }
                 Ok(format!("Removed label `{label}` from #{number}."))
             } else {
                 Ok(format!(

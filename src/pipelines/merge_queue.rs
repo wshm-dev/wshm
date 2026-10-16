@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::db::backend::DatabaseBackend;
 use crate::db::pulls::PullRequest;
 use crate::export::ExportManager;
-use crate::github::Client as GhClient;
+use crate::git_provider::Forge as GhClient;
 
 struct ScoredPr {
     pr: PullRequest,
