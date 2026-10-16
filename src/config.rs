@@ -19,13 +19,22 @@ pub struct Config {
     #[serde(default)]
     pub github: GitHubConfig,
 
-    /// Git provider: "github" (default), "gitlab", "gitea", "azure-devops"
+    /// Git provider: "github" (default), "gitlab", "gitea", "forgejo",
+    /// "azure-devops". Non-GitHub tokens come from the secret store
+    /// (`gitlab_token`, `gitea_token`, `forgejo_token`, `azure_devops_token`)
+    /// or env (`GITLAB_TOKEN`, `GITEA_TOKEN`, `FORGEJO_TOKEN`,
+    /// `AZURE_DEVOPS_TOKEN`), never from this file. Azure DevOps repo slug:
+    /// `org/project/repo`.
     #[serde(default)]
     pub git_provider: Option<String>,
 
     /// Git platform URL for self-hosted (e.g. "https://gitlab.company.com")
     #[serde(default)]
     pub git_url: Option<String>,
+
+    /// Azure DevOps settings (only read when `git_provider = "azure-devops"`).
+    #[serde(default)]
+    pub azure_devops: AzureDevOpsConfig,
 
     #[serde(default)]
     pub ai: AiConfig,
@@ -120,6 +129,28 @@ pub struct Config {
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct GitHubConfig {}
+
+/// `[azure_devops]` — Azure DevOps specifics.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AzureDevOpsConfig {
+    /// Work item types synced and triaged as issues (default: Issue, Bug).
+    /// Overridable at runtime, per repo and shared across pods, by the
+    /// `azure_work_item_types` app setting (JSON array of strings).
+    #[serde(default = "default_azure_work_item_types")]
+    pub work_item_types: Vec<String>,
+}
+
+fn default_azure_work_item_types() -> Vec<String> {
+    vec!["Issue".to_string(), "Bug".to_string()]
+}
+
+impl Default for AzureDevOpsConfig {
+    fn default() -> Self {
+        Self {
+            work_item_types: default_azure_work_item_types(),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AiConfig {
@@ -1595,19 +1626,8 @@ pub struct ExportConfig {
     pub webhooks: Vec<WebhookConfig>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct StorageConfig {
-    pub provider: String,
-
-    #[serde(default)]
-    pub bucket: Option<String>,
-
-    #[serde(default)]
-    pub prefix: Option<String>,
-
-    #[serde(default)]
-    pub region: Option<String>,
-}
+/// `[export.storage]`: same shape as every object storage target.
+pub type StorageConfig = crate::storage::StorageTargetConfig;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct DatabaseExportConfig {
@@ -2675,6 +2695,7 @@ impl Default for Config {
             github: GitHubConfig::default(),
             git_provider: None,
             git_url: None,
+            azure_devops: AzureDevOpsConfig::default(),
             ai: AiConfig::default(),
             triage: TriageConfig::default(),
             pr: PrConfig::default(),

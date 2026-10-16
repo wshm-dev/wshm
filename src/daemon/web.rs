@@ -2022,9 +2022,9 @@ async fn run_sync(state: &WebState, repo_filter: Option<&str>, full: bool) -> Re
     let results: Vec<(String, Result<(), anyhow::Error>)> = futures::stream::iter(targets)
         .map(|(slug, daemon)| async move {
             let result = if full {
-                crate::github::sync::full_sync(&daemon.gh(), daemon.db.as_ref()).await
+                crate::github::sync::full_sync(&*daemon.gh(), daemon.db.as_ref()).await
             } else {
-                crate::github::sync::incremental_sync_full(&daemon.gh(), daemon.db.as_ref()).await
+                crate::github::sync::incremental_sync_full(&*daemon.gh(), daemon.db.as_ref()).await
             };
             (slug, result)
         })
@@ -3799,16 +3799,11 @@ async fn api_secrets_put(
                 "api_secrets_put: store.put OK — row id={id}"
             );
             // Hot-reload affected daemon clients so the new token / API key
-            // takes effect without a restart. GitHub-auth keys (PAT or the
-            // three GitHub App fields) reload the GhClient; other keys are
-            // read on-demand by the relevant pipeline so no reload is needed.
-            const GITHUB_AUTH_KEYS: [&str; 4] = [
-                "github_token",
-                "github_app_id",
-                "github_app_installation_id",
-                "github_app_private_key",
-            ];
-            if GITHUB_AUTH_KEYS.contains(&key.trim()) {
+            // takes effect without a restart. Forge-auth keys (GitHub PAT or
+            // App fields, GitLab/Gitea/Forgejo/Azure DevOps tokens) rebuild
+            // the forge provider; other keys are read on-demand by the
+            // relevant pipeline so no reload is needed.
+            if crate::git_provider::FORGE_AUTH_KEYS.contains(&key.trim()) {
                 tracing::debug!(
                     target: "wshm_core::secrets_trace",
                     "api_secrets_put: key={:?} is a GitHub auth key — triggering reload",

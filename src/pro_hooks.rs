@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 
 use crate::config::Config;
 use crate::db::backend::DatabaseBackend;
-use crate::github::Client as GhClient;
+use crate::git_provider::Forge as GhClient;
 
 // --- Feature gate hook ---
 // Checks if a pro feature is available (license validation).

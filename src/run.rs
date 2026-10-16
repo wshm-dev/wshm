@@ -27,12 +27,18 @@ pub fn triage_format(cli: &Cli) -> OutputFormat {
 
 /// Load the per-repo config, open the database (as a trait object so the
 /// Pro binary can swap in a Postgres backend at runtime), and build a
-/// GitHub client.
-pub fn init_core(cli: &Cli) -> Result<(crate::Config, Arc<dyn DatabaseBackend>, crate::Client)> {
+/// forge client (GitHub, GitLab, Gitea/Forgejo or Azure DevOps).
+pub fn init_core(
+    cli: &Cli,
+) -> Result<(
+    crate::Config,
+    Arc<dyn DatabaseBackend>,
+    crate::git_provider::SharedForge,
+)> {
     let config = crate::Config::load(cli)?;
     let db: Arc<dyn DatabaseBackend> = Arc::new(crate::Database::open(&config)?);
     crate::config::seed_skills_logged(db.as_ref(), &config.skills);
-    let gh = crate::Client::new(&config)?;
+    let gh = crate::git_provider::build_provider_with_db(&config, Some(Arc::clone(&db)))?;
     Ok((config, db, gh))
 }
 
@@ -43,7 +49,7 @@ pub fn init_full(
 ) -> Result<(
     crate::Config,
     Arc<dyn DatabaseBackend>,
-    crate::Client,
+    crate::git_provider::SharedForge,
     Option<crate::export::ExportManager>,
 )> {
     let (config, db, gh) = init_core(cli)?;
@@ -60,7 +66,7 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
     match &cli.command {
         Some(Command::Sync) => {
             let (config, db, gh, exporter) = init_full(&cli)?;
-            crate::github::sync::full_sync(&gh, db.as_ref()).await?;
+            crate::github::sync::full_sync(&*gh, db.as_ref()).await?;
             if let Some(ref em) = exporter {
                 em.emit(&crate::export::ExportEvent {
                     kind: crate::export::EventKind::SyncCompleted,
@@ -75,12 +81,12 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
         Some(Command::Triage(args)) => {
             let (config, db, gh, exporter) = init_full(&cli)?;
             if !cli.offline {
-                crate::github::sync::incremental_sync(&gh, db.as_ref(), "issues").await?;
+                crate::github::sync::incremental_sync(&*gh, db.as_ref(), "issues").await?;
             }
             crate::pipelines::triage::run(
                 &config,
                 db.as_ref(),
-                &gh,
+                &*gh,
                 args,
                 triage_format(&cli),
                 exporter.as_ref(),
@@ -90,12 +96,12 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
         Some(Command::Pr(args)) => {
             let (config, db, gh, exporter) = init_full(&cli)?;
             if !cli.offline {
-                crate::github::sync::incremental_sync(&gh, db.as_ref(), "pulls").await?;
+                crate::github::sync::incremental_sync(&*gh, db.as_ref(), "pulls").await?;
             }
             crate::pipelines::pr_analysis::run(
                 &config,
                 db.as_ref(),
-                &gh,
+                &*gh,
                 args,
                 cli.json,
                 exporter.as_ref(),
@@ -105,12 +111,12 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
         Some(Command::Queue(args)) => {
             let (config, db, gh, exporter) = init_full(&cli)?;
             if !cli.offline {
-                crate::github::sync::incremental_sync(&gh, db.as_ref(), "pulls").await?;
+                crate::github::sync::incremental_sync(&*gh, db.as_ref(), "pulls").await?;
             }
             crate::pipelines::merge_queue::run(
                 &config,
                 db.as_ref(),
-                &gh,
+                &*gh,
                 args,
                 cli.json,
                 exporter.as_ref(),
@@ -120,8 +126,8 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
         Some(Command::Run(args)) => {
             let (config, db, gh, exporter) = init_full(&cli)?;
             if !cli.offline {
-                crate::github::sync::incremental_sync(&gh, db.as_ref(), "issues").await?;
-                crate::github::sync::incremental_sync(&gh, db.as_ref(), "pulls").await?;
+                crate::github::sync::incremental_sync(&*gh, db.as_ref(), "issues").await?;
+                crate::github::sync::incremental_sync(&*gh, db.as_ref(), "pulls").await?;
             }
 
             let triage_args = crate::cli::TriageArgs {
@@ -132,7 +138,7 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             crate::pipelines::triage::run(
                 &config,
                 db.as_ref(),
-                &gh,
+                &*gh,
                 &triage_args,
                 triage_format(&cli),
                 exporter.as_ref(),
@@ -146,7 +152,7 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             crate::pipelines::pr_analysis::run(
                 &config,
                 db.as_ref(),
-                &gh,
+                &*gh,
                 &pr_args,
                 cli.json,
                 exporter.as_ref(),
@@ -157,7 +163,7 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             crate::pipelines::merge_queue::run(
                 &config,
                 db.as_ref(),
-                &gh,
+                &*gh,
                 &queue_args,
                 cli.json,
                 exporter.as_ref(),
@@ -177,8 +183,9 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             let config = crate::Config::load(&cli)?;
             let db: Arc<dyn DatabaseBackend> = Arc::new(crate::Database::open(&config)?);
             if !cli.offline {
-                let gh = crate::Client::new(&config)?;
-                crate::github::sync::incremental_sync(&gh, db.as_ref(), "pulls").await?;
+                let gh =
+                    crate::git_provider::build_provider_with_db(&config, Some(Arc::clone(&db)))?;
+                crate::github::sync::incremental_sync(&*gh, db.as_ref(), "pulls").await?;
             }
             crate::pipelines::pr_health::run(db.as_ref(), args, cli.json)?;
         }
@@ -211,9 +218,9 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
         Some(Command::Revert(args)) => {
             let (_config, db, gh, _) = init_full(&cli)?;
             if !cli.offline {
-                crate::github::sync::full_sync(&gh, db.as_ref()).await?;
+                crate::github::sync::full_sync(&*gh, db.as_ref()).await?;
             }
-            crate::pipelines::revert::run(db.as_ref(), &gh, args.apply).await?;
+            crate::pipelines::revert::run(db.as_ref(), &*gh, args.apply).await?;
         }
         Some(Command::Backup(args)) => {
             crate::pipelines::backup::backup(args)?;
@@ -228,9 +235,10 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             let config = crate::Config::load(&cli)?;
             let db: Arc<dyn DatabaseBackend> = Arc::new(crate::Database::open(&config)?);
             if !cli.offline {
-                let gh = crate::Client::new(&config)?;
-                crate::github::sync::incremental_sync(&gh, db.as_ref(), "issues").await?;
-                crate::github::sync::incremental_sync(&gh, db.as_ref(), "pulls").await?;
+                let gh =
+                    crate::git_provider::build_provider_with_db(&config, Some(Arc::clone(&db)))?;
+                crate::github::sync::incremental_sync(&*gh, db.as_ref(), "issues").await?;
+                crate::github::sync::incremental_sync(&*gh, db.as_ref(), "pulls").await?;
             }
             crate::pipelines::status::show_summary(&config, db.as_ref(), cli.json)?;
         }
