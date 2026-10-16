@@ -1,3 +1,5 @@
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use super::*;
 use crate::db::Database;
 use crate::git_provider::gitea::GiteaProvider;
@@ -129,8 +131,10 @@ fn feature_switch_is_off_by_default_and_nothing_is_queued() {
         Err(SkipReason::FeatureOff)
     );
 
-    let mut on = RepoFeatures::default();
-    on.repro_issues = true;
+    let on = RepoFeatures {
+        repro_issues: true,
+        ..Default::default()
+    };
     assert_eq!(should_queue(&on, true, &cfg, "bug", true), Ok(()));
     assert_eq!(should_queue(&on, true, &cfg, "BUG", true), Ok(()));
     assert_eq!(
@@ -548,6 +552,8 @@ fn fixture_repo(root: &Path, name: &str, body: &str) -> PathBuf {
 pub(crate) const BUGGY: &str = "add() { echo $(($1 - $2)); }\n";
 pub(crate) const FIXED: &str = "add() { echo $(($1 + $2)); }\n";
 
+// Unix-only: the fixture relies on POSIX paths/permissions for the checkout.
+#[cfg(unix)]
 #[tokio::test]
 async fn job_confirms_known_bug_and_reports_fixed_one_as_not_reproduced() {
     let root = temp_dir("job");
@@ -674,6 +680,7 @@ async fn job_confirms_known_bug_and_reports_fixed_one_as_not_reproduced() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
 #[test]
 fn write_files_refuses_symlink_escape() {
     let root = temp_dir("sym");
@@ -681,7 +688,6 @@ fn write_files_refuses_symlink_escape() {
     std::fs::create_dir_all(&co).unwrap();
     let outside = root.join("outside");
     std::fs::create_dir_all(&outside).unwrap();
-    #[cfg(unix)]
     std::os::unix::fs::symlink(&outside, co.join("tests")).unwrap();
     let files = vec![ReproFile {
         path: "tests/x.sh".into(),
