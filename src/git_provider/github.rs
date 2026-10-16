@@ -239,4 +239,8 @@ impl GitProvider for GitHubProvider {
     async fn is_collaborator(&self, username: &str) -> Result<bool> {
         self.client.is_collaborator(username).await
     }
+
+    async fn fetch_repo_private(&self) -> Result<bool> {
+        self.client.fetch_repo_private().await
+    }
 }

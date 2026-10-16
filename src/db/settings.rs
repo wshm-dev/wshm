@@ -23,6 +23,9 @@ pub const REVIEW_PROMPT_KEY: &str = "review_prompt";
 pub const REVIEW_DOMAINS_LIMIT_KEY: &str = "review_domains_limit";
 /// Setting key: configured AI review skills, as a JSON array of `SkillDef`.
 pub const SKILLS_KEY: &str = "skills";
+/// Setting key: per-repo override of `[pr.review_diagrams]`, as a (possibly
+/// partial) JSON object merged over the TOML value.
+pub const REVIEW_DIAGRAMS_KEY: &str = "review_diagrams";
 /// Setting key: names of the `[[skills]]` from TOML already seeded into
 /// `SKILLS_KEY` (JSON array of strings). Lets a skill deleted in the
 /// dashboard stay deleted instead of being re-seeded on the next start.

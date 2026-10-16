@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod diagrams;
 pub mod events;
 pub mod history;
 pub mod issues;

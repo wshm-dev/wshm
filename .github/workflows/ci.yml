@@ -70,6 +70,24 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --locked --all-features --lib storage
 
+  viewer-bundle:
+    # src/diagrams/assets is the committed build of web/diagram-viewer (it is
+    # embedded with include_str!, so cargo builds need no JS toolchain).
+    # Rebuild it from the pinned sources and lockfile and fail on any drift.
+    name: Diagram viewer bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - name: Rebuild and compare
+        run: |
+          cd web/diagram-viewer
+          bun install --frozen-lockfile
+          bun run build
+          git diff --exit-code -- ../../src/diagrams/assets
+
   security:
     name: Security
     runs-on: ubuntu-latest

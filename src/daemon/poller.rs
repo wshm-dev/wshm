@@ -221,7 +221,7 @@ async fn poll_events(
                     .and_then(|n| n.as_u64());
                 ("issues", n)
             }
-            "PullRequestEvent" if action == "opened" || action == "synchronize" => {
+            "PullRequestEvent" if polled_pr_action(&action) => {
                 let n = payload
                     .get("pull_request")
                     .and_then(|p| p.get("number"))
@@ -537,5 +537,25 @@ mod tests {
             .get_sync_entry(POLLER_SYNC_KEY)
             .unwrap()
             .is_some());
+    }
+}
+
+/// PR actions the poller forwards to the processor. `closed` is included so
+/// polling deployments (no webhooks) also clean up closed/merged PRs.
+fn polled_pr_action(action: &str) -> bool {
+    matches!(action, "opened" | "synchronize" | "closed")
+}
+
+#[cfg(test)]
+mod polled_action_tests {
+    use super::polled_pr_action;
+
+    #[test]
+    fn closed_prs_reach_the_processor() {
+        assert!(polled_pr_action("opened"));
+        assert!(polled_pr_action("synchronize"));
+        assert!(polled_pr_action("closed"));
+        assert!(!polled_pr_action("labeled"));
+        assert!(!polled_pr_action("edited"));
     }
 }

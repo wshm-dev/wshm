@@ -165,6 +165,12 @@ pub trait GitProvider: Send + Sync {
         None
     }
 
+    /// Whether the repository is private. Used to keep PR diagram pages of
+    /// private repos off public targets; callers treat an error as private.
+    async fn fetch_repo_private(&self) -> Result<bool> {
+        Err(unsupported(self.provider_name(), "repository visibility"))
+    }
+
     /// GitHub-only escape hatch (events API poller, GitHub App flows).
     fn as_github(&self) -> Option<&crate::github::Client> {
         None

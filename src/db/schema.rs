@@ -99,6 +99,23 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS pr_diagrams (
+            pr_number   INTEGER PRIMARY KEY,
+            diff_hash   TEXT NOT NULL,
+            head_sha    TEXT,
+            gen_hash    TEXT NOT NULL,
+            graph_json  TEXT NOT NULL,
+            page_target TEXT,
+            page_key    TEXT,
+            page_url    TEXT,
+            page_token  TEXT,
+            page_bytes  INTEGER NOT NULL DEFAULT 0,
+            is_private  INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL,
+            page_hash   TEXT
+        );
+
         CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(state);
         CREATE INDEX IF NOT EXISTS idx_pulls_state ON pull_requests(state);
         CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_number);
@@ -152,6 +169,23 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_repro_runs_time ON repro_runs(created_at);
         ",
     )?;
+
+    // Migration: pr_diagrams from early builds stored the page HTML; the
+    // page is now rendered on request and only its size is kept.
+    if conn
+        .prepare("SELECT page_bytes FROM pr_diagrams LIMIT 0")
+        .is_err()
+    {
+        conn.execute_batch(
+            "ALTER TABLE pr_diagrams ADD COLUMN page_bytes INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    if conn
+        .prepare("SELECT page_hash FROM pr_diagrams LIMIT 0")
+        .is_err()
+    {
+        conn.execute_batch("ALTER TABLE pr_diagrams ADD COLUMN page_hash TEXT;")?;
+    }
 
     // Migration: add reactions columns to issues
     let has_reactions: bool = conn
