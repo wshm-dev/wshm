@@ -76,6 +76,10 @@ impl DaemonState {
         features: crate::config::RepoFeatures,
     ) -> Self {
         crate::ai::related::set_repo_enabled(&config.repo_slug(), features.related_history);
+        // Every daemon path (single, multi-repo, runtime add_repo, Pro's
+        // Postgres factory) builds its per-repo state here, so this is the one
+        // place TOML `[[skills]]` get seeded into the shared DB list.
+        crate::config::seed_skills_logged(db.as_ref(), &config.skills);
         Self {
             db,
             gh: std::sync::RwLock::new(gh),
@@ -191,6 +195,15 @@ pub struct DynamicRuntime {
     /// Persist the registry (Pro → Postgres). When `None`, `persist()` writes
     /// `global.toml` at `global_config_path`.
     pub persist_repos: Option<RepoPersist>,
+    /// Re-read the persisted registry (Pro → Postgres) so this pod picks up
+    /// edits made through another pod. `None` (OSS: per-pod SQLite/TOML,
+    /// nothing shared) disables [`MultiDaemonState::sync_registry`].
+    pub load_repos: Option<RepoLoad>,
+    /// Serialises every registry read-modify-write on this pod: the periodic
+    /// sync (load + reconcile) and each handler's sync → mutate → persist.
+    /// Without it a sync could interleave between a handler's mutation and
+    /// its persist and revert the edit (in memory and in the store).
+    pub registry_lock: Arc<tokio::sync::Mutex<()>>,
     /// Build a repo's storage backend (Pro → shared Postgres pool). When
     /// `None`, a runtime-added repo opens a per-repo SQLite `Database`.
     pub db_factory: Option<DbFactory>,
@@ -232,6 +245,167 @@ impl MultiDaemonState {
         }
     }
 
+    /// Pull the persisted registry and reconcile this pod's live state with
+    /// it: repos added elsewhere are started, repos removed elsewhere are
+    /// cancelled, and for repos already running only the fields whose stored
+    /// value changed since this pod's previous snapshot are applied
+    /// (features verbatim — the legacy `apply` upgrade is a boot-time rule and
+    /// is never re-run here). An unchanged registry costs one read and touches
+    /// nothing. Returns `true` when something was reconciled.
+    ///
+    /// Takes [`DynamicRuntime::registry_lock`], the same lock registry
+    /// mutations (features PATCH, add/remove repo) hold for their whole
+    /// sync → mutate → persist sequence, so a periodic sync can never slip
+    /// between a handler's mutation and its persist.
+    pub async fn sync_registry(&self) -> Result<bool> {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Ok(false);
+        };
+        let _guard = runtime.registry_lock.lock().await;
+        self.sync_registry_locked().await
+    }
+
+    /// Acquire the registry lock for a sync → mutate → persist sequence.
+    /// `None` outside multi-repo mode.
+    pub async fn lock_registry(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        match self.runtime.as_ref() {
+            Some(rt) => Some(rt.registry_lock.lock().await),
+            None => None,
+        }
+    }
+
+    /// [`Self::sync_registry`] body. The caller MUST hold the guard returned
+    /// by [`Self::lock_registry`].
+    pub async fn sync_registry_locked(&self) -> Result<bool> {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Ok(false);
+        };
+        let Some(load) = runtime.load_repos.as_ref() else {
+            return Ok(false);
+        };
+        let Some(fresh) = load()? else {
+            return Ok(false);
+        };
+        let fresh = dedup_by_slug(fresh);
+
+        let mut canonical = runtime.repos.write().await;
+        let live: HashMap<String, Arc<DaemonState>> = self.repos.read().await.clone();
+        // A repo that failed to start last time is not live: keep retrying it.
+        let in_step = fresh.iter().all(|e| live.contains_key(&e.slug))
+            && live.keys().all(|s| fresh.iter().any(|e| &e.slug == s));
+        if *canonical == fresh && in_step {
+            return Ok(false);
+        }
+
+        for entry in &fresh {
+            let prev = canonical.iter().find(|e| e.slug == entry.slug);
+            match live.get(&entry.slug) {
+                Some(ds) => {
+                    let Some(prev) = prev else { continue };
+                    if prev.features != entry.features && ds.features() != entry.features {
+                        ds.set_features(entry.features.clone());
+                        info!("registry sync: [{}] features reloaded", entry.slug);
+                    }
+                    if prev.apply != entry.apply {
+                        let apply = entry.apply.unwrap_or(runtime.global_apply);
+                        if ds.apply() != apply {
+                            ds.set_apply(apply);
+                            info!("registry sync: [{}] apply={apply}", entry.slug);
+                        }
+                    }
+                }
+                None => {
+                    // New to this pod: same rules as boot.
+                    let apply = entry.apply.unwrap_or(runtime.global_apply);
+                    let features = effective_features(entry, apply);
+                    match self.build_repo_state(runtime, entry, apply, features) {
+                        Ok(state) => {
+                            self.start_repo(runtime, &entry.slug, state).await;
+                            info!("registry sync: [{}] added by another pod", entry.slug);
+                        }
+                        Err(e) => warn!("registry sync: cannot start [{}]: {e:#}", entry.slug),
+                    }
+                }
+            }
+        }
+        for slug in live.keys() {
+            if !fresh.iter().any(|e| &e.slug == slug) {
+                if let Some(state) = self.repos.write().await.remove(slug) {
+                    state.cancel();
+                }
+                info!("registry sync: [{slug}] removed by another pod");
+            }
+        }
+        *canonical = fresh;
+        Ok(true)
+    }
+
+    /// [`Self::sync_registry_locked`] that only logs: a failed refresh must
+    /// not block a user's edit (it then falls back to this pod's view).
+    async fn sync_registry_locked_logged(&self) {
+        if let Err(e) = self.sync_registry_locked().await {
+            warn!("registry sync failed: {e:#}");
+        }
+    }
+
+    /// Build (but don't start) a repo's state from a registry entry, with the
+    /// same preparation as boot (checkout for auto-fix, web password).
+    fn build_repo_state(
+        &self,
+        runtime: &DynamicRuntime,
+        entry: &crate::config::RepoEntry,
+        apply: bool,
+        features: crate::config::RepoFeatures,
+    ) -> Result<Arc<DaemonState>> {
+        ensure_checkout(entry, &features);
+        let mut config = Config::load_for_repo(&entry.path, &entry.slug)?;
+        std::fs::create_dir_all(&config.wshm_dir)?;
+        config.web.resolve_password(&config.wshm_dir);
+        let db = match &runtime.db_factory {
+            Some(factory) => factory(&config)?,
+            None => Arc::new(Database::open(&config)?) as Arc<dyn DatabaseBackend>,
+        };
+        // Same forge construction as boot/add_repo (provider + forge tokens).
+        let gh = crate::git_provider::build_provider_with_db(&config, Some(Arc::clone(&db)))?;
+        Ok(Arc::new(DaemonState::with_features(
+            db,
+            gh,
+            Arc::new(config),
+            apply,
+            features,
+        )))
+    }
+
+    /// Insert a built repo state into the live map and spawn its scheduler
+    /// (+ poller in polling mode). A state already registered under the slug
+    /// is cancelled first so its loops never run twice.
+    async fn start_repo(&self, runtime: &DynamicRuntime, slug: &str, state: Arc<DaemonState>) {
+        let old = self
+            .repos
+            .write()
+            .await
+            .insert(slug.to_string(), Arc::clone(&state));
+        if let Some(old) = old {
+            if !Arc::ptr_eq(&old, &state) {
+                old.cancel();
+            }
+        }
+
+        let sched_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            scheduler::run(sched_state).await;
+        });
+
+        if runtime.poll {
+            let tx = runtime.event_tx.clone();
+            let interval = Some(runtime.poll_interval);
+            let slug_owned = slug.to_string();
+            tokio::spawn(async move {
+                poller::run_multi(state, tx, interval, slug_owned).await;
+            });
+        }
+    }
+
     /// Add a repo at runtime: load config, build DaemonState, persist to
     /// global config, and spawn scheduler + poller (if enabled). Idempotent
     /// on the slug — returns error if it already exists.
@@ -255,6 +429,9 @@ impl MultiDaemonState {
         {
             anyhow::bail!("invalid slug format, expected owner/repo");
         }
+
+        let _registry = runtime.registry_lock.lock().await;
+        self.sync_registry_locked_logged().await;
 
         let repos_base = runtime
             .global_config_path
@@ -318,32 +495,12 @@ impl MultiDaemonState {
                 features: crate::config::RepoFeatures::default(),
             });
         }
-        runtime
-            .persist()
-            .await
-            .with_context(|| format!("failed to persist {slug} to repo registry"))?;
-
-        {
-            let mut repos = self.repos.write().await;
-            repos.insert(slug.to_string(), Arc::clone(&state));
+        if let Err(e) = runtime.persist().await {
+            runtime.repos.write().await.retain(|e| e.slug != slug);
+            return Err(e).with_context(|| format!("failed to persist {slug} to repo registry"));
         }
 
-        // Spawn scheduler for this repo
-        let sched_state = Arc::clone(&state);
-        tokio::spawn(async move {
-            scheduler::run(sched_state).await;
-        });
-
-        // Spawn poller if polling mode is enabled
-        if runtime.poll {
-            let poll_state = Arc::clone(&state);
-            let tx = runtime.event_tx.clone();
-            let interval = Some(runtime.poll_interval);
-            let slug_owned = slug.to_string();
-            tokio::spawn(async move {
-                poller::run_multi(poll_state, tx, interval, slug_owned).await;
-            });
-        }
+        self.start_repo(runtime, slug, Arc::clone(&state)).await;
 
         info!(
             "Repo added at runtime: {} (path={}, apply={})",
@@ -364,6 +521,9 @@ impl MultiDaemonState {
             .runtime
             .as_ref()
             .context("Dynamic remove_repo not available (daemon not running in multi-repo mode)")?;
+
+        let _registry = runtime.registry_lock.lock().await;
+        self.sync_registry_locked_logged().await;
 
         // Drop from the live map and signal its background tasks to exit.
         let removed = {
@@ -549,6 +709,10 @@ pub struct DaemonExtensions {
     /// Postgres). When `Some`, runtime add/remove/feature edits call this
     /// instead of rewriting `global.toml`; when `None`, the TOML file is used.
     pub persist_repos: Option<RepoPersist>,
+    /// Optional hook to re-read the persisted registry. When `Some`, every
+    /// pod periodically reconciles with it (`[daemon] registry_sync_secs`),
+    /// so multi-pod deployments see each other's settings changes live.
+    pub load_repos: Option<RepoLoad>,
 }
 
 /// Produces the storage backend for one repo. Pro shares a single Postgres
@@ -559,6 +723,70 @@ pub type DbFactory = Arc<dyn Fn(&Config) -> anyhow::Result<Arc<dyn DatabaseBacke
 /// Persists the whole tracked-repo registry (list + per-repo settings). Pro
 /// writes the JSON blob to Postgres; OSS falls back to `global.toml`.
 pub type RepoPersist = Arc<dyn Fn(&[crate::config::RepoEntry]) -> anyhow::Result<()> + Send + Sync>;
+
+/// Reads the persisted tracked-repo registry back (Pro: the Postgres blob
+/// [`RepoPersist`] writes). `Ok(None)` = nothing persisted yet.
+pub type RepoLoad =
+    Arc<dyn Fn() -> anyhow::Result<Option<Vec<crate::config::RepoEntry>>> + Send + Sync>;
+
+/// Keep the first entry per slug: a duplicated slug would otherwise start
+/// two schedulers/pollers for the same repo.
+fn dedup_by_slug(entries: Vec<crate::config::RepoEntry>) -> Vec<crate::config::RepoEntry> {
+    let mut out: Vec<crate::config::RepoEntry> = Vec::with_capacity(entries.len());
+    for e in entries {
+        if out.iter().any(|o| o.slug == e.slug) {
+            warn!("repo registry: duplicate slug {} ignored", e.slug);
+            continue;
+        }
+        out.push(e);
+    }
+    out
+}
+
+/// A local checkout is only needed by code-editing features (auto-fix PR
+/// generation). Triage and PR analysis run entirely off the GitHub API, so
+/// only clone when auto-fix is enabled and the checkout is missing (stateless
+/// deploys mount repos/ as an emptyDir). Best-effort: failures are logged.
+fn ensure_checkout(entry: &crate::config::RepoEntry, features: &crate::config::RepoFeatures) {
+    if !features.auto_pr || entry.path.join(".git").exists() {
+        return;
+    }
+    match std::env::var("GITHUB_TOKEN") {
+        Ok(token) => {
+            let url = format!("https://github.com/{}.git", entry.slug);
+            if let Some(parent) = entry.path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            match crate::github::git::clone_repo(&url, &entry.path, &token) {
+                Ok(_) => info!("Cloned {} into {}", entry.slug, entry.path.display()),
+                Err(e) => warn!(
+                    "Failed to clone {} into {} ({e}); daemon may degrade for this repo",
+                    entry.slug,
+                    entry.path.display()
+                ),
+            }
+        }
+        Err(_) => warn!(
+            "Repo {} not present at {} and GITHUB_TOKEN unset — skipping clone, daemon may degrade",
+            entry.slug,
+            entry.path.display()
+        ),
+    }
+}
+
+/// Feature flags a registry entry runs with. A features section left at its
+/// default is upgraded from the legacy `apply` flag so old setups keep
+/// behaving the same — shared by boot and [`MultiDaemonState::sync_registry`].
+fn effective_features(
+    entry: &crate::config::RepoEntry,
+    apply: bool,
+) -> crate::config::RepoFeatures {
+    let mut features = entry.features.clone();
+    if features == crate::config::RepoFeatures::default() {
+        features.merge_legacy_apply(apply);
+    }
+    features
+}
 
 /// Run daemon in multi-repo mode from a global config file.
 pub async fn run_multi(global: GlobalConfig, args: DaemonArgs) -> Result<()> {
@@ -677,39 +905,8 @@ pub async fn run_multi_with_extensions(
     let mut repos = HashMap::new();
     let mut web_password_resolved = false;
     for entry in &global.repos {
-        // A local checkout is only needed by code-editing features
-        // (auto-fix PR generation). Triage and PR analysis run entirely
-        // off the GitHub API, so skip the boot clone unless auto-fix is
-        // enabled for this repo — it's slow, depends on a valid
-        // GITHUB_TOKEN, and its failure otherwise logs a misleading
-        // "daemon may degrade" for repos that never needed the checkout.
-        // Stateless deploys mount repos/ as an emptyDir, so when it IS
-        // needed the checkout may be missing on first boot; clone it here.
-        // Skipped when the entry path already contains a checkout.
-        if entry.features.auto_pr && !entry.path.join(".git").exists() {
-            if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-                let url = format!("https://github.com/{}.git", entry.slug);
-                if let Some(parent) = entry.path.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                match crate::github::git::clone_repo(&url, &entry.path, &token) {
-                    Ok(_) => info!("Cloned {} into {}", entry.slug, entry.path.display()),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to clone {} into {} ({e}); daemon may degrade for this repo",
-                            entry.slug,
-                            entry.path.display()
-                        );
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    "Repo {} not present at {} and GITHUB_TOKEN unset — skipping clone, daemon may degrade",
-                    entry.slug,
-                    entry.path.display()
-                );
-            }
-        }
+        // Clone only when auto-fix needs a checkout and it is missing.
+        ensure_checkout(entry, &entry.features);
 
         let mut config = Config::load_for_repo(&entry.path, &entry.slug)?;
 
@@ -732,10 +929,7 @@ pub async fn run_multi_with_extensions(
         // If features section was present in global.toml, use it; else
         // derive from the legacy `apply` flag so existing setups stay
         // backward-compatible.
-        let mut features = entry.features.clone();
-        if features == crate::config::RepoFeatures::default() {
-            features.merge_legacy_apply(apply);
-        }
+        let features = effective_features(entry, apply);
         let state = Arc::new(DaemonState::with_features(
             db,
             gh,
@@ -768,10 +962,28 @@ pub async fn run_multi_with_extensions(
         global_config_path,
         repos: Arc::new(RwLock::new(global.repos.clone())),
         persist_repos: extensions.persist_repos.clone(),
+        load_repos: extensions.load_repos.clone(),
+        registry_lock: Arc::new(tokio::sync::Mutex::new(())),
         db_factory: extensions.db_factory.clone(),
     };
 
     let multi = Arc::new(MultiDaemonState::with_runtime(repos, runtime));
+
+    // Multi-pod: periodically reconcile with the shared registry so a
+    // features/apply/repo change made through another pod lands here
+    // without a restart. No-op without a `load_repos` hook (OSS).
+    if extensions.load_repos.is_some() && global.daemon.registry_sync_secs > 0 {
+        let every = std::time::Duration::from_secs(global.daemon.registry_sync_secs);
+        let sync_multi = Arc::clone(&multi);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(every).await;
+                if let Err(e) = sync_multi.sync_registry().await {
+                    warn!("registry sync failed: {e:#}");
+                }
+            }
+        });
+    }
 
     let repo_count = multi.repos.read().await.len();
     info!(
@@ -925,4 +1137,346 @@ pub async fn run_multi_with_extensions(
 
     info!("Multi-repo daemon stopped.");
     Ok(())
+}
+
+#[cfg(test)]
+mod registry_sync_tests {
+    use super::*;
+    use crate::config::RepoEntry;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    type Store = Arc<Mutex<Option<Vec<RepoEntry>>>>;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "wshm-regsync-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(d.join(".wshm")).unwrap();
+        d
+    }
+
+    fn entry(slug: &str, path: &Path) -> RepoEntry {
+        RepoEntry {
+            slug: slug.to_string(),
+            path: path.to_path_buf(),
+            apply: None,
+            enabled: true,
+            secret: None,
+            features: crate::config::RepoFeatures::default(),
+        }
+    }
+
+    /// Blocks the NEXT persist() inside the hook (after its snapshot was
+    /// taken) until released, so a test can run a sync in that window.
+    struct Gate {
+        armed: std::sync::atomic::AtomicBool,
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    fn gate() -> (
+        Arc<Gate>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::SyncSender<()>,
+    ) {
+        let (etx, erx) = std::sync::mpsc::sync_channel(1);
+        let (rtx, rrx) = std::sync::mpsc::sync_channel(1);
+        let g = Gate {
+            armed: std::sync::atomic::AtomicBool::new(true),
+            entered: etx,
+            release: Mutex::new(rrx),
+        };
+        (Arc::new(g), erx, rtx)
+    }
+
+    fn pod(store: &Store, root: &Path) -> MultiDaemonState {
+        pod_gated(store, root, None)
+    }
+
+    /// One "pod": its own live map + canonical copy, sharing `store` (the
+    /// stand-in for the Postgres registry blob) through the persist/load hooks.
+    fn pod_gated(store: &Store, root: &Path, gate: Option<Arc<Gate>>) -> MultiDaemonState {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+        let initial = store.lock().unwrap().clone().unwrap_or_default();
+        let (tx, _rx) = mpsc::channel(8);
+        let (s1, s2) = (Arc::clone(store), Arc::clone(store));
+        let runtime = DynamicRuntime {
+            event_tx: tx,
+            poll: false,
+            poll_interval: 30,
+            global_apply: false,
+            global_config_path: root.join("global.toml"),
+            repos: Arc::new(RwLock::new(initial.clone())),
+            persist_repos: Some(Arc::new(move |r: &[RepoEntry]| {
+                if let Some(g) = &gate {
+                    if g.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        g.entered.send(()).ok();
+                        g.release.lock().unwrap().recv().ok();
+                    }
+                }
+                *s1.lock().unwrap() = Some(r.to_vec());
+                Ok(())
+            })),
+            load_repos: Some(Arc::new(move || Ok(s2.lock().unwrap().clone()))),
+            registry_lock: Arc::new(tokio::sync::Mutex::new(())),
+            db_factory: None,
+        };
+        let mut live = HashMap::new();
+        for e in &initial {
+            let mut config = Config::load_for_repo(&e.path, &e.slug).unwrap();
+            config.wshm_dir = e.path.join(".wshm");
+            let apply = e.apply.unwrap_or(false);
+            let db: Arc<dyn DatabaseBackend> = Arc::new(Database::open_memory().unwrap());
+            let gh = crate::git_provider::build_provider_with_db(&config, Some(Arc::clone(&db)))
+                .unwrap();
+            let state = DaemonState::with_features(
+                db,
+                gh,
+                Arc::new(config),
+                apply,
+                effective_features(e, apply),
+            );
+            live.insert(e.slug.clone(), Arc::new(state));
+        }
+        MultiDaemonState::with_runtime(live, runtime)
+    }
+
+    async fn live(m: &MultiDaemonState, slug: &str) -> Option<Arc<DaemonState>> {
+        m.repos.read().await.get(slug).cloned()
+    }
+
+    #[tokio::test]
+    async fn sync_noop_when_registry_unchanged() {
+        let root = tmpdir("noop");
+        let store: Store = Arc::new(Mutex::new(Some(vec![entry("o/a", &root)])));
+        let p = pod(&store, &root);
+        assert!(!p.sync_registry().await.unwrap());
+        // No hook (OSS) → never syncs.
+        let none = MultiDaemonState::new(HashMap::new());
+        assert!(!none.sync_registry().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn features_and_apply_change_on_other_pod_propagate() {
+        let root = tmpdir("feat");
+        let store: Store = Arc::new(Mutex::new(Some(vec![entry("o/a", &root)])));
+        let p1 = pod(&store, &root);
+        let ds = live(&p1, "o/a").await.unwrap();
+        assert!(!ds.features().auto_merge);
+
+        // "Pod 2" edits the shared registry.
+        {
+            let mut g = store.lock().unwrap();
+            let e = &mut g.as_mut().unwrap()[0];
+            e.features.triage_issues = true;
+            e.features.auto_merge = true;
+            e.apply = Some(true);
+        }
+        assert!(p1.sync_registry().await.unwrap());
+        assert!(ds.features().auto_merge && ds.features().triage_issues);
+        assert!(ds.apply());
+        // Converged: next cycle is a no-op.
+        assert!(!p1.sync_registry().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn repo_added_and_removed_on_other_pod_propagate() {
+        let root = tmpdir("addrm");
+        let other = tmpdir("addrm-b");
+        let store: Store = Arc::new(Mutex::new(Some(vec![entry("o/a", &root)])));
+        let p1 = pod(&store, &root);
+        let a = live(&p1, "o/a").await.unwrap();
+
+        *store.lock().unwrap() = Some(vec![entry("o/b", &other)]);
+        assert!(p1.sync_registry().await.unwrap());
+        assert!(live(&p1, "o/a").await.is_none(), "removed elsewhere");
+        assert!(a.is_cancelled(), "removed repo's loops are stopped");
+        let b = live(&p1, "o/b").await.expect("added elsewhere is started");
+        b.cancel();
+    }
+
+    /// A mutation on a stale pod must not revert another pod's edit when it
+    /// persists the whole registry.
+    #[tokio::test]
+    async fn mutation_on_stale_pod_keeps_other_pods_edit() {
+        let root = tmpdir("lost");
+        let store: Store = Arc::new(Mutex::new(Some(vec![entry("o/a", &root)])));
+        let p1 = pod(&store, &root);
+        store.lock().unwrap().as_mut().unwrap()[0]
+            .features
+            .auto_merge = true;
+
+        // p1 (stale) removes nothing but adds a repo → persists the registry.
+        let added = p1.add_repo("o/new", None).await.unwrap();
+        added.cancel();
+        let persisted = store.lock().unwrap().clone().unwrap();
+        let a = persisted.iter().find(|e| e.slug == "o/a").unwrap();
+        assert!(a.features.auto_merge, "other pod's edit survived");
+        assert!(persisted.iter().any(|e| e.slug == "o/new"));
+    }
+    fn canonical_slugs(m: &MultiDaemonState) -> Vec<String> {
+        let rt = m.runtime.as_ref().unwrap();
+        rt.repos
+            .try_read()
+            .unwrap()
+            .iter()
+            .map(|e| e.slug.clone())
+            .collect()
+    }
+
+    /// Run `op` (a registry mutation) and fire a periodic-style sync while
+    /// `op` is inside persist(): the exact window the reviewer reproduced.
+    async fn race_sync_during_persist<F>(
+        p: &Arc<MultiDaemonState>,
+        entered: std::sync::mpsc::Receiver<()>,
+        release: std::sync::mpsc::SyncSender<()>,
+        op: F,
+    ) where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let op = tokio::spawn(op);
+        tokio::task::spawn_blocking(move || entered.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let p2 = Arc::clone(p);
+        let sync = tokio::spawn(async move { p2.sync_registry().await });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        release.send(()).unwrap();
+        op.await.unwrap();
+        sync.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sync_during_features_patch_does_not_revert_it() {
+        let root = tmpdir("race-patch");
+        let store: Store = Arc::new(Mutex::new(Some(vec![entry("o/a", &root)])));
+        let (g, entered, release) = gate();
+        let p = Arc::new(pod_gated(&store, &root, Some(g)));
+        let p2 = Arc::clone(&p);
+        // Same lock protocol as api_repo_features_patch.
+        race_sync_during_persist(&p, entered, release, async move {
+            let _g = p2.lock_registry().await;
+            p2.sync_registry_locked().await.unwrap();
+            let ds = live(&p2, "o/a").await.unwrap();
+            let mut f = ds.features();
+            f.auto_merge = true;
+            ds.set_features(f.clone());
+            let rt = p2.runtime.as_ref().unwrap();
+            rt.repos.write().await[0].features = f;
+            rt.persist().await.unwrap();
+        })
+        .await;
+        let ds = live(&p, "o/a").await.unwrap();
+        assert!(ds.features().auto_merge, "in-memory edit kept");
+        assert!(
+            store.lock().unwrap().as_ref().unwrap()[0]
+                .features
+                .auto_merge
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sync_during_add_repo_does_not_lose_it() {
+        let root = tmpdir("race-add");
+        let store: Store = Arc::new(Mutex::new(Some(vec![entry("o/a", &root)])));
+        let (g, entered, release) = gate();
+        let p = Arc::new(pod_gated(&store, &root, Some(g)));
+        let p2 = Arc::clone(&p);
+        race_sync_during_persist(&p, entered, release, async move {
+            p2.add_repo("o/new", None).await.unwrap();
+        })
+        .await;
+        assert!(canonical_slugs(&p).contains(&"o/new".to_string()));
+        assert!(store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|e| e.slug == "o/new"));
+        live(&p, "o/new").await.expect("running").cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sync_during_remove_repo_does_not_resurrect_it() {
+        let root = tmpdir("race-rm");
+        let store: Store = Arc::new(Mutex::new(Some(vec![entry("o/a", &root)])));
+        let (g, entered, release) = gate();
+        let p = Arc::new(pod_gated(&store, &root, Some(g)));
+        let p2 = Arc::clone(&p);
+        race_sync_during_persist(&p, entered, release, async move {
+            p2.remove_repo("o/a").await.unwrap();
+        })
+        .await;
+        assert!(live(&p, "o/a").await.is_none(), "not resurrected");
+        assert!(canonical_slugs(&p).is_empty());
+        assert!(store.lock().unwrap().as_ref().unwrap().is_empty());
+    }
+
+    /// apply=true repo whose user turned features off: an unrelated registry
+    /// change must not re-run the legacy upgrade and re-enable them live.
+    #[tokio::test]
+    async fn hot_reload_never_reapplies_legacy_upgrade() {
+        let root = tmpdir("legacy");
+        let mut a = entry("o/a", &root);
+        a.apply = Some(true);
+        let store: Store = Arc::new(Mutex::new(Some(vec![a])));
+        let p = pod(&store, &root);
+        let ds = live(&p, "o/a").await.unwrap();
+        assert!(ds.features().triage_issues, "boot upgrade applied");
+        // User disables everything (stored features == default).
+        ds.set_features(crate::config::RepoFeatures::default());
+        // Unrelated change to the same entry elsewhere.
+        store.lock().unwrap().as_mut().unwrap()[0].secret = Some("x".into());
+        assert!(p.sync_registry().await.unwrap());
+        assert_eq!(ds.features(), crate::config::RepoFeatures::default());
+    }
+
+    #[tokio::test]
+    async fn duplicate_slugs_start_once_and_restart_cancels_old() {
+        let root = tmpdir("dup");
+        let store: Store = Arc::new(Mutex::new(Some(vec![])));
+        let p = pod(&store, &root);
+        *store.lock().unwrap() = Some(vec![entry("o/a", &root), entry("o/a", &root)]);
+        assert!(p.sync_registry().await.unwrap());
+        assert_eq!(p.repos.read().await.len(), 1);
+        assert_eq!(canonical_slugs(&p), vec!["o/a"]);
+        assert!(
+            !p.sync_registry().await.unwrap(),
+            "deduped registry converges"
+        );
+
+        let first = live(&p, "o/a").await.unwrap();
+        let rt = p.runtime.as_ref().unwrap();
+        let again = p
+            .build_repo_state(rt, &entry("o/a", &root), false, Default::default())
+            .unwrap();
+        p.start_repo(rt, "o/a", Arc::clone(&again)).await;
+        assert!(first.is_cancelled(), "replaced state's loops stopped");
+        again.cancel();
+    }
+
+    #[tokio::test]
+    async fn repo_that_failed_to_start_is_retried() {
+        let root = tmpdir("retry");
+        let store: Store = Arc::new(Mutex::new(Some(vec![])));
+        let p = pod(&store, &root);
+        // Invalid slug → Config::load_for_repo fails.
+        *store.lock().unwrap() = Some(vec![entry("broken", &root)]);
+        assert!(p.sync_registry().await.unwrap());
+        assert!(live(&p, "broken").await.is_none());
+        assert!(
+            p.sync_registry().await.unwrap(),
+            "not live yet: next cycle retries instead of no-op"
+        );
+    }
 }

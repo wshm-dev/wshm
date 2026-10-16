@@ -23,6 +23,10 @@ pub const REVIEW_PROMPT_KEY: &str = "review_prompt";
 pub const REVIEW_DOMAINS_LIMIT_KEY: &str = "review_domains_limit";
 /// Setting key: configured AI review skills, as a JSON array of `SkillDef`.
 pub const SKILLS_KEY: &str = "skills";
+/// Setting key: names of the `[[skills]]` from TOML already seeded into
+/// `SKILLS_KEY` (JSON array of strings). Lets a skill deleted in the
+/// dashboard stay deleted instead of being re-seeded on the next start.
+pub const SKILLS_SEEDED_KEY: &str = "skills_toml_seeded";
 /// Setting key: Azure DevOps work item types treated as issues (JSON array
 /// of strings); overrides `[azure_devops] work_item_types`.
 pub const AZURE_WORK_ITEM_TYPES_KEY: &str = "azure_work_item_types";
@@ -51,6 +55,36 @@ impl Database {
                 params![key, value],
             )?;
             Ok(())
+        })
+    }
+
+    /// Atomically insert a setting unless the key already exists. Returns
+    /// `true` when this call created it.
+    pub fn set_app_setting_if_absent(&self, key: &str, value: &str) -> Result<bool> {
+        self.with_conn(|conn| {
+            let n = conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO NOTHING",
+                params![key, value],
+            )?;
+            Ok(n == 1)
+        })
+    }
+
+    /// Atomic compare-and-swap: set `key` to `new` only if its current value
+    /// is exactly `expected`. Returns `true` when the row was updated.
+    pub fn compare_and_set_app_setting(
+        &self,
+        key: &str,
+        expected: &str,
+        new: &str,
+    ) -> Result<bool> {
+        self.with_conn(|conn| {
+            let n = conn.execute(
+                "UPDATE app_settings SET value = ?3 WHERE key = ?1 AND value = ?2",
+                params![key, expected, new],
+            )?;
+            Ok(n == 1)
         })
     }
 }

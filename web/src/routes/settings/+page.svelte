@@ -346,11 +346,15 @@
 		skillsSaving = true;
 		skillsMessage = null;
 		try {
-			await updateRepoSkills(
+			const res = await updateRepoSkills(
 				skillsRepo,
 				skillsDraft.filter((s) => s.name.trim() !== '')
 			);
-			skillsMessage = 'Saved.';
+			// The server strips unknown pipeline values (and disables a skill left
+			// with none); show what it changed and reload the stored list.
+			skillsDraft = res.skills ?? skillsDraft;
+			const warnings = res.warnings ?? [];
+			skillsMessage = warnings.length ? `Saved with changes: ${warnings.join('; ')}` : 'Saved.';
 			skillsMessageErr = false;
 		} catch (e) {
 			skillsMessage = e instanceof Error ? e.message : 'save failed';
@@ -1554,6 +1558,15 @@
 												onchange={() => togglePipeline(i, 'review')}
 											/>
 											Code review (Pro)
+										</label>
+										<label class="flex items-center gap-1">
+											<input
+												type="checkbox"
+												class="h-3.5 w-3.5"
+												checked={s.pipelines.includes('diagrams')}
+												onchange={() => togglePipeline(i, 'diagrams')}
+											/>
+											Diagrams
 										</label>
 										<span class="italic">(all, if none checked)</span>
 									</div>
