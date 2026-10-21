@@ -742,6 +742,49 @@ impl GitProvider for GitLabProvider {
             .await
     }
 
+    async fn upsert_tagged_comment(&self, number: u64, tag: &str, body: &str) -> Result<()> {
+        self.rest.require_auth("GitLab comment")?;
+        let me = self.self_username().await;
+        let mut found = None;
+        self.list(&format!("issues/{number}/notes?sort=asc"), |note| {
+            if note["system"].as_bool() != Some(true)
+                && super::tagged_comment_matches(
+                    note["body"].as_str().unwrap_or(""),
+                    note["author"]["username"].as_str().unwrap_or(""),
+                    tag,
+                    me.as_deref(),
+                )
+            {
+                found = note["id"].as_u64();
+            }
+            found.is_none()
+        })
+        .await?;
+        match super::tagged_target(found, me.as_deref()) {
+            super::TaggedTarget::Refuse => anyhow::bail!(
+                "a tagged comment exists on !{number} but the bot identity is unknown; not posting"
+            ),
+            super::TaggedTarget::Update(id) => {
+                let existing = CommentRef {
+                    thread: Thread::Issue(number),
+                    id,
+                    parent_id: None,
+                };
+                self.update_comment(&existing, body).await
+            }
+            super::TaggedTarget::Create => {
+                self.rest
+                    .send_json(
+                        Method::POST,
+                        &self.url(&format!("issues/{number}/notes")),
+                        &json!({ "body": body }),
+                    )
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
     async fn fetch_comments_since(&self, since: &str) -> Result<Vec<PolledComment>> {
         // Project events, action=commented. `after` is a day (exclusive),
         // so ask from the previous day and filter precisely below.

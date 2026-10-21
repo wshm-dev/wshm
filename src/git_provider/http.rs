@@ -324,7 +324,8 @@ pub(crate) fn label_names(v: &Value) -> Vec<String> {
 
 /// Whether a comment body carries wshm's marker (custom or legacy).
 pub(crate) fn has_marker(body: &str, marker: &str) -> bool {
-    body.contains(marker) || body.contains(crate::github::issues::WSHM_COMMENT_MARKER)
+    (body.contains(marker) || body.contains(crate::github::issues::WSHM_COMMENT_MARKER))
+        && !body.contains(super::TAGGED_COMMENT_PREFIX)
 }
 
 /// Map a CI state to wshm's three buckets.

@@ -62,6 +62,9 @@
 	"settings.features.auto.merge": "Auto-merge",
 	"settings.features.auto.merge.help": "— merge ready PRs once checks pass + queue score above threshold",
 	"settings.features.auto.merge.tip": "For PRs that pass the queue scoring threshold (configured in [queue].merge_threshold) and meet the auto_merge_* filters (only_labels, only_authors, max_loc), perform the merge using your configured strategy (rebase by default). Conservative defaults: max 200 LoC, dependabot[bot] only, label-gated.",
+	"settings.features.auto.repro": "Reproduce bug reports",
+	"settings.features.auto.repro.help": "— write and run a failing test for newly triaged bugs in the Docker sandbox (Pro feature)",
+	"settings.features.auto.repro.tip": "After triage classifies an issue in a [triage.repro] category, the AI writes a minimal failing test or script, wshm runs it on the default branch in the auto-fix Docker sandbox (no network, no secrets, time/CPU/memory limits) and posts one comment with the outcome plus a label: repro:confirmed, repro:not-reproduced or repro:needs-info. Generated files must be new files; the checkout is read-only in the sandbox. Reports from collaborators only, max 20 runs/day per repo and 100/day overall by default. Requires apply mode.",
 
 	"common.moreInfo": "More info",
 	"common.save": "Save",

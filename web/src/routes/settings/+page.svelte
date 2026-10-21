@@ -2228,6 +2228,11 @@
 							<span><strong>{$t('settings.features.auto.merge')}</strong> <span class="text-xs text-muted-foreground">{$t('settings.features.auto.merge.help')}</span></span>
 							{@render infoTip('tip-automerge', 'settings.features.auto.merge.tip')}
 						</label>
+						<label class="flex items-center gap-2 text-sm">
+							<input type="checkbox" bind:checked={featuresDraft.repro_issues} class="rounded" />
+							<span><strong>{$t('settings.features.auto.repro')}</strong> <span class="text-xs text-muted-foreground">{$t('settings.features.auto.repro.help')}</span></span>
+							{@render infoTip('tip-repro', 'settings.features.auto.repro.tip')}
+						</label>
 					</div>
 				</div>
 
