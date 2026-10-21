@@ -19,13 +19,22 @@ pub struct Config {
     #[serde(default)]
     pub github: GitHubConfig,
 
-    /// Git provider: "github" (default), "gitlab", "gitea", "azure-devops"
+    /// Git provider: "github" (default), "gitlab", "gitea", "forgejo",
+    /// "azure-devops". Non-GitHub tokens come from the secret store
+    /// (`gitlab_token`, `gitea_token`, `forgejo_token`, `azure_devops_token`)
+    /// or env (`GITLAB_TOKEN`, `GITEA_TOKEN`, `FORGEJO_TOKEN`,
+    /// `AZURE_DEVOPS_TOKEN`), never from this file. Azure DevOps repo slug:
+    /// `org/project/repo`.
     #[serde(default)]
     pub git_provider: Option<String>,
 
     /// Git platform URL for self-hosted (e.g. "https://gitlab.company.com")
     #[serde(default)]
     pub git_url: Option<String>,
+
+    /// Azure DevOps settings (only read when `git_provider = "azure-devops"`).
+    #[serde(default)]
+    pub azure_devops: AzureDevOpsConfig,
 
     #[serde(default)]
     pub ai: AiConfig,
@@ -98,6 +107,13 @@ pub struct Config {
     #[serde(default)]
     pub labels: Vec<LabelDef>,
 
+    /// `[[skills]]` — versionable SEED for the DB-backed skills list. Copied
+    /// into `app_settings` at startup by [`seed_skills`]; after that the DB
+    /// (edited in Settings → Skills) is the source of truth and these
+    /// entries never overwrite it. Pipelines read [`load_skills`], not this.
+    #[serde(default)]
+    pub skills: Vec<SkillDef>,
+
     /// Resolved at runtime, not from config file
     #[serde(skip)]
     pub repo_owner: String,
@@ -113,6 +129,28 @@ pub struct Config {
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct GitHubConfig {}
+
+/// `[azure_devops]` — Azure DevOps specifics.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AzureDevOpsConfig {
+    /// Work item types synced and triaged as issues (default: Issue, Bug).
+    /// Overridable at runtime, per repo and shared across pods, by the
+    /// `azure_work_item_types` app setting (JSON array of strings).
+    #[serde(default = "default_azure_work_item_types")]
+    pub work_item_types: Vec<String>,
+}
+
+fn default_azure_work_item_types() -> Vec<String> {
+    vec!["Issue".to_string(), "Bug".to_string()]
+}
+
+impl Default for AzureDevOpsConfig {
+    fn default() -> Self {
+        Self {
+            work_item_types: default_azure_work_item_types(),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AiConfig {
@@ -345,6 +383,12 @@ pub struct PrConfig {
     /// Override the AI system prompt for PR analysis.
     #[serde(default)]
     pub system_prompt: Option<String>,
+
+    /// `[pr.review_diagrams]`: architecture diagram added to the PR analysis
+    /// comment, plus an optional interactive page. Can be overridden per repo
+    /// in the DB, see [`load_review_diagrams`].
+    #[serde(default)]
+    pub review_diagrams: ReviewDiagramsConfig,
 }
 
 impl Default for PrConfig {
@@ -355,6 +399,294 @@ impl Default for PrConfig {
             risk_labels: true,
             model: None,
             system_prompt: None,
+            review_diagrams: ReviewDiagramsConfig::default(),
+        }
+    }
+}
+
+/// How much prose the diagram carries (story, captions, node details).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagramText {
+    #[default]
+    Short,
+    Normal,
+    Full,
+}
+
+/// What the PR comment shows of the diagram.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagramComment {
+    /// Mermaid flowchart + story + walkthrough in the comment.
+    #[default]
+    Mermaid,
+    /// Nothing but a link to the interactive page (when one is published).
+    None,
+}
+
+/// Where the interactive HTML page is published.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiagramPublishTarget {
+    #[default]
+    Off,
+    Local,
+    GithubPages,
+    Wshm,
+    S3,
+    Gcs,
+    Azure,
+}
+
+/// `[pr.review_diagrams.publish]`. No secret here: GitHub Pages uses the
+/// repo's GitHub credentials, object stores their own credential chain.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DiagramPublishConfig {
+    pub target: DiagramPublishTarget,
+    /// Key prefix (directory) of the published pages.
+    pub prefix: String,
+    /// Base URL the pages are served from; the link is `public_url/key`.
+    /// For `wshm` it is the daemon's external URL. Without it (local) the
+    /// page is written but no link is added to the comment.
+    pub public_url: Option<String>,
+    /// `local`: directory the pages are written to.
+    pub dir: Option<String>,
+    /// `github-pages`: `owner/repo` whose `gh-pages` branch receives the pages.
+    pub pages_repo: Option<String>,
+    pub bucket: Option<String>,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+    pub container: Option<String>,
+    pub account: Option<String>,
+    /// Delete pages not updated for this many days (0 = keep until the PR
+    /// closes). Pages are always deleted when the PR is closed or merged.
+    pub retention_days: u32,
+    /// Max published pages per repo; beyond it the least recently updated
+    /// pages are evicted first.
+    pub max_pages: u32,
+    /// Max diff size embedded in the page (KB). Above it the viewer links to
+    /// the PR's "Files changed" page instead.
+    pub max_diff_kb: u32,
+    /// Allow a public target (github-pages, object stores, local with a
+    /// public_url) for a private repo. Off by default: the page embeds the diff.
+    pub allow_private: bool,
+}
+
+impl Default for DiagramPublishConfig {
+    fn default() -> Self {
+        Self {
+            target: DiagramPublishTarget::Off,
+            prefix: "wshm-diagrams".to_string(),
+            public_url: None,
+            dir: None,
+            pages_repo: None,
+            bucket: None,
+            region: None,
+            endpoint: None,
+            container: None,
+            account: None,
+            retention_days: 30,
+            max_pages: 200,
+            max_diff_kb: 1024,
+            allow_private: false,
+        }
+    }
+}
+
+/// `[pr.review_diagrams]`. Resolution: DB (per repo) > TOML > these defaults.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ReviewDiagramsConfig {
+    pub enabled: bool,
+    /// Diagram kinds. Only "architecture" is implemented; "flow", "changes",
+    /// "delta" and "dependency" are accepted and ignored with a warning.
+    pub kinds: Vec<String>,
+    pub text: DiagramText,
+    /// Language of every human-readable text (ISO code, e.g. "en", "fr").
+    pub language: String,
+    pub comment: DiagramComment,
+    /// Embed the PR diff in the interactive page (per-component diff drawer).
+    pub diff_viewer: bool,
+    /// Skip generation for PRs without activity for this many days (0 = no
+    /// limit). A new push re-enables them.
+    pub active_days: u32,
+    /// Max size of the Mermaid block in the comment (chars). Forgejo/Gitea
+    /// refuse to render more than 5000 by default; above it edge labels,
+    /// then unchanged nodes are dropped, then a link replaces the diagram.
+    pub max_mermaid_chars: u32,
+    /// Time budget of the whole diagram step (AI calls + publication), in
+    /// seconds. It runs after the analysis comment is posted, in the
+    /// background; past the budget it is abandoned (the AI CLI is killed).
+    pub timeout_secs: u32,
+    /// Max per-file summary AI calls for a large diff (> 40 KB).
+    pub max_summary_calls: u32,
+    pub publish: DiagramPublishConfig,
+}
+
+impl Default for ReviewDiagramsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            kinds: vec!["architecture".to_string()],
+            text: DiagramText::Short,
+            language: "en".to_string(),
+            comment: DiagramComment::Mermaid,
+            diff_viewer: true,
+            active_days: 14,
+            max_mermaid_chars: 5000,
+            timeout_secs: 120,
+            max_summary_calls: 3,
+            publish: DiagramPublishConfig::default(),
+        }
+    }
+}
+
+/// Diagram kinds the config accepts. Only the first one is implemented.
+pub const DIAGRAM_KINDS: &[&str] = &["architecture", "flow", "changes", "delta", "dependency"];
+
+/// Recursively overlay `over` onto `base` (objects merged key by key, any
+/// other value replaced).
+fn merge_json(base: &mut serde_json::Value, over: &serde_json::Value) {
+    match (base, over) {
+        (serde_json::Value::Object(b), serde_json::Value::Object(o)) => {
+            for (k, v) in o {
+                merge_json(b.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+            }
+        }
+        (b, o) => *b = o.clone(),
+    }
+}
+
+/// Keys of `over` that `reference` does not know (dotted paths). Used to
+/// reject typos in a per-repo override instead of silently ignoring them.
+pub fn unknown_json_keys(reference: &serde_json::Value, over: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let (Some(r), Some(o)) = (reference.as_object(), over.as_object()) {
+        for (k, v) in o {
+            match r.get(k) {
+                None => out.push(k.clone()),
+                Some(rv) if rv.is_object() => out.extend(
+                    unknown_json_keys(rv, v)
+                        .into_iter()
+                        .map(|s| format!("{k}.{s}")),
+                ),
+                Some(_) => {}
+            }
+        }
+    }
+    out
+}
+
+/// `[pr.review_diagrams]` keys that only the TOML may set: every destination
+/// (directory, Pages repo, bucket/container/account, endpoint, region, public
+/// URL) and the private-repo safeguard. A per-repo DB override (editable from
+/// the dashboard) must not redirect output, send the pod's cloud credentials
+/// to another host (`endpoint`), or expose private code; it may only pick
+/// the target among the configured ones.
+pub const REVIEW_DIAGRAMS_TOML_ONLY: &[&str] = &[
+    "publish.dir",
+    "publish.pages_repo",
+    "publish.allow_private",
+    "publish.endpoint",
+    "publish.bucket",
+    "publish.account",
+    "publish.container",
+    "publish.region",
+    "publish.public_url",
+];
+
+/// Validate a per-repo override as the API receives it: an object with
+/// known keys only, no TOML-only key, and a valid merged config.
+pub fn validate_review_diagrams_override(
+    toml: &ReviewDiagramsConfig,
+    over: &serde_json::Value,
+) -> std::result::Result<(), String> {
+    if !over.is_object() {
+        return Err("expected a JSON object or null".into());
+    }
+    let reference = serde_json::to_value(ReviewDiagramsConfig::default()).unwrap_or_default();
+    let unknown = unknown_json_keys(&reference, over);
+    if !unknown.is_empty() {
+        return Err(format!("unknown setting(s): {}", unknown.join(", ")));
+    }
+    let toml_only = toml_only_keys(over);
+    if !toml_only.is_empty() {
+        return Err(format!(
+            "TOML-only setting(s), not allowed in the per-repo override: {}",
+            toml_only.join(", ")
+        ));
+    }
+    apply_review_diagrams_override(toml, over)
+        .map(|_| ())
+        .map_err(|e| format!("invalid diagrams settings: {e}"))
+}
+
+/// TOML-only keys present in a per-repo override.
+pub fn toml_only_keys(over: &serde_json::Value) -> Vec<String> {
+    REVIEW_DIAGRAMS_TOML_ONLY
+        .iter()
+        .filter(|k| {
+            let mut v = over;
+            for part in k.split('.') {
+                match v.get(part) {
+                    Some(x) => v = x,
+                    None => return false,
+                }
+            }
+            true
+        })
+        .map(|k| k.to_string())
+        .collect()
+}
+
+/// Apply a per-repo override (JSON object, possibly partial) on top of the
+/// TOML value. TOML-only keys in the override are ignored. Errors when the
+/// merged value is not a valid config.
+pub fn apply_review_diagrams_override(
+    toml: &ReviewDiagramsConfig,
+    over: &serde_json::Value,
+) -> Result<ReviewDiagramsConfig> {
+    let mut over = over.clone();
+    for k in REVIEW_DIAGRAMS_TOML_ONLY {
+        if let Some((section, key)) = k.split_once('.') {
+            if let Some(obj) = over.get_mut(section).and_then(|v| v.as_object_mut()) {
+                if obj.remove(key).is_some() {
+                    tracing::warn!("review_diagrams DB override: '{k}' is TOML-only, ignored");
+                }
+            }
+        }
+    }
+    let mut base = serde_json::to_value(toml)?;
+    merge_json(&mut base, &over);
+    Ok(serde_json::from_value(base)?)
+}
+
+/// The repo's effective `[pr.review_diagrams]`: the DB override (Settings →
+/// Diagrams, shared by every pod since it is read on each pass) merged over
+/// the TOML value. A corrupt override is logged and ignored.
+pub fn load_review_diagrams(
+    config: &Config,
+    db: &dyn crate::db::backend::DatabaseBackend,
+) -> ReviewDiagramsConfig {
+    let toml = &config.pr.review_diagrams;
+    let raw = db
+        .get_app_setting(crate::db::settings::REVIEW_DIAGRAMS_KEY)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty() && s.trim() != "null");
+    let Some(raw) = raw else {
+        return toml.clone();
+    };
+    match serde_json::from_str::<serde_json::Value>(&raw)
+        .map_err(anyhow::Error::from)
+        .and_then(|v| apply_review_diagrams_override(toml, &v))
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Ignoring invalid review_diagrams override in the DB: {e:#}");
+            toml.clone()
         }
     }
 }
@@ -782,7 +1114,7 @@ pub fn domains_prompt(domains: &[DomainDef], custom: Option<&str>) -> String {
 /// triage/PR-review calls rather than a whole Claude session. Users write
 /// these in Settings; `skills_prompt` renders the ones that match the
 /// current pipeline into the user prompt, right after domains.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct SkillDef {
     /// Short human name (e.g. "rust-error-handling").
     pub name: String,
@@ -794,8 +1126,9 @@ pub struct SkillDef {
     /// The actual instructions appended to the prompt verbatim.
     pub content: String,
 
-    /// Which pipelines this skill applies to: any of "triage", "pr_review",
-    /// "review" (inline code review). Empty means all of them.
+    /// Which pipelines this skill applies to: any of [`SKILL_PIPELINES`]
+    /// ("triage", "pr_review", "review" = inline code review, "diagrams").
+    /// Empty means all of them.
     #[serde(default)]
     pub pipelines: Vec<String>,
 
@@ -804,8 +1137,35 @@ pub struct SkillDef {
     pub enabled: bool,
 }
 
+/// Pipeline names a [`SkillDef::pipelines`] entry may target.
+pub const SKILL_PIPELINES: &[&str] = &["triage", "pr_review", "review", "diagrams"];
+
+/// Strip pipeline values that aren't in [`SKILL_PIPELINES`], returning one
+/// human-readable warning per change. A skill whose every pipeline was
+/// unknown is disabled rather than left with an empty list (empty = ALL
+/// pipelines, which would widen a typo into "apply everywhere").
+pub fn sanitize_skill_pipelines(skill: &mut SkillDef) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let had_any = !skill.pipelines.is_empty();
+    let name = skill.name.clone();
+    skill.pipelines.retain(|p| {
+        let ok = SKILL_PIPELINES.contains(&p.as_str());
+        if !ok {
+            warnings.push(format!("skill '{name}': unknown pipeline '{p}' removed"));
+        }
+        ok
+    });
+    if had_any && skill.pipelines.is_empty() && skill.enabled {
+        skill.enabled = false;
+        warnings.push(format!(
+            "skill '{name}': no known pipeline left, disabled (expected any of {SKILL_PIPELINES:?})"
+        ));
+    }
+    warnings
+}
+
 /// Build the AI-prompt fragment listing the skills that apply to `pipeline`
-/// ("triage" or "pr_review"). Mirrors [`domains_prompt`]'s DB-backed,
+/// (one of [`SKILL_PIPELINES`]). Mirrors [`domains_prompt`]'s DB-backed,
 /// stateless-pods-safe pattern — see its doc comment for why this isn't TOML.
 /// Returns empty when no enabled skill matches.
 pub fn skills_prompt(skills: &[SkillDef], pipeline: &str) -> String {
@@ -861,6 +1221,166 @@ looks correct and reasonably simple, say so briefly instead of inventing issues.
         pipelines: vec![],
         enabled: true,
     }]
+}
+
+/// What [`seed_skills`] did, for logging and tests.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SkillSeedOutcome {
+    /// Names written into the DB list by this call.
+    pub added: Vec<String>,
+    /// True when this call created the `SKILLS_KEY` row (first ever seed).
+    pub created: bool,
+}
+
+/// Seed the DB-backed skills list from the TOML `[[skills]]` (see
+/// [`Config::skills`]). TOML is the versionable default, the DB the source of
+/// truth once seeded:
+///
+/// - `SKILLS_KEY` never written → write the TOML skills, or [`default_skills`]
+///   when the TOML defines none.
+/// - `SKILLS_KEY` exists → append only TOML skills whose name is neither in
+///   the list nor already seeded once (`SKILLS_SEEDED_KEY`), so a skill
+///   edited, disabled or deleted in the dashboard is never overwritten,
+///   re-enabled or resurrected.
+///
+/// Idempotent and safe when several pods start at once: the first write is an
+/// atomic insert-if-absent and later merges are compare-and-swap retried on
+/// conflict, so a concurrent dashboard save or another pod's seed is never
+/// clobbered. An unparseable stored list is left untouched.
+pub fn seed_skills(
+    db: &dyn crate::db::backend::DatabaseBackend,
+    toml_skills: &[SkillDef],
+) -> Result<SkillSeedOutcome> {
+    use crate::db::settings::{SKILLS_KEY, SKILLS_SEEDED_KEY};
+    const MAX_ATTEMPTS: usize = 8;
+
+    // First occurrence wins on duplicate names in the TOML. Unknown pipeline
+    // values are stripped here so a TOML typo can never land in the DB list
+    // (where it would make every Settings save carry an invalid value).
+    let sanitized: Vec<SkillDef> = toml_skills
+        .iter()
+        .cloned()
+        .map(|mut s| {
+            for w in sanitize_skill_pipelines(&mut s) {
+                tracing::warn!("[[skills]] {w}");
+            }
+            s
+        })
+        .collect();
+    let mut seeds: Vec<&SkillDef> = Vec::new();
+    for s in &sanitized {
+        if s.name.trim().is_empty() {
+            tracing::warn!("[[skills]] entry with an empty name ignored");
+            continue;
+        }
+        if seeds.iter().any(|x| x.name == s.name) {
+            tracing::warn!(skill = %s.name, "duplicate [[skills]] name ignored");
+            continue;
+        }
+        seeds.push(s);
+    }
+
+    let mut outcome = SkillSeedOutcome::default();
+    let mut done = false;
+    for _ in 0..MAX_ATTEMPTS {
+        match db.get_app_setting(SKILLS_KEY)? {
+            None => {
+                let initial: Vec<SkillDef> = if seeds.is_empty() {
+                    default_skills()
+                } else {
+                    seeds.iter().map(|s| (*s).clone()).collect()
+                };
+                let json = serde_json::to_string(&initial)?;
+                if db.set_app_setting_if_absent(SKILLS_KEY, &json)? {
+                    outcome.created = true;
+                    outcome.added = initial.into_iter().map(|s| s.name).collect();
+                    done = true;
+                    break;
+                }
+                // Another pod (or the dashboard) won the race: merge into it.
+            }
+            Some(raw) => {
+                let Ok(mut current) = serde_json::from_str::<Vec<SkillDef>>(&raw) else {
+                    tracing::warn!("stored skills list is not valid JSON; TOML seeding skipped");
+                    return Ok(outcome);
+                };
+                let seeded = load_seeded_names(db)?;
+                let missing: Vec<SkillDef> = seeds
+                    .iter()
+                    .filter(|s| {
+                        !current.iter().any(|c| c.name == s.name) && !seeded.contains(&s.name)
+                    })
+                    .map(|s| (*s).clone())
+                    .collect();
+                if missing.is_empty() {
+                    done = true;
+                    break;
+                }
+                let names: Vec<String> = missing.iter().map(|s| s.name.clone()).collect();
+                current.extend(missing);
+                let json = serde_json::to_string(&current)?;
+                if db.compare_and_set_app_setting(SKILLS_KEY, &raw, &json)? {
+                    outcome.added = names;
+                    done = true;
+                    break;
+                }
+                // Value changed under us (dashboard save / other pod): retry.
+            }
+        }
+    }
+    if !done {
+        anyhow::bail!("skills seeding gave up after {MAX_ATTEMPTS} concurrent-update retries");
+    }
+
+    // Remember every TOML name now represented in the DB list, so deleting
+    // one in the dashboard later is respected on the next start.
+    if !seeds.is_empty() {
+        for _ in 0..MAX_ATTEMPTS {
+            let raw = db.get_app_setting(SKILLS_SEEDED_KEY)?;
+            let mut names: Vec<String> = raw
+                .as_deref()
+                .and_then(|r| serde_json::from_str(r).ok())
+                .unwrap_or_default();
+            let before = names.len();
+            for s in &seeds {
+                if !names.contains(&s.name) {
+                    names.push(s.name.clone());
+                }
+            }
+            if names.len() == before && raw.is_some() {
+                break;
+            }
+            let json = serde_json::to_string(&names)?;
+            let ok = match raw.as_deref() {
+                None => db.set_app_setting_if_absent(SKILLS_SEEDED_KEY, &json)?,
+                Some(r) => db.compare_and_set_app_setting(SKILLS_SEEDED_KEY, r, &json)?,
+            };
+            if ok {
+                break;
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+fn load_seeded_names(db: &dyn crate::db::backend::DatabaseBackend) -> Result<Vec<String>> {
+    Ok(db
+        .get_app_setting(crate::db::settings::SKILLS_SEEDED_KEY)?
+        .and_then(|r| serde_json::from_str(&r).ok())
+        .unwrap_or_default())
+}
+
+/// [`seed_skills`] for startup paths: logs instead of failing, so a DB hiccup
+/// never blocks the daemon or a CLI command (pipelines still fall back to
+/// [`load_skills`]'s defaults).
+pub fn seed_skills_logged(db: &dyn crate::db::backend::DatabaseBackend, toml_skills: &[SkillDef]) {
+    match seed_skills(db, toml_skills) {
+        Ok(o) if !o.added.is_empty() => {
+            tracing::info!(added = ?o.added, created = o.created, "skills seeded from config")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("skills seeding failed: {e:#}"),
+    }
 }
 
 /// A "grand domain" — a broad area of the codebase/product (e.g. codex, bun,
@@ -1284,6 +1804,7 @@ pub struct BrandingConfig {
     /// Custom PR analysis comment template (markdown/HTML).
     /// Placeholders: {type}, {risk}, {summary}, {type_emoji}, {risk_emoji},
     /// {tests_present}, {breaking_change}, {docs_updated}, {linked_issues},
+    /// {diagram} (architecture section, see `[pr.review_diagrams]`),
     /// {header}, {footer}
     #[serde(default)]
     pub pr_template: Option<String>,
@@ -1400,19 +1921,8 @@ pub struct ExportConfig {
     pub webhooks: Vec<WebhookConfig>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct StorageConfig {
-    pub provider: String,
-
-    #[serde(default)]
-    pub bucket: Option<String>,
-
-    #[serde(default)]
-    pub prefix: Option<String>,
-
-    #[serde(default)]
-    pub region: Option<String>,
-}
+/// `[export.storage]`: same shape as every object storage target.
+pub type StorageConfig = crate::storage::StorageTargetConfig;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct DatabaseExportConfig {
@@ -1603,6 +2113,13 @@ pub struct GlobalDaemonConfig {
 
     #[serde(default = "default_poll_interval")]
     pub poll_interval: u64,
+
+    /// Multi-pod: how often (seconds) each pod re-reads the persisted repo
+    /// registry (features, apply mode, added/removed repos) so a change made
+    /// through one pod reaches the others without a restart. Only active when
+    /// the persistence layer is shared (Pro on Postgres). `0` disables it.
+    #[serde(default = "default_registry_sync_secs")]
+    pub registry_sync_secs: u64,
 }
 
 impl Default for GlobalDaemonConfig {
@@ -1613,15 +2130,20 @@ impl Default for GlobalDaemonConfig {
             apply: false,
             poll: false,
             poll_interval: default_poll_interval(),
+            registry_sync_secs: default_registry_sync_secs(),
         }
     }
+}
+
+fn default_registry_sync_secs() -> u64 {
+    30
 }
 
 fn default_poll_interval() -> u64 {
     30
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct RepoEntry {
     /// Repository slug: "owner/repo"
     pub slug: String,
@@ -2144,6 +2666,38 @@ auto_label = true
 risk_labels = true
 # model = "claude-sonnet-4-20250514"    # override: default model for PR analysis
 
+# Architecture diagram in the PR analysis comment (one extra AI call per new
+# diff, cached per head). Every key can be overridden per repo in
+# Settings → Diagrams (stored in the DB; DB > this file > defaults).
+# [pr.review_diagrams]
+# enabled = true
+# kinds = ["architecture"]       # only "architecture" for now
+# text = "short"                 # "short" | "normal" | "full"
+# language = "en"                # language of the diagram texts
+# comment = "mermaid"            # "mermaid" (diagram in the comment) | "none" (link only)
+# diff_viewer = true             # embed the diff in the interactive page
+# active_days = 14               # skip PRs idle for longer (0 = no limit)
+# max_mermaid_chars = 5000       # Mermaid size cap (Forgejo/Gitea default limit)
+# timeout_secs = 120             # budget of the background diagram step
+# max_summary_calls = 3          # per-file summary calls for diffs > 40 KB
+#
+# Interactive page (React Flow viewer). Off by default. Destinations (dir,
+# pages_repo, bucket, region, endpoint, account, container, public_url) and
+# allow_private are TOML-only: the per-repo override can only pick `target`.
+# [pr.review_diagrams.publish]
+# target = "off"                 # "off" | "local" | "github-pages" | "wshm" | "s3" | "gcs" | "azure"
+# prefix = "wshm-diagrams"
+# public_url = "https://diagrams.example.com"   # link = public_url/prefix/...
+# dir = "/var/www/diagrams"      # local (TOML only)
+# pages_repo = "owner/diagrams"  # github-pages, gh-pages branch, repo token (TOML only).
+#                                # If that repo is public, its tree and git history
+#                                # list every page: the token in the file name does
+#                                # not prevent enumeration there.
+# retention_days = 30            # delete pages idle for longer (0 = until the PR closes)
+# max_pages = 200                # per repo, least recently updated evicted first
+# max_diff_kb = 1024             # bigger diffs: the viewer links to "Files changed"
+# allow_private = false          # allow public targets for a private repo (TOML only)
+
 [queue]
 enabled = true
 merge_threshold = 15
@@ -2243,6 +2797,18 @@ full_sync_interval_hours = 24
 # description = "Minor or cosmetic"
 # when = "Edge case or low-impact improvement"
 
+# Skills: standing instructions appended to AI prompts. This is only the
+# SEED: at startup, skills are copied into the database (once per name) and
+# from then on are edited in Settings -> Skills. Editing/removing an entry
+# here never overwrites what was changed in the dashboard.
+# pipelines: any of "triage", "pr_review", "review", "diagrams" (empty = all)
+# [[skills]]
+# name = "rust-error-handling"
+# description = "Shown in Settings only, not sent to the AI"
+# content = "Flag unwrap()/expect() on fallible paths in non-test code."
+# pipelines = ["pr_review", "review"]
+# enabled = true
+
 # [assign]
 # enabled = true
 #
@@ -2287,7 +2853,7 @@ full_sync_interval_hours = 24
 #
 # PR analysis placeholders: {header}, {footer}, {type}, {risk}, {summary},
 #   {type_emoji}, {risk_emoji}, {tests_present}, {breaking_change},
-#   {docs_updated}, {linked_issues}
+#   {docs_updated}, {linked_issues}, {diagram}
 # pr_template = """
 # {header}
 # ## PR Review
@@ -2456,6 +3022,7 @@ impl Default for Config {
             github: GitHubConfig::default(),
             git_provider: None,
             git_url: None,
+            azure_devops: AzureDevOpsConfig::default(),
             ai: AiConfig::default(),
             triage: TriageConfig::default(),
             pr: PrConfig::default(),
@@ -2478,6 +3045,7 @@ impl Default for Config {
             issues_blacklist: Vec::new(),
             prs_blacklist: Vec::new(),
             labels: Vec::new(),
+            skills: Vec::new(),
             repo_owner: String::new(),
             repo_name: String::new(),
             wshm_dir: PathBuf::from(".wshm"),
@@ -2654,6 +3222,259 @@ mod tests {
 
         assert_eq!(skills_prompt(&[], "triage"), "");
     }
+
+    #[test]
+    fn test_skills_prompt_diagrams_pipeline() {
+        let skills = vec![skill("diag", &["diagrams"], true), skill("all", &[], true)];
+        let d = skills_prompt(&skills, "diagrams");
+        assert!(d.contains("diag") && d.contains("all"));
+        assert!(!skills_prompt(&skills, "triage").contains("### diag"));
+        assert!(SKILL_PIPELINES.contains(&"diagrams"));
+    }
+
+    #[test]
+    fn test_toml_skills_parse() {
+        let cfg: Config = toml::from_str(
+            r#"
+[[skills]]
+name = "a"
+content = "do a"
+pipelines = ["diagrams"]
+
+[[skills]]
+name = "b"
+content = "do b"
+enabled = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.skills.len(), 2);
+        assert_eq!(cfg.skills[0].pipelines, vec!["diagrams"]);
+        assert!(cfg.skills[0].enabled, "enabled defaults to true");
+        assert!(!cfg.skills[1].enabled);
+        assert!(toml::from_str::<Config>("").unwrap().skills.is_empty());
+    }
+
+    fn stored(db: &crate::db::Database) -> Vec<SkillDef> {
+        serde_json::from_str(
+            &db.get_app_setting(crate::db::settings::SKILLS_KEY)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn names(v: &[SkillDef]) -> Vec<&str> {
+        v.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    #[test]
+    fn test_seed_fresh_writes_toml_skills_only() {
+        let db = crate::db::Database::open_memory().unwrap();
+        let o = seed_skills(&db, &[skill("a", &[], true), skill("b", &[], true)]).unwrap();
+        assert!(o.created);
+        assert_eq!(o.added, vec!["a", "b"]);
+        assert_eq!(
+            names(&stored(&db)),
+            vec!["a", "b"],
+            "no default when TOML defines skills"
+        );
+    }
+
+    #[test]
+    fn test_seed_fresh_without_toml_writes_defaults() {
+        let db = crate::db::Database::open_memory().unwrap();
+        let o = seed_skills(&db, &[]).unwrap();
+        assert!(o.created);
+        assert_eq!(names(&stored(&db)), names(&default_skills()));
+        // Idempotent.
+        assert_eq!(seed_skills(&db, &[]).unwrap(), SkillSeedOutcome::default());
+    }
+
+    #[test]
+    fn test_seed_is_idempotent() {
+        let db = crate::db::Database::open_memory().unwrap();
+        let toml = [skill("a", &[], true)];
+        seed_skills(&db, &toml).unwrap();
+        let before = db.get_app_setting(crate::db::settings::SKILLS_KEY).unwrap();
+        let o = seed_skills(&db, &toml).unwrap();
+        assert_eq!(o, SkillSeedOutcome::default());
+        assert_eq!(
+            db.get_app_setting(crate::db::settings::SKILLS_KEY).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn test_seed_never_overwrites_or_reenables_dashboard_edits() {
+        let db = crate::db::Database::open_memory().unwrap();
+        seed_skills(&db, &[skill("a", &[], true)]).unwrap();
+        // Dashboard edit: disable + rewrite "a".
+        let mut edited = skill("a", &["triage"], false);
+        edited.content = "user text".into();
+        db.set_app_setting(
+            crate::db::settings::SKILLS_KEY,
+            &serde_json::to_string(&[edited.clone()]).unwrap(),
+        )
+        .unwrap();
+        // TOML still has the original, plus a new skill "c".
+        let o = seed_skills(&db, &[skill("a", &[], true), skill("c", &[], true)]).unwrap();
+        assert!(!o.created);
+        assert_eq!(o.added, vec!["c"]);
+        let s = stored(&db);
+        assert_eq!(names(&s), vec!["a", "c"]);
+        assert_eq!(s[0], edited, "edited/disabled skill untouched");
+    }
+
+    #[test]
+    fn test_seed_existing_list_adds_missing_without_defaults() {
+        let db = crate::db::Database::open_memory().unwrap();
+        // Pre-existing list saved before TOML seeding existed (even empty).
+        db.set_app_setting(crate::db::settings::SKILLS_KEY, "[]")
+            .unwrap();
+        let o = seed_skills(&db, &[skill("a", &[], true)]).unwrap();
+        assert_eq!(o.added, vec!["a"]);
+        assert_eq!(names(&stored(&db)), vec!["a"]);
+        // Existing empty list + no TOML: defaults NOT re-added.
+        let db2 = crate::db::Database::open_memory().unwrap();
+        db2.set_app_setting(crate::db::settings::SKILLS_KEY, "[]")
+            .unwrap();
+        seed_skills(&db2, &[]).unwrap();
+        assert!(stored(&db2).is_empty());
+    }
+
+    #[test]
+    fn test_seed_respects_dashboard_deletion() {
+        let db = crate::db::Database::open_memory().unwrap();
+        let toml = [skill("a", &[], true), skill("b", &[], true)];
+        seed_skills(&db, &toml).unwrap();
+        // User deletes "a" in the dashboard.
+        db.set_app_setting(
+            crate::db::settings::SKILLS_KEY,
+            &serde_json::to_string(&[skill("b", &[], true)]).unwrap(),
+        )
+        .unwrap();
+        let o = seed_skills(&db, &toml).unwrap();
+        assert!(o.added.is_empty(), "deleted TOML skill must not come back");
+        assert_eq!(names(&stored(&db)), vec!["b"]);
+    }
+
+    #[test]
+    fn test_seed_dedups_toml_names_and_skips_empty() {
+        let db = crate::db::Database::open_memory().unwrap();
+        let mut dup = skill("a", &[], true);
+        dup.content = "second".into();
+        seed_skills(&db, &[skill("a", &[], true), dup, skill("  ", &[], true)]).unwrap();
+        let s = stored(&db);
+        assert_eq!(names(&s), vec!["a"]);
+        assert_eq!(s[0].content, "do a things");
+    }
+
+    #[test]
+    fn test_seed_leaves_corrupt_list_untouched() {
+        let db = crate::db::Database::open_memory().unwrap();
+        db.set_app_setting(crate::db::settings::SKILLS_KEY, "not json")
+            .unwrap();
+        seed_skills(&db, &[skill("a", &[], true)]).unwrap();
+        assert_eq!(
+            db.get_app_setting(crate::db::settings::SKILLS_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("not json")
+        );
+    }
+
+    #[test]
+    fn test_sanitize_skill_pipelines() {
+        let mut s = skill("x", &["triage", "bogus"], true);
+        let w = sanitize_skill_pipelines(&mut s);
+        assert_eq!(s.pipelines, vec!["triage"]);
+        assert!(s.enabled);
+        assert_eq!(w.len(), 1);
+
+        // Only unknown values: disabled, never widened to "all pipelines".
+        let mut s = skill("y", &["diagram"], true);
+        sanitize_skill_pipelines(&mut s);
+        assert!(s.pipelines.is_empty() && !s.enabled);
+
+        let mut s = skill("z", &[], true);
+        assert!(sanitize_skill_pipelines(&mut s).is_empty());
+        assert!(s.enabled);
+    }
+
+    #[test]
+    fn test_seed_strips_unknown_pipelines() {
+        let db = crate::db::Database::open_memory().unwrap();
+        seed_skills(
+            &db,
+            &[
+                skill("a", &["review", "nope"], true),
+                skill("b", &["typo"], true),
+            ],
+        )
+        .unwrap();
+        let s = stored(&db);
+        assert_eq!(s[0].pipelines, vec!["review"]);
+        assert!(s[0].enabled);
+        assert!(s[1].pipelines.is_empty() && !s[1].enabled);
+        assert!(s.iter().all(|k| k
+            .pipelines
+            .iter()
+            .all(|p| SKILL_PIPELINES.contains(&p.as_str()))));
+    }
+
+    /// Two "pods" seeding the same shared DB concurrently: the atomic
+    /// insert-if-absent + CAS retry must converge on one list with every
+    /// TOML skill exactly once.
+    #[test]
+    fn test_seed_concurrent_pods_converge() {
+        let dir = std::env::temp_dir().join(format!(
+            "wshm-seed-race-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("state.db");
+        crate::db::Database::open_path(&path).unwrap();
+        let toml_a = vec![skill("a", &[], true), skill("shared", &[], true)];
+        let toml_b = vec![skill("b", &[], true), skill("shared", &[], true)];
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                let t = if i % 2 == 0 {
+                    toml_a.clone()
+                } else {
+                    toml_b.clone()
+                };
+                std::thread::spawn(move || {
+                    let db = crate::db::Database::open_path(&path).unwrap();
+                    seed_skills(&db, &t).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let db = crate::db::Database::open_path(&path).unwrap();
+        let mut n: Vec<String> = stored(&db).into_iter().map(|s| s.name).collect();
+        n.sort();
+        assert_eq!(n, vec!["a", "b", "shared"]);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sqlite_setting_primitives() {
+        let db = crate::db::Database::open_memory().unwrap();
+        assert!(db.set_app_setting_if_absent("k", "1").unwrap());
+        assert!(!db.set_app_setting_if_absent("k", "2").unwrap());
+        assert!(!db.compare_and_set_app_setting("k", "2", "3").unwrap());
+        assert!(db.compare_and_set_app_setting("k", "1", "3").unwrap());
+        assert_eq!(db.get_app_setting("k").unwrap().as_deref(), Some("3"));
+        assert!(!db.compare_and_set_app_setting("missing", "x", "y").unwrap());
+    }
 }
 
 #[cfg(test)]
@@ -2680,5 +3501,120 @@ mod rag_env_tests {
             (cfg.enabled, cfg.top_k, cfg.max_terms, cfg.max_chars),
             (false, 9, 8, 1200)
         );
+    }
+}
+
+#[cfg(test)]
+mod review_diagrams_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_on_short_english_mermaid_unpublished() {
+        let c = Config::default();
+        let d = &c.pr.review_diagrams;
+        assert!(d.enabled);
+        assert_eq!(d.kinds, vec!["architecture"]);
+        assert_eq!(d.text, DiagramText::Short);
+        assert_eq!(d.language, "en");
+        assert_eq!(d.comment, DiagramComment::Mermaid);
+        assert!(d.diff_viewer);
+        assert_eq!(d.publish.target, DiagramPublishTarget::Off);
+        assert!(!d.publish.allow_private);
+    }
+
+    #[test]
+    fn toml_is_parsed() {
+        let pr: PrConfig = toml::from_str(
+            "[review_diagrams]\ntext = \"full\"\nlanguage = \"fr\"\n[review_diagrams.publish]\ntarget = \"github-pages\"\npages_repo = \"o/p\"\n",
+        )
+        .unwrap();
+        assert_eq!(pr.review_diagrams.text, DiagramText::Full);
+        assert_eq!(
+            pr.review_diagrams.publish.target,
+            DiagramPublishTarget::GithubPages
+        );
+        assert_eq!(
+            pr.review_diagrams.publish.pages_repo.as_deref(),
+            Some("o/p")
+        );
+        assert!(pr.review_diagrams.enabled, "unset keys keep their defaults");
+    }
+
+    #[test]
+    fn db_override_is_merged_over_toml() {
+        let mut toml = ReviewDiagramsConfig {
+            language: "fr".into(),
+            ..Default::default()
+        };
+        toml.publish.dir = Some("/srv".into());
+        let over = serde_json::json!({"text": "normal", "publish": {"target": "local"}});
+        let eff = apply_review_diagrams_override(&toml, &over).unwrap();
+        assert_eq!(eff.text, DiagramText::Normal);
+        assert_eq!(eff.language, "fr", "TOML value kept");
+        assert_eq!(eff.publish.target, DiagramPublishTarget::Local);
+        assert_eq!(
+            eff.publish.dir.as_deref(),
+            Some("/srv"),
+            "nested TOML value kept"
+        );
+        assert!(
+            apply_review_diagrams_override(&toml, &serde_json::json!({"text": "huge"})).is_err()
+        );
+    }
+
+    #[test]
+    fn toml_only_keys_are_detected_and_ignored() {
+        let over = serde_json::json!({"publish": {"dir": "/etc", "allow_private": true, "target": "local"}});
+        assert_eq!(
+            toml_only_keys(&over),
+            vec!["publish.dir", "publish.allow_private"]
+        );
+        let mut toml = ReviewDiagramsConfig::default();
+        toml.publish.dir = Some("/srv".into());
+        let eff = apply_review_diagrams_override(&toml, &over).unwrap();
+        assert_eq!(eff.publish.dir.as_deref(), Some("/srv"));
+        assert!(!eff.publish.allow_private);
+        assert_eq!(eff.publish.target, DiagramPublishTarget::Local);
+        assert!(toml_only_keys(&serde_json::json!({"text": "full"})).is_empty());
+    }
+
+    #[test]
+    fn override_api_rejects_destinations_and_credentials_routing() {
+        let toml = ReviewDiagramsConfig::default();
+        for key in [
+            "dir",
+            "pages_repo",
+            "allow_private",
+            "endpoint",
+            "bucket",
+            "account",
+            "container",
+            "region",
+            "public_url",
+        ] {
+            let mut publish = serde_json::Map::new();
+            publish.insert("target".into(), "gcs".into());
+            publish.insert(key.into(), serde_json::json!("https://attacker.example"));
+            let body = serde_json::json!({ "publish": publish });
+            let err = validate_review_diagrams_override(&toml, &body).unwrap_err();
+            assert!(err.contains(&format!("publish.{key}")), "{key}: {err}");
+        }
+        // Choosing the target among the configured ones stays allowed.
+        assert!(validate_review_diagrams_override(
+            &toml,
+            &serde_json::json!({"text": "full", "publish": {"target": "gcs", "max_pages": 10}})
+        )
+        .is_ok());
+        assert!(validate_review_diagrams_override(&toml, &serde_json::json!({"nope": 1})).is_err());
+        assert!(validate_review_diagrams_override(&toml, &serde_json::json!([1])).is_err());
+    }
+
+    #[test]
+    fn unknown_override_keys_are_reported() {
+        let reference = serde_json::to_value(ReviewDiagramsConfig::default()).unwrap();
+        let over = serde_json::json!({"txt": "x", "publish": {"target": "off", "secret_key": "k"}});
+        let mut keys = unknown_json_keys(&reference, &over);
+        keys.sort();
+        assert_eq!(keys, vec!["publish.secret_key", "txt"]);
     }
 }

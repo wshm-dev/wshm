@@ -3,6 +3,7 @@
 use anyhow::Result;
 
 use crate::ai::schemas::IssueClassification;
+use crate::db::diagrams::PrDiagramRow;
 use crate::db::events::WebhookEventRow;
 use crate::db::history::{ChangeEvent, ChangeEventFilter};
 use crate::db::issues::Issue;
@@ -165,6 +166,57 @@ pub trait DatabaseBackend: Send + Sync {
     fn set_app_setting(&self, key: &str, value: &str) -> Result<()> {
         let _ = (key, value);
         Ok(())
+    }
+
+    // ── PR diagrams (see `db::diagrams`) ────────────────────────
+    //
+    // Default impls keep backends without the table compiling: no cache,
+    // nothing to clean up. SQLite and Postgres (Pro) override them.
+
+    fn get_pr_diagram(&self, pr_number: u64) -> Result<Option<PrDiagramRow>> {
+        let _ = pr_number;
+        Ok(None)
+    }
+
+    /// Every cached diagram of the repo (cleanup sweeps, dashboard stats).
+    fn list_pr_diagrams(&self) -> Result<Vec<PrDiagramRow>> {
+        Ok(Vec::new())
+    }
+
+    fn upsert_pr_diagram(&self, row: &PrDiagramRow) -> Result<()> {
+        let _ = row;
+        Ok(())
+    }
+
+    fn delete_pr_diagram(&self, pr_number: u64) -> Result<()> {
+        let _ = pr_number;
+        Ok(())
+    }
+
+    /// Insert `value` only if `key` has never been written. Returns `true`
+    /// when this call created the row. Real backends implement it as a
+    /// single atomic `INSERT … ON CONFLICT DO NOTHING` so several pods
+    /// seeding at once can't clobber each other; this default is a
+    /// non-atomic read-then-write fallback.
+    fn set_app_setting_if_absent(&self, key: &str, value: &str) -> Result<bool> {
+        if self.get_app_setting(key)?.is_some() {
+            return Ok(false);
+        }
+        self.set_app_setting(key, value)?;
+        Ok(true)
+    }
+
+    /// Replace `key`'s value with `new` only if it still equals `expected`
+    /// (compare-and-swap). Returns `true` when the swap happened, `false`
+    /// when someone else changed (or removed) the value in between — the
+    /// caller re-reads and retries. Real backends do this in one
+    /// conditional `UPDATE`; this default is a non-atomic fallback.
+    fn compare_and_set_app_setting(&self, key: &str, expected: &str, new: &str) -> Result<bool> {
+        if self.get_app_setting(key)?.as_deref() != Some(expected) {
+            return Ok(false);
+        }
+        self.set_app_setting(key, new)?;
+        Ok(true)
     }
 
     // ── Admin / maintenance ─────────────────────────────────────
@@ -524,8 +576,32 @@ impl DatabaseBackend for super::Database {
         self.set_app_setting(key, value)
     }
 
+    fn set_app_setting_if_absent(&self, key: &str, value: &str) -> Result<bool> {
+        self.set_app_setting_if_absent(key, value)
+    }
+
+    fn compare_and_set_app_setting(&self, key: &str, expected: &str, new: &str) -> Result<bool> {
+        self.compare_and_set_app_setting(key, expected, new)
+    }
+
     fn clear_triage_and_analyses(&self) -> Result<()> {
         self.clear_triage_and_analyses()
+    }
+
+    fn get_pr_diagram(&self, pr_number: u64) -> Result<Option<PrDiagramRow>> {
+        self.get_pr_diagram(pr_number)
+    }
+
+    fn list_pr_diagrams(&self) -> Result<Vec<PrDiagramRow>> {
+        self.list_pr_diagrams()
+    }
+
+    fn upsert_pr_diagram(&self, row: &PrDiagramRow) -> Result<()> {
+        self.upsert_pr_diagram(row)
+    }
+
+    fn delete_pr_diagram(&self, pr_number: u64) -> Result<()> {
+        self.delete_pr_diagram(pr_number)
     }
 
     fn as_sqlite_db(&self) -> Option<&super::Database> {

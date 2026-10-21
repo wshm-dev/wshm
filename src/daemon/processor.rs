@@ -227,7 +227,7 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
         return Ok(());
     }
     // Force sync issues (bypass throttle — we know there's a new event)
-    gh_sync::sync_issues_now(&state.gh(), state.db.as_ref()).await?;
+    gh_sync::sync_issues_now(&*state.gh(), state.db.as_ref()).await?;
 
     // The list endpoint lags issue creation by a few seconds (replicated
     // index), so a sync right after `issues.opened` can miss the brand-new
@@ -303,7 +303,7 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
     pipelines::triage::run(
         &state.config,
         state.db.as_ref(),
-        &state.gh(),
+        &*state.gh(),
         &args,
         pipelines::triage::OutputFormat::Text,
         None,
@@ -332,6 +332,30 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
 async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyhow::Result<()> {
     let number = event.number;
     info!("Handling pull_request event: number={number:?}");
+
+    // Closed or merged: remove its diagram page (`[pr.review_diagrams]`),
+    // refresh the cached state, and stop there (nothing to analyze or review
+    // on a closed PR).
+    if event.action == "closed" {
+        if let Some(n) = number {
+            crate::diagrams::cleanup_pr(&state.config, state.db.as_ref(), state.gh().as_ref(), n)
+                .await;
+        }
+        // Refresh just this PR (state closed/merged), not a full sync: every
+        // merge would otherwise re-list every PR of the repo.
+        if let (Some(n), true) = (number, state.features().collect_prs) {
+            match state.gh().fetch_pull(n).await {
+                Ok(Some(pr)) => {
+                    if let Err(e) = state.db.upsert_pull(&pr) {
+                        warn!("Failed to cache closed PR #{n}: {e}");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warn!("Could not refresh closed PR #{n}: {e:#}"),
+            }
+        }
+        return Ok(());
+    }
 
     // Skip if blacklisted or already analyzed (prevent AI credit exhaustion)
     if let Some(n) = number {
@@ -370,7 +394,7 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
         return Ok(());
     }
     // Force sync pulls (bypass throttle — we know there's a new event)
-    gh_sync::sync_pulls_now(&state.gh(), state.db.as_ref()).await?;
+    gh_sync::sync_pulls_now(&*state.gh(), state.db.as_ref()).await?;
 
     // The list endpoint lags PR creation by a few seconds (replicated index),
     // so a sync right after `pull_request.opened` can miss the brand-new PR,
@@ -408,7 +432,7 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
             if let Err(e) = pro_hooks::run_review(
                 &state.config,
                 state.db.as_ref(),
-                &state.gh(),
+                &*state.gh(),
                 n,
                 should_post,
             )
@@ -458,15 +482,31 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
         apply: state.apply(),
     };
 
-    pipelines::pr_analysis::run(
+    // The diagram step comes back as jobs: they run in the background with
+    // their own concurrency limit, after the analysis comment is posted, so
+    // a slow AI never holds this event's permit. Daemon runs never preview.
+    let gh = state.gh();
+    let jobs = pipelines::pr_analysis::run_with(
         &state.config,
         state.db.as_ref(),
-        &state.gh(),
+        &*gh,
         &args,
         false,
         None,
+        pipelines::pr_analysis::RunOptions {
+            preview: false,
+            diagrams: pipelines::pr_analysis::DiagramMode::Deferred,
+        },
     )
     .await?;
+    for job in jobs {
+        pipelines::pr_analysis::spawn_diagram_job(
+            std::sync::Arc::clone(&state.config),
+            std::sync::Arc::clone(&state.db),
+            std::sync::Arc::clone(&gh),
+            job,
+        );
+    }
 
     // Store in ICM if enabled
     if state.config.daemon.icm_enabled {
@@ -527,6 +567,16 @@ async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Re
         .and_then(|l| l.as_str())
         .unwrap_or("unknown");
 
+    // Never execute what wshm's own account wrote (a review or reply can
+    // echo a command injected through PR content). GitHub returns None
+    // here and keeps relying on the marker check above.
+    if let Some(me) = state.gh().self_username().await {
+        if me.eq_ignore_ascii_case(triggered_by) || me.eq_ignore_ascii_case(sender) {
+            info!("Ignoring command on #{number} posted by wshm's own account {me}");
+            return Ok(());
+        }
+    }
+
     info!("Slash command on #{number} by {triggered_by}: {cmd:?}");
 
     // Detect if this is a PR (issue_comment fires for both issues and PRs)
@@ -542,7 +592,7 @@ async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Re
         is_pr,
         &state.config,
         state.db.as_ref(),
-        &state.gh(),
+        &*state.gh(),
         state.apply(),
         Some(triggered_by),
     )
@@ -550,7 +600,11 @@ async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Re
 
     // Post response as a comment
     if state.apply() {
-        state.gh().comment_issue(number, &response).await?;
+        if is_pr {
+            state.gh().comment_pr(number, &response).await?;
+        } else {
+            state.gh().comment_issue(number, &response).await?;
+        }
         info!("Posted slash command response on #{number}");
     } else {
         info!("Dry-run slash command response for #{number}: {response}");

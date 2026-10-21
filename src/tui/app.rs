@@ -989,7 +989,7 @@ impl App {
             "Sync running…".to_string()
         });
 
-        let gh = match crate::github::Client::new(config) {
+        let gh = match crate::git_provider::build_provider(config) {
             Ok(c) => c,
             Err(e) => {
                 self.status_message = Some(format!("Sync failed: {e}"));
@@ -998,9 +998,9 @@ impl App {
         };
 
         let result = if full {
-            crate::github::sync::full_sync(&gh, db).await
+            crate::github::sync::full_sync(&*gh, db).await
         } else {
-            crate::github::sync::incremental_sync_full(&gh, db).await
+            crate::github::sync::incremental_sync_full(&*gh, db).await
         };
 
         match result {

@@ -1,0 +1,100 @@
+  :root { --paper:#f5f5f5; --ink:#2d3142; --muted:#4f5d75; --soft:#8a93a6; --accent:#bf4520; --tint:rgba(191,69,32,.08); --rule:rgba(45,49,66,.14); --fs:1; }
+  * { box-sizing:border-box; margin:0; padding:0 }
+  html, body, #root { height:100% }
+  body { background:var(--paper); color:var(--ink); font-family:system-ui,-apple-system,'Segoe UI',sans-serif }
+  #root { display:flex; flex-direction:column }
+  header { padding:14px 24px 12px; border-bottom:1px solid var(--rule); display:flex; align-items:flex-end; gap:16px }
+  .eyebrow { font:500 10.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; letter-spacing:.18em; text-transform:uppercase; color:var(--muted); margin-bottom:4px }
+  h1 { font:400 26px/1.15 Georgia,'Times New Roman',serif; letter-spacing:-.01em }
+  main { flex:1; display:flex; min-height:0 }
+  .canvas { flex:1; min-width:0; position:relative }
+  .split { width:7px; flex:none; cursor:col-resize; background:transparent; border-left:1px solid var(--rule); position:relative }
+  .split:hover, .split.drag { background:rgba(45,49,66,.06) }
+  .split::after { content:""; position:absolute; left:2px; top:50%; height:32px; margin-top:-16px; border-left:1px dotted var(--soft); border-right:1px dotted var(--soft); width:1px }
+  aside { flex:none; background:#fff; overflow:auto; padding:16px 20px 32px; font-size:calc(14px * var(--fs)) }
+  aside.closed { display:none }
+
+  /* panel */
+  .ptools { display:flex; gap:6px; align-items:center; margin-bottom:14px }
+  .ptools .lab { font:500 10px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; letter-spacing:.14em; text-transform:uppercase; color:var(--soft); margin-right:auto }
+  button.sm { font:500 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:#fff; border:1px solid var(--rule); border-radius:4px; min-width:26px; height:24px; padding:0 7px; cursor:pointer; color:var(--ink) }
+  button.sm:hover { border-color:var(--ink) }
+  button.sm.on { background:var(--ink); color:#fff; border-color:var(--ink) }
+  .story { font-size:1em; line-height:1.55; margin-bottom:16px }
+  .sec { font:500 10px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); margin:0 0 10px; display:flex; align-items:center; gap:6px }
+  .sec .nav { margin-left:auto; display:flex; gap:4px }
+  ol.steps { list-style:none; display:flex; flex-direction:column; gap:6px; margin-bottom:20px }
+  ol.steps li { display:grid; grid-template-columns:24px 1fr; gap:10px; padding:10px; border:1px solid var(--rule); border-radius:6px; cursor:pointer; background:#fff }
+  ol.steps li:hover { border-color:var(--soft) }
+  ol.steps li.on { border-color:var(--accent); background:var(--tint) }
+  ol.steps li.off { opacity:.4 }
+  .num { width:22px; height:22px; border-radius:50%; background:var(--ink); color:#fff; font:600 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; display:grid; place-items:center; flex:none }
+  li.on .num, .badge.on .num { background:var(--accent) }
+  .what { font:500 calc(11px * var(--fs)) ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:var(--muted); margin-bottom:3px }
+  .cap { font-size:.93em; line-height:1.45 }
+  .detail { border-top:1px solid var(--rule); padding-top:14px }
+  .detail h2 { font:600 calc(16px * var(--fs)) system-ui,-apple-system,'Segoe UI',sans-serif; margin:6px 0 2px }
+  .detail code { font:calc(11.5px * var(--fs)) ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:var(--muted); display:block; margin-bottom:10px; word-break:break-all }
+  .detail p.body { font-size:.96em; line-height:1.5 }
+  .detail .links { margin-top:10px; display:flex; flex-wrap:wrap; gap:6px }
+  .hint { color:var(--muted); font-size:.93em; line-height:1.5 }
+  code.i { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.86em; background:rgba(45,49,66,.06); padding:0 3px; border-radius:3px }
+
+  /* toolbar */
+  .bar { display:flex; gap:6px; flex-wrap:wrap; align-items:center; background:rgba(255,255,255,.92); border:1px solid var(--rule); border-radius:8px; padding:6px; max-width:calc(100vw - 80px) }
+  .bar input[type=search] { font:13px system-ui,-apple-system,'Segoe UI',sans-serif; border:1px solid var(--rule); border-radius:4px; height:26px; padding:0 8px; width:170px; color:var(--ink); background:#fff }
+  .bar input[type=search]:focus { outline:none; border-color:var(--ink) }
+  .chip { font:500 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; height:26px; padding:0 9px; border-radius:13px; border:1px solid var(--rule); background:#fff; color:var(--soft); cursor:pointer; display:inline-flex; align-items:center; gap:6px }
+  .chip.on { color:var(--ink); border-color:var(--ink) }
+  .chip .dot { width:8px; height:8px; border-radius:2px; border:1px solid currentColor }
+  .chip.new.on { color:var(--accent); border-color:var(--accent) }
+  .chip .n { color:var(--soft); font-weight:400 }
+  .sep { width:1px; height:18px; background:var(--rule); margin:0 2px }
+  .dd { position:relative }
+  .menu { position:absolute; top:32px; left:0; background:#fff; border:1px solid var(--rule); border-radius:6px; padding:8px; min-width:230px; z-index:10; box-shadow:0 6px 24px rgba(45,49,66,.10) }
+  .menu h4 { font:500 9.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; letter-spacing:.14em; text-transform:uppercase; color:var(--soft); margin:6px 4px 4px }
+  .menu label { display:flex; gap:8px; align-items:center; font-size:13px; padding:4px; border-radius:4px; cursor:pointer }
+  .menu label:hover { background:rgba(45,49,66,.05) }
+  .seg { display:flex; margin:2px 4px 6px; border:1px solid var(--rule); border-radius:4px; overflow:hidden }
+  .seg button { flex:1; font:12px system-ui,-apple-system,'Segoe UI',sans-serif; border:0; background:#fff; padding:4px 6px; cursor:pointer; color:var(--muted) }
+  .seg button.on { background:var(--ink); color:#fff }
+
+  /* graph */
+  .lane { border-top:1px dashed rgba(45,49,66,.16); pointer-events:none; position:relative }
+  .lane.lr { border-top:0; border-left:1px dashed rgba(45,49,66,.16) }
+  .lane span { position:absolute; left:0; top:8px; font:500 10px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; letter-spacing:.16em; text-transform:uppercase; color:var(--soft); white-space:nowrap }
+  .lane.lr span { left:10px; top:0 }
+  .node { width:250px; height:100%; background:#fff; border:1px solid var(--ink); border-radius:6px; padding:10px 12px 11px; cursor:pointer; transition:opacity .2s, box-shadow .2s }
+  .node.st-unchanged { border-style:dashed; border-color:var(--soft); background:#fafafa }
+  .node.on { border-color:var(--accent); box-shadow:0 0 0 3px var(--tint) }
+  .node.hit { box-shadow:0 0 0 3px rgba(46,90,168,.25); border-color:#2e5aa8 }
+  .node.fade { opacity:.25 }
+  .top { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:5px }
+  .file { font:10.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+  .st { flex:none; font:500 8.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; letter-spacing:.1em; text-transform:uppercase; padding:2px 5px; border-radius:2px; border:.8px solid var(--ink); color:var(--ink) }
+  .st.new { border-color:var(--accent); color:var(--accent); background:var(--tint) }
+  .st.unchanged { border-style:dashed; border-color:var(--soft); color:var(--soft) }
+  .name { font-weight:600; font-size:15px }
+  .sum { font-size:12.5px; line-height:1.4; color:var(--muted); margin-top:3px }
+  .badge { position:absolute; display:flex; align-items:center; gap:6px; pointer-events:all; cursor:pointer; transition:opacity .2s }
+  .badge.lr { flex-direction:column; gap:3px }
+  .badge .lbl { font:500 10px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:var(--muted); background:var(--paper); padding:1px 4px; border-radius:2px; white-space:nowrap }
+  .badge.on .lbl { color:var(--accent) }
+  .badge.fade { opacity:.25 }
+  .dchip { font:500 9.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; border:1px solid var(--rule); background:#fff; border-radius:3px; padding:1px 5px; cursor:pointer; color:var(--muted); margin-left:auto }
+  .dchip:hover { border-color:var(--ink); color:var(--ink) }
+  .dchip .a { color:#1a7f37 } .dchip .d { color:#cf222e }
+  .drawer { position:absolute; left:0; right:0; bottom:0; background:#fff; border-top:1px solid var(--ink); z-index:20; display:flex; flex-direction:column; box-shadow:0 -8px 24px rgba(45,49,66,.08) }
+  .drawer .grip { height:8px; cursor:row-resize; flex:none; display:grid; place-items:center }
+  .drawer .grip::after { content:""; width:40px; height:3px; border-radius:2px; background:var(--rule) }
+  .drawer .dhead { display:flex; align-items:center; gap:8px; padding:0 14px 8px; flex:none; flex-wrap:wrap }
+  .drawer .dhead b { font:600 14px system-ui,-apple-system,'Segoe UI',sans-serif }
+  .drawer .dhead .meta { font:11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:var(--muted) }
+  .drawer .dhead .sp { margin-left:auto }
+  .drawer .seg button { padding:3px 10px; white-space:nowrap }
+  .drawer .dhead a { font:500 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:#2e5aa8; text-decoration:none }
+  .drawer .dbody { flex:1; overflow:auto; padding:0 14px 14px }
+  .drawer .d2h-file-header { position:sticky; top:0; z-index:1 }
+  .drawer .d2h-wrapper { font-size:12px }
+  .react-flow__minimap { border:1px solid var(--rule); border-radius:6px; overflow:hidden }
+  @media (max-width:760px) { main { flex-direction:column } .split { display:none } aside { width:auto !important; border-top:1px solid var(--rule); max-height:45vh } }

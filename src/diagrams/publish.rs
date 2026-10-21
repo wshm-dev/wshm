@@ -1,0 +1,480 @@
+//! Publication of the interactive page (`[pr.review_diagrams.publish]`).
+
+use anyhow::{bail, Context, Result};
+use tracing::{info, warn};
+
+use crate::config::{DiagramPublishConfig, DiagramPublishTarget};
+use crate::db::diagrams::PrDiagramRow;
+use crate::git_provider::Forge as GhClient;
+use crate::storage::{ObjectTarget, StorageTargetConfig};
+
+/// Branch of `pages_repo` the pages are committed to.
+pub const PAGES_BRANCH: &str = "gh-pages";
+/// Pro feature gating the daemon-hosted pages (`target = "wshm"`).
+pub const HOSTING_FEATURE: &str = "diagram_hosting";
+
+pub fn target_name(t: DiagramPublishTarget) -> &'static str {
+    match t {
+        DiagramPublishTarget::Off => "off",
+        DiagramPublishTarget::Local => "local",
+        DiagramPublishTarget::GithubPages => "github-pages",
+        DiagramPublishTarget::Wshm => "wshm",
+        DiagramPublishTarget::S3 => "s3",
+        DiagramPublishTarget::Gcs => "gcs",
+        DiagramPublishTarget::Azure => "azure",
+    }
+}
+
+/// Where a page ended up.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Published {
+    pub target: &'static str,
+    pub key: String,
+    pub url: Option<String>,
+    pub token: Option<String>,
+    /// Size of the rendered page (bytes).
+    pub bytes: u64,
+}
+
+/// Path of a daemon-hosted page. Public repos: `/diagrams/...`, reachable
+/// with the token alone (exposed without the SSO proxy). Private repos:
+/// `/api/v1/diagrams/...`, behind the normal dashboard authentication.
+pub fn hosted_path(repo_slug: &str, pr: u64, token: &str, is_private: bool) -> String {
+    let (owner, name) = repo_slug.split_once('/').unwrap_or((repo_slug, ""));
+    let prefix = if is_private {
+        "/api/v1/diagrams"
+    } else {
+        "/diagrams"
+    };
+    format!("{prefix}/{owner}/{name}/{pr}?k={token}")
+}
+
+/// Does this target make the page reachable by anyone with the link?
+pub fn is_public_target(cfg: &DiagramPublishConfig) -> bool {
+    match cfg.target {
+        DiagramPublishTarget::Off | DiagramPublishTarget::Wshm => false,
+        DiagramPublishTarget::Local => cfg.public_url.is_some(),
+        _ => true,
+    }
+}
+
+fn random_token() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut b);
+    hex::encode(b)
+}
+
+/// One path segment: `[A-Za-z0-9._-]`, never `.` or `..`.
+fn segment(s: &str) -> String {
+    let s: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let s = s.trim_matches('.').to_string();
+    if s.is_empty() {
+        "x".into()
+    } else {
+        s
+    }
+}
+
+/// Object key of a page: `prefix/owner/repo/pr-N-<token>.html` (the token
+/// keeps pages from being enumerated on a public bucket or Pages site).
+pub fn page_key(prefix: &str, repo_slug: &str, pr: u64, token: &str) -> String {
+    let mut parts: Vec<String> = prefix
+        .split('/')
+        .filter(|p| !p.trim().is_empty())
+        .map(segment)
+        .collect();
+    parts.extend(repo_slug.split('/').map(segment));
+    parts.push(format!("pr-{pr}-{}.html", segment(token)));
+    parts.join("/")
+}
+
+fn join_url(base: &str, key: &str) -> String {
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        key.trim_start_matches('/')
+    )
+}
+
+/// Default Pages URL of `owner/name`.
+fn pages_url(pages_repo: &str) -> Option<String> {
+    let (owner, name) = pages_repo.split_once('/')?;
+    let host = format!("{}.github.io", owner.to_ascii_lowercase());
+    Some(if name.eq_ignore_ascii_case(&host) {
+        format!("https://{host}")
+    } else {
+        format!("https://{host}/{name}")
+    })
+}
+
+fn valid_repo_full(s: &str) -> bool {
+    let mut it = s.split('/');
+    let ok = |p: Option<&str>| {
+        p.is_some_and(|p| {
+            !p.is_empty()
+                && p != "."
+                && p != ".."
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+        })
+    };
+    ok(it.next()) && ok(it.next()) && it.next().is_none()
+}
+
+/// Object storage settings of an `s3` / `gcs` / `azure` target. The page key
+/// already carries `publish.prefix`, so the store itself has none.
+/// Credentials come from the provider's standard chain, never from here.
+pub fn storage_config(cfg: &DiagramPublishConfig) -> Option<StorageTargetConfig> {
+    let provider = match cfg.target {
+        DiagramPublishTarget::S3 => "s3",
+        DiagramPublishTarget::Gcs => "gcs",
+        DiagramPublishTarget::Azure => "azure",
+        _ => return None,
+    };
+    Some(StorageTargetConfig {
+        provider: provider.to_string(),
+        bucket: cfg.bucket.clone(),
+        prefix: None,
+        region: cfg.region.clone(),
+        endpoint: cfg.endpoint.clone(),
+        account: cfg.account.clone(),
+        container: cfg.container.clone(),
+        dir: None,
+        public_url: cfg.public_url.clone(),
+    })
+}
+
+const HTML: &str = "text/html; charset=utf-8";
+
+/// Upload a page; returns its public URL (configured `public_url`, else the
+/// provider's canonical URL; `None` for custom endpoints without one).
+pub async fn put_object(target: &ObjectTarget, key: &str, html: &str) -> Result<Option<String>> {
+    target.put(key, html.as_bytes().to_vec(), HTML).await?;
+    Ok(target.public_url(key))
+}
+
+fn github(gh: &GhClient) -> Result<&crate::github::Client> {
+    gh.as_github().with_context(|| {
+        format!(
+            "target \"github-pages\" needs the GitHub provider (this repo uses {})",
+            gh.provider_name()
+        )
+    })
+}
+
+/// Publish `html`. `Ok(None)` when the target is off, not available, refused
+/// (private repo) or skipped in dry-run; every such case is logged.
+/// `previous` lets a republish keep the same key/token, hence the same link.
+#[allow(clippy::too_many_arguments)]
+pub async fn publish(
+    cfg: &DiagramPublishConfig,
+    gh: &GhClient,
+    repo_slug: &str,
+    pr: u64,
+    html: &str,
+    is_private: bool,
+    previous: Option<&PrDiagramRow>,
+    dry_run: bool,
+) -> Result<Option<Published>> {
+    let name = target_name(cfg.target);
+    if cfg.target == DiagramPublishTarget::Off {
+        return Ok(None);
+    }
+    if is_private && is_public_target(cfg) && !cfg.allow_private {
+        warn!(
+            "PR diagram page: {repo_slug} is private (or its visibility is unknown) and target '{name}' is public — not published (set publish.allow_private = true to override)"
+        );
+        return Ok(None);
+    }
+    if dry_run && cfg.target != DiagramPublishTarget::Local {
+        info!("PR diagram page: dry-run, not published to '{name}'");
+        return Ok(None);
+    }
+
+    let same_target = previous.and_then(|p| p.page_target.as_deref()) == Some(name);
+    let token = previous
+        .filter(|_| same_target)
+        .and_then(|p| p.page_token.clone())
+        .unwrap_or_else(random_token);
+    let key = previous
+        .filter(|_| same_target)
+        .and_then(|p| p.page_key.clone())
+        .unwrap_or_else(|| page_key(&cfg.prefix, repo_slug, pr, &token));
+
+    match cfg.target {
+        DiagramPublishTarget::Local => {
+            let dir = cfg
+                .dir
+                .as_deref()
+                .filter(|d| !d.trim().is_empty())
+                .context("publish.dir is required for target = \"local\"")?;
+            let path = std::path::Path::new(dir).join(&key);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            std::fs::write(&path, html).with_context(|| format!("writing {}", path.display()))?;
+            info!("PR diagram page written to {}", path.display());
+            Ok(Some(Published {
+                target: name,
+                url: cfg.public_url.as_deref().map(|u| join_url(u, &key)),
+                key,
+                token: Some(token),
+                bytes: html.len() as u64,
+            }))
+        }
+        DiagramPublishTarget::GithubPages => {
+            let repo = cfg
+                .pages_repo
+                .as_deref()
+                .filter(|r| valid_repo_full(r))
+                .context(
+                    "publish.pages_repo (owner/repo) is required for target = \"github-pages\"",
+                )?;
+            github(gh)?
+                .put_file_content(
+                    repo,
+                    PAGES_BRANCH,
+                    &key,
+                    html.as_bytes(),
+                    &format!("wshm: architecture page for {repo_slug}#{pr}"),
+                )
+                .await?;
+            let base = cfg.public_url.clone().or_else(|| pages_url(repo));
+            info!("PR diagram page committed to {repo}@{PAGES_BRANCH}:{key}");
+            Ok(Some(Published {
+                target: name,
+                url: base.map(|b| join_url(&b, &key)),
+                key,
+                token: Some(token),
+                bytes: html.len() as u64,
+            }))
+        }
+        DiagramPublishTarget::Wshm => {
+            if !crate::pro_hooks::has_feature(HOSTING_FEATURE) {
+                warn!(
+                    "PR diagram page: target 'wshm' needs the Pro feature '{HOSTING_FEATURE}' — page not published"
+                );
+                return Ok(None);
+            }
+            let base = cfg
+                .public_url
+                .as_deref()
+                .filter(|u| !u.trim().is_empty())
+                .context(
+                "publish.public_url (the daemon's external URL) is required for target = \"wshm\"",
+            )?;
+            // Nothing stored: the daemon renders the page on request from the
+            // cached graph (and a fresh diff), so the DB stays small.
+            Ok(Some(Published {
+                target: name,
+                url: Some(format!(
+                    "{}{}",
+                    base.trim_end_matches('/'),
+                    hosted_path(repo_slug, pr, &token, is_private)
+                )),
+                key: format!("db:{repo_slug}#{pr}"),
+                token: Some(token),
+                bytes: html.len() as u64,
+            }))
+        }
+        DiagramPublishTarget::S3 | DiagramPublishTarget::Gcs | DiagramPublishTarget::Azure => {
+            let target =
+                ObjectTarget::from_config(&storage_config(cfg).expect("object storage target"))?;
+            let url = put_object(&target, &key, html).await?;
+            info!("PR diagram page uploaded to {name}:{key}");
+            if url.is_none() {
+                warn!("PR diagram page: no public URL for {name} (set publish.public_url), no link in the comment");
+            }
+            Ok(Some(Published {
+                target: name,
+                url,
+                key,
+                token: Some(token),
+                bytes: html.len() as u64,
+            }))
+        }
+        DiagramPublishTarget::Off => Ok(None),
+    }
+}
+
+/// Remove a published page (best effort for remote targets). The DB row is
+/// the caller's business.
+pub async fn delete_page(
+    cfg: &DiagramPublishConfig,
+    gh: &GhClient,
+    row: &PrDiagramRow,
+) -> Result<()> {
+    let (Some(target), Some(key)) = (row.page_target.as_deref(), row.page_key.as_deref()) else {
+        return Ok(());
+    };
+    match target {
+        "local" => {
+            let Some(dir) = cfg.dir.as_deref() else {
+                warn!("PR diagram page {key}: publish.dir no longer set, local file left in place");
+                return Ok(());
+            };
+            if key.split('/').any(|s| s == ".." || s.is_empty()) {
+                bail!("refusing to delete suspicious key {key}");
+            }
+            match std::fs::remove_file(std::path::Path::new(dir).join(key)) {
+                Ok(()) => info!("Deleted PR diagram page {dir}/{key}"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).context("deleting local diagram page"),
+            }
+        }
+        "github-pages" => {
+            let Some(repo) = cfg.pages_repo.as_deref().filter(|r| valid_repo_full(r)) else {
+                warn!(
+                    "PR diagram page {key}: publish.pages_repo no longer set, page left in place"
+                );
+                return Ok(());
+            };
+            if github(gh)?
+                .delete_file_content(repo, PAGES_BRANCH, key, "wshm: remove architecture page")
+                .await?
+            {
+                info!("Deleted PR diagram page {repo}@{PAGES_BRANCH}:{key}");
+            }
+        }
+        "s3" | "gcs" | "azure" => {
+            // The current settings must still point at that store.
+            let Some(sc) = storage_config(cfg).filter(|c| c.provider == target) else {
+                warn!("PR diagram page {key}: publish target is no longer '{target}', object left in place");
+                return Ok(());
+            };
+            ObjectTarget::from_config(&sc)?.delete(key).await?;
+            info!("Deleted PR diagram page {target}:{key}");
+        }
+        // `wshm`: rendered on request, nothing stored besides the row.
+        _ => {}
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keys_are_sanitized_paths() {
+        assert_eq!(
+            page_key("wshm-diagrams", "rtk-ai/rtk", 4544, "ab12"),
+            "wshm-diagrams/rtk-ai/rtk/pr-4544-ab12.html"
+        );
+        assert_eq!(
+            page_key("../../etc/ /x y", "o/../r", 1, "t"),
+            "x/x/etc/x-y/o/x/r/pr-1-t.html"
+        );
+    }
+
+    #[test]
+    fn pages_url_handles_user_sites() {
+        assert_eq!(
+            pages_url("Acme/diagrams").unwrap(),
+            "https://acme.github.io/diagrams"
+        );
+        assert_eq!(
+            pages_url("acme/acme.github.io").unwrap(),
+            "https://acme.github.io"
+        );
+        assert!(pages_url("nope").is_none());
+    }
+
+    #[test]
+    fn public_targets() {
+        let mut c = DiagramPublishConfig::default();
+        assert!(!is_public_target(&c));
+        c.target = DiagramPublishTarget::Local;
+        assert!(!is_public_target(&c));
+        c.public_url = Some("https://x".into());
+        assert!(is_public_target(&c));
+        c.target = DiagramPublishTarget::GithubPages;
+        assert!(is_public_target(&c));
+        c.target = DiagramPublishTarget::Wshm;
+        assert!(
+            !is_public_target(&c),
+            "wshm guards private repos with a session"
+        );
+    }
+
+    #[test]
+    fn hosted_paths_split_public_and_private() {
+        assert_eq!(hosted_path("o/r", 3, "t", false), "/diagrams/o/r/3?k=t");
+        assert_eq!(
+            hosted_path("o/r", 3, "t", true),
+            "/api/v1/diagrams/o/r/3?k=t"
+        );
+    }
+
+    #[test]
+    fn object_storage_settings_map_to_the_store() {
+        let cfg = DiagramPublishConfig {
+            target: DiagramPublishTarget::S3,
+            prefix: "pages".into(),
+            bucket: Some("b".into()),
+            region: Some("eu-west-3".into()),
+            endpoint: Some("https://s3.example".into()),
+            public_url: Some("https://cdn.example".into()),
+            ..Default::default()
+        };
+        let sc = storage_config(&cfg).unwrap();
+        assert_eq!(sc.provider, "s3");
+        assert_eq!(sc.bucket.as_deref(), Some("b"));
+        assert_eq!(sc.prefix, None, "the page key already has the prefix");
+        assert_eq!(sc.public_url.as_deref(), Some("https://cdn.example"));
+        let azure = DiagramPublishConfig {
+            target: DiagramPublishTarget::Azure,
+            account: Some("acct".into()),
+            container: Some("c".into()),
+            ..Default::default()
+        };
+        let sc = storage_config(&azure).unwrap();
+        assert_eq!(
+            (
+                sc.provider.as_str(),
+                sc.account.as_deref(),
+                sc.container.as_deref()
+            ),
+            ("azure", Some("acct"), Some("c"))
+        );
+        assert!(storage_config(&DiagramPublishConfig::default()).is_none());
+    }
+
+    #[tokio::test]
+    async fn pages_go_to_the_object_store_and_back_out() {
+        let store = std::sync::Arc::new(object_store::memory::InMemory::new());
+        let target = ObjectTarget::from_store(store, "s3", "", Some("https://cdn.example/"));
+        let key = page_key("wshm-diagrams", "o/r", 7, "abc");
+        let url = put_object(&target, &key, "<html>x</html>").await.unwrap();
+        assert_eq!(
+            url.as_deref(),
+            Some("https://cdn.example/wshm-diagrams/o/r/pr-7-abc.html")
+        );
+        let (body, ct) = target.get_with_content_type(&key).await.unwrap();
+        assert_eq!(body, b"<html>x</html>");
+        assert_eq!(ct.as_deref(), Some("text/html; charset=utf-8"));
+        target.delete(&key).await.unwrap();
+        assert!(target.get_with_content_type(&key).await.is_err());
+        // Keys the store would reject never reach it.
+        assert!(put_object(&target, "a/../b.html", "x").await.is_err());
+    }
+
+    #[test]
+    fn repo_full_validation() {
+        assert!(valid_repo_full("a/b.c"));
+        assert!(!valid_repo_full("a"));
+        assert!(!valid_repo_full("a/b/c"));
+        assert!(!valid_repo_full("../b"));
+    }
+}

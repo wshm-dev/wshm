@@ -48,6 +48,44 @@ enabled = true
 auto_label = true
 risk_labels = true                # add risk:low / risk:medium / risk:high
 
+# Architecture diagram in the PR analysis comment (Mermaid, inserted before
+# the review checklist). One extra AI call per new diff, cached per PR.
+# Every key can be overridden per repo in Settings → Diagrams (stored in
+# the DB, so all pods share it): DB > this file > defaults.
+[pr.review_diagrams]
+enabled = true
+kinds = ["architecture"]          # only "architecture" is implemented
+text = "short"                    # short | normal | full
+language = "en"                   # language of the diagram texts
+comment = "mermaid"               # mermaid | none (link to the page only)
+diff_viewer = true                # embed the diff in the interactive page
+active_days = 14                  # skip PRs idle for longer (0 = no limit); a push re-enables
+max_mermaid_chars = 5000          # Mermaid size cap (Forgejo/Gitea default limit)
+timeout_secs = 120                # budget of the diagram step (runs after the comment is posted)
+max_summary_calls = 3             # per-file summary calls for diffs > 40 KB
+
+# Interactive page (React Flow viewer), deleted when the PR is closed.
+# Destinations (dir, pages_repo, bucket, region, endpoint, account,
+# container, public_url) and allow_private are TOML-only: the per-repo
+# override from the dashboard can only choose `target` and the caps.
+[pr.review_diagrams.publish]
+target = "off"                    # off | local | github-pages | wshm (Pro) | s3 | gcs | azure
+# s3/gcs/azure: bucket / region / endpoint (S3, GCS) or account / container
+# (Azure), objects uploaded as text/html; needs a build with the matching
+# storage-s3 / storage-gcs / storage-azure feature. Credentials come from the
+# provider's standard chain (env, workload identity), never from this file.
+# prefix = "wshm-diagrams"
+# public_url = "https://diagrams.example.com"  # link = public_url/<key>; for wshm: the daemon URL
+# dir = "/var/www/diagrams"       # local (TOML only, not in the per-repo override)
+# pages_repo = "owner/diagrams"   # github-pages: commits to its gh-pages branch (TOML only).
+#                                 # If this repo is public, its tree and git history list
+#                                 # every page: the random token in the file name does not
+#                                 # prevent enumeration there.
+# retention_days = 30             # delete pages idle for longer (0 = until the PR closes)
+# max_pages = 200                 # per repo, least recently updated pages evicted first
+# max_diff_kb = 1024              # bigger diffs: the viewer links to "Files changed"
+# allow_private = false           # public targets are refused for private repos (TOML only)
+
 [queue]
 enabled = true
 merge_threshold = 15              # minimum score to auto-merge
@@ -100,10 +138,22 @@ full_sync_interval_hours = 24
 # url = "https://outlook.office.com/webhook/YOUR/URL"
 
 [export]
-# [export.storage]
-# provider = "s3"                 # s3, azure, gcs (Pro)
-# bucket = "wshm-events"
-# region = "eu-west-1"
+# [export.storage]                # one JSON object per event: <prefix>/YYYY/MM/DD/<Kind>-<ms>.json
+# provider = "s3"                 # s3, gcs, azure, local (Pro)
+# bucket = "wshm-events"          # s3 / gcs
+# prefix = "wshm/events"
+# region = "eu-west-1"             # s3
+# endpoint = "https://s3.gra.io.cloud.ovh.net"  # S3-compatible (MinIO, OVH, Scaleway...)
+# account = "mystorageacct"        # azure (or AZURE_STORAGE_ACCOUNT_NAME)
+# container = "wshm-events"        # azure
+# dir = "/var/lib/wshm/events"     # local
+# Credentials are never set here: AWS_* / instance role, GOOGLE_APPLICATION_CREDENTIALS /
+# workload identity, AZURE_STORAGE_* / managed identity.
+# public_url = "https://cdn.example.com"  # required for links with a custom endpoint
+#   (config or env AWS_ENDPOINT*, GOOGLE_BASE_URL, AZURE_STORAGE_ENDPOINT / _USE_EMULATOR)
+# S3 credentials: env, web identity, ECS or instance role only (no AWS_PROFILE / ~/.aws/config / SSO).
+# A misconfigured sink (missing bucket, invalid prefix...) is logged as an error and skipped;
+# wshm still starts.
 #
 # [export.database]
 # provider = "elastic"            # elastic, opensearch, postgres, mongodb, mysql (Pro)

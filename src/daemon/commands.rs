@@ -18,8 +18,8 @@ use tracing::info;
 
 use crate::cli::{PrArgs, TriageArgs};
 use crate::config::Config;
+use crate::git_provider::Forge as GhClient;
 use crate::github::sync as gh_sync;
-use crate::github::Client as GhClient;
 use crate::pipelines;
 use crate::pro_hooks;
 
@@ -181,7 +181,22 @@ pub async fn execute(
                 pr: Some(number),
                 apply,
             };
-            pipelines::pr_analysis::run(config, db, gh, &args, false, None).await?;
+            // Slash command inside the daemon: no stdout preview, and no
+            // diagram generation in the command's task (a cached diagram is
+            // kept; the next push regenerates it in the background).
+            pipelines::pr_analysis::run_with(
+                config,
+                db,
+                gh,
+                &args,
+                false,
+                None,
+                pipelines::pr_analysis::RunOptions {
+                    preview: false,
+                    diagrams: pipelines::pr_analysis::DiagramMode::Skip,
+                },
+            )
+            .await?;
             Ok(format!(
                 "Re-analyzed PR #{number}. {}",
                 if apply {
@@ -229,7 +244,11 @@ pub async fn execute(
         SlashCommand::Unlabel(label) => {
             info!("Slash command: unlabel #{number} '{label}'");
             if apply {
-                gh.remove_label(number, label).await?;
+                if is_pr {
+                    gh.remove_pr_label(number, label).await?;
+                } else {
+                    gh.remove_label(number, label).await?;
+                }
                 Ok(format!("Removed label `{label}` from #{number}."))
             } else {
                 Ok(format!(

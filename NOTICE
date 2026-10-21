@@ -7,3 +7,9 @@ Licensed under the Apache License, Version 2.0. See LICENSE.
 
 "wshm" and the wshm logo are trademarks of wshm-dev; the Apache License
 does not grant permission to use them (see Section 6 of the License).
+
+The PR diagram viewer (src/diagrams/assets, built from web/diagram-viewer)
+bundles: React and React DOM 19.1.0 (MIT, Meta Platforms), @xyflow/react
+12.12.0 (MIT, webkid GmbH), @dagrejs/dagre 1.1.4 (MIT), htm 3.1.1
+(Apache-2.0, Google), diff2html 3.4.56 (MIT, Rodrigo Fernandes) and
+highlight.js 11.11.1 (BSD-3-Clause), with their dependencies.

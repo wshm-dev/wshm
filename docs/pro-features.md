@@ -27,6 +27,21 @@ wshm review --pr 42 --apply
 
 ---
 
+## Hosted PR Diagrams
+
+With `[pr.review_diagrams.publish] target = "wshm"` (license feature
+`diagram_hosting`), the daemon serves the interactive architecture page of
+each PR at `<public_url>/diagrams/<owner>/<repo>/<pr>?k=<token>`. Only the
+graph is kept in the database: the page is rendered on request, with the
+diff fetched from the forge (small in-memory cache) and embedded up to
+`max_diff_kb`. Responses carry an ETag and a short `Cache-Control`, and a strict CSP: the viewer's JS/CSS are vendored in the binary and served from `/diagrams/_assets/` (no CDN, no inline script, no web font). Files published to other targets inline the same assets. The
+token is random per PR and is the only credential on `/diagrams/` (the
+path can be exposed without the SSO proxy; proxy identity headers are
+ignored there). Pages of private repos are linked under
+`/api/v1/diagrams/...`, behind the dashboard authentication. Pages are
+removed when the PR is closed or merged, after `retention_days` without
+update, or beyond `max_pages`. See `docs/configuration.md`.
+
 ## Auto-Fix
 
 Automatically generate fix PRs from issue descriptions.
