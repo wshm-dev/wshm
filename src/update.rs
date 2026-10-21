@@ -243,7 +243,7 @@ fn extract_from_zip(binary_name: &str, archive_data: &[u8]) -> Result<Vec<u8>> {
     let exe_name = format!("{binary_name}.exe");
     for i in 0..zip.len() {
         let mut file = zip.by_index(i)?;
-        let file_name = file.name().to_string();
+        let file_name = file.name()?.to_string();
         if file_name.ends_with(&exe_name) || file_name == binary_name {
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)?;
@@ -553,5 +553,24 @@ mod tests {
             hash,
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
         );
+    }
+
+    #[test]
+    fn extract_from_zip_finds_the_binary() {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            w.start_file("README.txt", opts).unwrap();
+            w.write_all(b"readme").unwrap();
+            w.start_file("wshm.exe", opts).unwrap();
+            w.write_all(b"binary-bytes").unwrap();
+            w.finish().unwrap();
+        }
+        let out = extract_from_zip("wshm", buf.get_ref()).unwrap();
+        assert_eq!(out, b"binary-bytes");
+        assert!(extract_from_zip("other", buf.get_ref()).is_err());
     }
 }
