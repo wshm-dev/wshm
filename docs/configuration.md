@@ -59,7 +59,7 @@ trusted_authors = []              # trusted in addition to repository collaborat
 #   rendering).
 #
 # Slash command: `/wshm fix` refuses a flagged or suspicious issue; a
-# maintainer can override with `/wshm fix --force`.
+# maintainer can override with `/wshm fix --force` (CLI: `wshm fix --force`).
 #
 # Always on, not configurable:
 # - issue/PR text, diffs, file paths, files, retrieved history and memory are
