@@ -265,7 +265,7 @@ impl Step for TriageStep {
     }
 }
 
-/// `review`: the inline code review (Pro hook). Computed and stored always;
+/// `review`: the inline code review. Computed and stored always;
 /// posted only when apply mode and `review_post_comments` are both on (a
 /// slash command posts in apply mode, as before).
 pub struct ReviewStep;
@@ -281,7 +281,7 @@ impl Step for ReviewStep {
     }
 
     async fn run(&self, ctx: &RunContext, _def: &StepDef) -> anyhow::Result<StepOutput> {
-        use crate::pro_hooks::ReviewOutcome;
+        use crate::pipelines::review::ReviewOutcome;
         let Some(n) = ctx.item.number else {
             return Ok(StepOutput::skipped("no PR number"));
         };
@@ -294,13 +294,12 @@ impl Step for ReviewStep {
                 .await
                 .inspect_err(|e| warn!("Review failed for PR #{n}: {e:#}"))?;
         match outcome {
-            None => Ok(StepOutput::skipped("inline review requires wshm Pro")),
-            Some(ReviewOutcome::Skipped(reason)) => Ok(StepOutput::skipped(reason)),
-            Some(ReviewOutcome::Failed(e)) => {
+            ReviewOutcome::Skipped(reason) => Ok(StepOutput::skipped(reason)),
+            ReviewOutcome::Failed(e) => {
                 warn!("Review failed for PR #{n}: {e}");
                 anyhow::bail!("review failed: {e}")
             }
-            Some(ReviewOutcome::Reviewed { comments, posted }) => {
+            ReviewOutcome::Reviewed { comments, posted } => {
                 let posted = if posted { "posted" } else { "not posted" };
                 Ok(StepOutput::done(format!("{comments} comment(s), {posted}"))
                     .with_findings(comments))
