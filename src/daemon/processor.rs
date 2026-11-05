@@ -196,6 +196,25 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
     let number = event.number;
     info!("Handling issue event: number={number:?}");
 
+    // A collaborator's approval label (#235): recorded bound to the content
+    // of the event, then the triage re-runs once for it.
+    let approved = event.action == "labeled"
+        && match serde_json::from_str::<serde_json::Value>(&event.payload) {
+            Ok(p) => crate::ai::guard::on_issue_labeled(
+                &state.config,
+                state.db.as_ref(),
+                &*state.gh(),
+                &p,
+            )
+            .await
+            .is_some(),
+            Err(_) => false,
+        };
+
+    if event.action == "labeled" && !approved {
+        return Ok(());
+    }
+
     // Skip if already triaged (prevents AI credit exhaustion via issue spam)
     if let Some(n) = number {
         if state.config.issues_blacklist.contains(&n) {
@@ -203,11 +222,11 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
             return Ok(());
         }
         match state.db.is_triaged(n) {
-            Ok(true) => {
+            Ok(true) if !approved => {
                 info!("Issue #{n} already triaged, skipping");
                 return Ok(());
             }
-            Ok(false) => {}
+            Ok(_) => {}
             Err(e) => {
                 // A transient DB/IO error must NOT fall through to a
                 // re-triage: that would burn AI credits on every error.
@@ -310,9 +329,11 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
     )
     .await?;
 
-    // Store in ICM if enabled
+    // Store in ICM if enabled (never a flagged item: memory feeds prompts)
     if state.config.daemon.icm_enabled {
-        if let Some(n) = number {
+        if let Some(n) =
+            number.filter(|n| !crate::ai::guard::is_flagged(state.db.as_ref(), "issue", *n))
+        {
             if let Ok(Some(triage)) = state.db.get_triage_result(n) {
                 memory::store_triage(
                     &state.config,
@@ -508,9 +529,11 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
         );
     }
 
-    // Store in ICM if enabled
+    // Store in ICM if enabled (never a flagged PR: memory feeds prompts)
     if state.config.daemon.icm_enabled {
-        if let Some(n) = number {
+        if let Some(n) =
+            number.filter(|n| !crate::ai::guard::is_flagged(state.db.as_ref(), "pull", *n))
+        {
             if let Ok(Some(analysis)) = state.db.get_pr_analysis(n) {
                 memory::store_pr_analysis(
                     &state.config,

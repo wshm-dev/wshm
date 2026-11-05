@@ -66,12 +66,13 @@ pub fn build_file_prompt(
         file_diff.to_string()
     };
 
-    // The path comes from the diff (chosen by the PR author): quoted and
-    // escaped wherever it appears outside a block.
+    // The path comes from the diff (chosen by the PR author): it only
+    // appears inside a block, and is scanned like the rest.
     format!(
-        "{}\n## File: {file_path:?}\n\n{}\n\
-         Review ONLY this file. Use the exact path {file_path:?} in your comments.",
+        "{}\n## File:\n{}\n{}\n\
+         Review ONLY this file. In your comments, use exactly the path given in the file path block.",
         pr_block(pr_title, pr_body),
+        crate::ai::untrusted::wrap_text("file path", file_path),
         crate::ai::untrusted::wrap_code("pull request diff", &truncated),
     )
 }

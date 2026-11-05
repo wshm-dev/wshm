@@ -9,6 +9,9 @@ use crate::config::Config;
 pub enum AiBackend {
     Remote(AiClient),
     Local(LocalClient),
+    /// Canned JSON response (tests only).
+    #[cfg(test)]
+    Mock(String),
 }
 
 impl AiBackend {
@@ -29,6 +32,11 @@ impl AiBackend {
         match self {
             AiBackend::Remote(ai) => ai.complete(&system, user).await,
             AiBackend::Local(local) => local.complete(&system, user),
+            #[cfg(test)]
+            AiBackend::Mock(raw) => {
+                let _ = (system, user);
+                Ok(serde_json::from_str(raw)?)
+            }
         }
     }
 }

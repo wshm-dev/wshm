@@ -13,6 +13,8 @@ pub mod gitlab;
 pub(crate) mod http;
 #[cfg(test)]
 pub(crate) mod mock;
+#[cfg(test)]
+pub(crate) mod recording;
 
 use std::collections::HashMap;
 use std::sync::Arc;

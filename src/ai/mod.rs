@@ -1,7 +1,9 @@
 pub mod backend;
 pub mod client;
+pub mod diff;
 pub mod guard;
 pub mod local;
+pub mod markdown;
 pub mod output;
 pub mod prompts;
 pub mod related;

@@ -18,6 +18,11 @@ pub fn is_available() -> bool {
 /// Recall relevant context from ICM, formatted for prompt injection.
 /// Returns empty string if ICM is not available or recall fails.
 pub fn recall_context(query: &str, limit: usize) -> String {
+    // Unit tests never read the developer's real memory store.
+    if cfg!(test) {
+        let _ = (query, limit);
+        return String::new();
+    }
     let output = std::process::Command::new("icm")
         .args(["recall-context", query, "--limit", &limit.to_string()])
         .output();
@@ -46,6 +51,11 @@ pub fn recall_context(query: &str, limit: usize) -> String {
 
 /// Store a memory in ICM.
 pub fn store(topic: &str, content: &str, importance: &str, keywords: &[&str]) {
+    // Unit tests never write to the developer's real memory store.
+    if cfg!(test) {
+        let _ = (topic, content, importance, keywords);
+        return;
+    }
     let mut cmd = std::process::Command::new("icm");
     cmd.args(["store", "-t", topic, "-c", content, "-i", importance]);
 

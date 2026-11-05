@@ -23,51 +23,101 @@ use crate::ai::schemas::{InlineComment, InlineReviewResult, IssueClassification,
 
 static RE_HTML_COMMENT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)<!--.*?(?:-->|$)").unwrap());
-static RE_HTML_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"</?[A-Za-z!][^<>]*>").unwrap());
-static RE_MD_IMAGE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"!\[([^\]\n]*)\]\([^)\n]*\)").unwrap());
+// `[text](target)` and `![alt](target)`, also split across lines.
 static RE_MD_LINK: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[([^\]\n]*)\]\([^)\n]*\)").unwrap());
-static RE_MD_REFDEF: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)^[ \t]{0,3}\[[^\]\n]+\]:[^\n]*$").unwrap());
+    LazyLock::new(|| Regex::new(r"(?s)!?\[([^\]]*)\]\s*\(([^)]*)\)").unwrap());
+// Reference definitions, also inside quotes and list items.
+static RE_MD_REFDEF: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^[ \t]*(?:(?:>|[-*+]|\d+[.)])[ \t]*)*\[[^\]\n]+\]:[^\n]*$").unwrap()
+});
 static RE_MD_REFLINK: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[([^\]\n]+)\]\[[^\]\n]*\]").unwrap());
+    LazyLock::new(|| Regex::new(r"!?\[([^\]\n]+)\]\[[^\]\n]*\]").unwrap());
 static RE_URL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?:https?|ftp|file|ssh|git)://\S+|\bwww\.[a-z0-9-]+\.\S+").unwrap()
+    Regex::new(
+        r"(?i)\b(?:https?|ftp|file|ssh|git|ws|wss)\s*:\s*//\S+|(?:^|[\s(<\x22'])//[a-z0-9-]+(?:\.[a-z0-9-]+)+\S*|\bwww\.[a-z0-9-]+\.\S+",
+    )
+    .unwrap()
 });
 static RE_SCHEME: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(?:javascript|vbscript|data):").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:javascript|vbscript|data)\s*:").unwrap());
 static RE_MENTION: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(^|[^A-Za-z0-9_`])@([A-Za-z0-9][A-Za-z0-9_/.-]*)").unwrap());
+    LazyLock::new(|| Regex::new(r"(^|[^A-Za-z0-9_])@([A-Za-z0-9][A-Za-z0-9_/.-]*)").unwrap());
+// `@` written as an entity: `&#64;`, `&#x40;`, `&commat;`.
+static RE_AT_ENTITY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)&(?:#0*64|#x0*40|commat);?").unwrap());
 
-/// Neutralise `@user` / `@org/team` mentions (a zero-width space after the
-/// `@` keeps the text readable but does not notify anyone).
-pub fn neutralize_mentions(s: &str) -> String {
-    RE_MENTION.replace_all(s, "$1@\u{200B}$2").into_owned()
+/// Obvious secret shapes, redacted from posted AI text (defence in depth:
+/// the model should never see secrets, but if it echoes one it is not
+/// published).
+static RE_SECRET: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)",
+        r"|\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}",
+        r"|\bgithub_pat_[A-Za-z0-9_]{20,}",
+        r"|\bglpat-[A-Za-z0-9_-]{20,}",
+        r"|\bsk-ant-[A-Za-z0-9_-]{20,}",
+        r"|\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}",
+        r"|\bxox[abposr]-[A-Za-z0-9-]{10,}",
+        r"|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
+        r"|\bAIza[0-9A-Za-z_-]{35}\b",
+        r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+        r"|(?i:\b(?:api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*['\x22]?)[A-Za-z0-9_\-/+=.]{16,}",
+    ))
+    .unwrap()
+});
+
+/// Redact secret-looking strings.
+pub fn redact_secrets(s: &str) -> String {
+    RE_SECRET.replace_all(s, "[secret removed]").into_owned()
 }
 
-/// Make AI-written text safe to post on the forge: invisible characters,
-/// HTML (tags and comments), links (Markdown, reference-style, bare URLs,
-/// dangerous schemes) and mentions are removed or neutralised, then the
-/// text is capped at `max_chars` characters.
-pub fn sanitize_posted_text(s: &str, max_chars: usize) -> String {
-    let mut out = crate::ai::untrusted::normalize(s, crate::ai::untrusted::ContentKind::Code);
-    // `normalize` prefixes notes when it removed something: not wanted in
-    // posted text.
-    out = out
-        .lines()
-        .filter(|l| !l.starts_with("[wshm: "))
-        .collect::<Vec<_>>()
-        .join("\n");
-    out = RE_HTML_COMMENT.replace_all(&out, "").into_owned();
-    out = RE_HTML_TAG.replace_all(&out, "").into_owned();
-    out = RE_MD_IMAGE.replace_all(&out, "$1").into_owned();
+/// Neutralise `@user` / `@org/team` mentions (a zero-width space after the
+/// `@` keeps the text readable but does not notify anyone). Entity-encoded
+/// `@` is decoded first so it cannot slip through.
+pub fn neutralize_mentions(s: &str) -> String {
+    let s = RE_AT_ENTITY.replace_all(s, "@");
+    RE_MENTION.replace_all(&s, "$1@\u{200B}$2").into_owned()
+}
+
+/// Escape HTML in prose: `<` becomes `&lt;`, so no tag can render and the
+/// forge shows it as text (nothing is deleted; `>` stays, it is harmless
+/// alone and starts Markdown quotes).
+fn escape_html(s: &str) -> String {
+    s.replace('<', "&lt;")
+}
+
+fn sanitize_prose(p: &str) -> String {
+    let mut out = RE_HTML_COMMENT.replace_all(p, "").into_owned();
     out = RE_MD_LINK.replace_all(&out, "$1").into_owned();
     out = RE_MD_REFDEF.replace_all(&out, "").into_owned();
     out = RE_MD_REFLINK.replace_all(&out, "$1").into_owned();
-    out = RE_URL.replace_all(&out, "[link removed]").into_owned();
+    out = RE_URL
+        .replace_all(&out, |c: &regex::Captures| {
+            // Keep the separator a protocol-relative match started with.
+            let m = &c[0];
+            let lead: String = m
+                .chars()
+                .take_while(|ch| !ch.is_alphanumeric() && *ch != '/')
+                .collect();
+            format!("{lead}[link removed]")
+        })
+        .into_owned();
     out = RE_SCHEME.replace_all(&out, "").into_owned();
     out = neutralize_mentions(&out);
+    escape_html(&out)
+}
+
+/// Make AI-written text safe to post on the forge. Prose loses HTML
+/// comments, links (Markdown, split, reference-style, bare, protocol-relative,
+/// dangerous schemes) and mentions; remaining HTML is escaped, not deleted.
+/// Code spans and fenced blocks are kept verbatim (`Vec<String>`, `a<b`):
+/// the forge renders them as text, links and mentions do not fire there.
+/// Invisible characters and secret-looking strings are removed everywhere.
+/// The result is capped at `max_chars` characters.
+pub fn sanitize_posted_text(s: &str, max_chars: usize) -> String {
+    let s = crate::ai::untrusted::strip_invisible_text(s);
+    let s = redact_secrets(&s);
+    let out = crate::ai::markdown::map_prose(&s, sanitize_prose);
     let out = out.trim();
     if out.chars().count() <= max_chars {
         out.to_string()
@@ -103,9 +153,8 @@ pub fn is_slug(s: &str) -> bool {
 
 // ── Labels ──────────────────────────────────────────────────────────
 
-/// Labels listed in the default triage prompt. Used as the allowlist (with
-/// the labels already used in the repository) when no `[[labels]]` are
-/// configured.
+/// Labels listed in the default triage prompt: the allowlist when no
+/// `[[labels]]` are configured.
 pub const STANDARD_LABELS: &[&str] = &[
     "bug",
     "enhancement",
@@ -137,53 +186,121 @@ pub const STANDARD_LABELS: &[&str] = &[
     "platform:macos",
 ];
 
+/// Whether `label` looks like a CI, merge or deploy trigger (bots act on
+/// these: `ok-to-test`, `automerge`, `lgtm`, `run-ci`, ...). The model may
+/// never apply one to a PR, and only an explicitly configured one to an
+/// issue.
+pub fn is_trigger_label(label: &str) -> bool {
+    let l = label.trim().to_lowercase().replace([' ', '_'], "-");
+    const EXACT: &[&str] = &[
+        "ok-to-test",
+        "safe-to-test",
+        "automerge",
+        "auto-merge",
+        "autosquash",
+        "auto-squash",
+        "lgtm",
+        "approved",
+        "approve",
+        "merge",
+        "ready-to-merge",
+        "merge-when-ready",
+        "mergeable",
+        "ship-it",
+        "shipit",
+        "run-ci",
+        "ci",
+        "skip-ci",
+        "ci-skip",
+        "deploy",
+        "release",
+        "publish",
+        "trusted",
+        "safe",
+        "verified",
+    ];
+    EXACT.contains(&l.as_str())
+        || l.ends_with("-to-test")
+        || l.ends_with("-to-merge")
+        || l.starts_with("run-")
+        || l.starts_with("ci:")
+        || l.starts_with("ci/")
+        || l.starts_with("deploy")
+        || l.starts_with("merge")
+        || l.starts_with("automerge")
+        || l.starts_with("auto-merge")
+        || l.starts_with("kokoro:")
+        || l.starts_with("approved")
+}
+
+/// Where a label would be applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabelTarget {
+    Issue,
+    PullRequest,
+}
+
 /// Which labels the model may apply.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LabelPolicy {
     /// Lowercased allowed names.
     allowed: HashSet<String>,
+    /// The allowlist comes from `[[labels]]` (explicit).
+    configured: bool,
     /// Lowercased names the model may never apply (approval label, markers).
     forbidden: HashSet<String>,
+    target: LabelTarget,
+}
+
+impl Default for LabelPolicy {
+    fn default() -> Self {
+        Self::new(std::iter::empty(), std::iter::empty(), LabelTarget::Issue)
+    }
 }
 
 impl LabelPolicy {
-    /// `configured`: the `[[labels]]` names (exclusive when non-empty).
-    /// `existing`: labels already used in the repository.
+    /// `configured`: the `[[labels]]` names (exclusive when non-empty); else
+    /// [`STANDARD_LABELS`]. Labels merely present in the repository are not
+    /// allowed: a CI or merge trigger could be among them.
     pub fn new<'a>(
         configured: impl IntoIterator<Item = &'a str>,
-        existing: impl IntoIterator<Item = &'a str>,
         forbidden: impl IntoIterator<Item = &'a str>,
+        target: LabelTarget,
     ) -> Self {
         let configured: HashSet<String> = configured.into_iter().map(str::to_lowercase).collect();
-        let allowed = if configured.is_empty() {
-            STANDARD_LABELS
-                .iter()
-                .copied()
-                .chain(existing)
-                .map(str::to_lowercase)
-                .collect()
-        } else {
+        let is_configured = !configured.is_empty();
+        let allowed = if is_configured {
             configured
+        } else {
+            STANDARD_LABELS.iter().map(|s| s.to_string()).collect()
         };
         Self {
             allowed,
+            configured: is_configured,
             forbidden: forbidden
                 .into_iter()
                 .map(str::to_lowercase)
                 .filter(|s| !s.is_empty())
                 .collect(),
+            target,
         }
     }
 
     pub fn allows(&self, label: &str) -> bool {
         let l = label.trim().to_lowercase();
-        !l.is_empty()
-            && !self.forbidden.contains(&l)
+        if l.is_empty()
+            || self.forbidden.contains(&l)
             // Domain labels are applied by wshm only for validated domains;
             // `wshm:` labels are control markers set by maintainers.
-            && !l.starts_with("domain:")
-            && !l.starts_with("wshm:")
-            && self.allowed.contains(&l)
+            || l.starts_with("domain:")
+            || l.starts_with("wshm:")
+            || !self.allowed.contains(&l)
+        {
+            return false;
+        }
+        // CI/merge triggers: never on a PR; on an issue only when the
+        // maintainers listed it explicitly.
+        !is_trigger_label(&l) || (self.target == LabelTarget::Issue && self.configured)
     }
 
     /// Keep allowed labels (deduplicated, original spelling of the first
@@ -203,11 +320,6 @@ impl LabelPolicy {
         }
         (kept, dropped)
     }
-}
-
-/// Every label name used on the given label lists (issues/PRs from the DB).
-pub fn existing_labels<'a>(lists: impl IntoIterator<Item = &'a Vec<String>>) -> HashSet<String> {
-    lists.into_iter().flatten().map(|l| l.to_string()).collect()
 }
 
 // ── Issue classification ────────────────────────────────────────────
@@ -372,33 +484,10 @@ pub const REVIEW_CATEGORIES: &[&str] = &[
 /// Lines that exist on the new side of a unified diff, per file path
 /// (added and context lines: the ones an inline comment can target).
 pub fn new_side_lines(diff: &str) -> HashMap<String, HashSet<u64>> {
-    static RE_HUNK: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@").unwrap());
     let mut out: HashMap<String, HashSet<u64>> = HashMap::new();
-    let mut path: Option<String> = None;
-    let mut line: Option<u64> = None;
-    for l in diff.lines() {
-        if l.starts_with("diff --git ") {
-            path = l.rsplit(" b/").next().map(str::to_string);
-            line = None;
-        } else if let (Some(p), None) = (l.strip_prefix("+++ "), line) {
-            path = match p.strip_prefix("b/") {
-                Some(p) => Some(p.to_string()),
-                None if p == "/dev/null" => None,
-                None => Some(p.to_string()),
-            };
-            line = None;
-        } else if l.starts_with("--- ") && line.is_none() {
-            // old-side header
-        } else if let Some(c) = RE_HUNK.captures(l) {
-            line = c[1].parse().ok();
-        } else if let (Some(p), Some(n)) = (path.as_ref(), line) {
-            if l.starts_with('+') || l.starts_with(' ') || l.is_empty() {
-                out.entry(p.clone()).or_default().insert(n);
-                line = Some(n + 1);
-            } else if l.starts_with('-') || l.starts_with('\\') {
-                // removed line / "\ No newline at end of file"
-            }
+    for d in crate::ai::diff::lines(diff) {
+        if let (Some(p), Some(n)) = (d.path, d.new_line) {
+            out.entry(p.to_string()).or_default().insert(n);
         }
     }
     out

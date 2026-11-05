@@ -239,6 +239,9 @@ pub fn cached_section(
     pr: &PullRequest,
     diff: Option<&str>,
 ) -> Option<String> {
+    if crate::ai::guard::is_flagged(db, "pull", pr.number) {
+        return None;
+    }
     let dc = crate::config::load_review_diagrams(config, db);
     if !dc.enabled || !dc.kinds.iter().any(|k| k == "architecture") {
         return None;
@@ -268,6 +271,15 @@ pub async fn comment_section(
     diff: Option<&str>,
     apply: bool,
 ) -> Option<String> {
+    // Nothing is generated or published for a flagged PR (#235). Fails
+    // closed on a DB error.
+    if crate::ai::guard::is_flagged(db, "pull", pr.number) {
+        info!(
+            "PR #{}: diagram skipped (flagged as possible prompt injection)",
+            pr.number
+        );
+        return None;
+    }
     let budget = crate::config::load_review_diagrams(config, db)
         .timeout_secs
         .max(1);

@@ -131,13 +131,14 @@ fn is_bidi_control(c: char) -> bool {
 }
 
 /// Invisible or formatting characters with no business in a bug report or a
-/// diff (zero-width spaces, word joiners, BOM, soft hyphen, Hangul fillers,
-/// variation selectors supplement used for "emoji smuggling").
+/// diff (zero-width space, word joiner, BOM, soft hyphen, Hangul fillers,
+/// variation selectors supplement used for "emoji smuggling"). ZWJ, ZWNJ
+/// and the basic variation selectors are handled in context, see
+/// [`strip_invisible`].
 fn is_invisible(c: char) -> bool {
     matches!(
         c,
         '\u{200B}'
-            | '\u{200C}'
             | '\u{200E}'
             | '\u{200F}'
             | '\u{2060}'..='\u{2064}'
@@ -151,6 +152,24 @@ fn is_invisible(c: char) -> bool {
             | '\u{FFA0}'
             | '\u{E0100}'..='\u{E01EF}'
     )
+}
+
+/// Letters of scripts that never need a joiner (Latin, Greek, Cyrillic,
+/// digits): a ZWJ/ZWNJ next to one only serves to split a word.
+fn is_joinerless_letter(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(c as u32, 0xC0..=0x24F | 0x370..=0x3FF | 0x400..=0x52F | 0x1E00..=0x1EFF)
+}
+
+/// Characters a variation selector legitimately follows: emoji and
+/// symbols, keycap bases, CJK ideographs.
+fn takes_variation_selector(c: char) -> bool {
+    let cp = c as u32;
+    matches!(c, '0'..='9' | '#' | '*' | '\u{A9}' | '\u{AE}')
+        || (cp >= 0x2000 && !c.is_alphanumeric())
+        || (0x1F000..=0x1FAFF).contains(&cp)
+        || (0x3400..=0x9FFF).contains(&cp)
+        || (0x20000..=0x3FFFF).contains(&cp)
 }
 
 /// Unicode "tag" characters (U+E0000–U+E007F): invisible, but they map 1:1
@@ -170,14 +189,18 @@ fn tag_to_ascii(c: char) -> Option<char> {
 }
 
 /// Remove invisible characters, returning the cleaned text and notes about
-/// what was removed. A zero-width joiner is kept inside emoji sequences and
-/// removed next to letters/digits (where it only serves to split words).
+/// what was removed. ZWJ/ZWNJ are kept where scripts need them (Persian,
+/// Indic, emoji sequences) and removed next to Latin/Greek/Cyrillic letters
+/// or digits, where they only hide a word. A variation selector is kept
+/// after emoji, symbols and ideographs, removed elsewhere.
 fn strip_invisible(s: &str) -> (String, Vec<String>) {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
-    let (mut invisible, mut bidi, mut controls) = (0usize, 0usize, 0usize);
+    let (mut invisible, mut bidi, mut controls, mut selectors) = (0usize, 0, 0, 0);
     let mut smuggled = String::new();
     for (i, &c) in chars.iter().enumerate() {
+        let prev = i.checked_sub(1).and_then(|j| chars.get(j)).copied();
+        let next = chars.get(i + 1).copied();
         if let Some(a) = tag_to_ascii(c) {
             smuggled.push(a);
             continue;
@@ -190,13 +213,15 @@ fn strip_invisible(s: &str) -> (String, Vec<String>) {
             invisible += 1;
             continue;
         }
-        if c == '\u{200D}' {
-            let near_word = |j: Option<&char>| j.is_some_and(|x| x.is_alphanumeric());
-            if near_word(i.checked_sub(1).and_then(|j| chars.get(j))) || near_word(chars.get(i + 1))
-            {
-                invisible += 1;
-                continue;
-            }
+        if (c == '\u{200D}' || c == '\u{200C}')
+            && (prev.is_none_or(is_joinerless_letter) || next.is_none_or(is_joinerless_letter))
+        {
+            invisible += 1;
+            continue;
+        }
+        if ('\u{FE00}'..='\u{FE0F}').contains(&c) && !prev.is_some_and(takes_variation_selector) {
+            selectors += 1;
+            continue;
         }
         if c.is_control() && !matches!(c, '\n' | '\t' | '\r') {
             controls += 1;
@@ -213,6 +238,11 @@ fn strip_invisible(s: &str) -> (String, Vec<String>) {
             "[wshm: removed {invisible} invisible character(s)]"
         ));
     }
+    if selectors > 0 {
+        notes.push(format!(
+            "[wshm: removed {selectors} stray variation selector(s)]"
+        ));
+    }
     if controls > 0 {
         notes.push(format!("[wshm: removed {controls} control character(s)]"));
     }
@@ -225,8 +255,106 @@ fn strip_invisible(s: &str) -> (String, Vec<String>) {
     (out, notes)
 }
 
-static RE_BLOCK_MARKER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)<\s*/?\s*untrusted[\s_-]*data\b[^>]*>?").unwrap());
+/// [`strip_invisible`] without the notes (posted text).
+pub fn strip_invisible_text(s: &str) -> String {
+    strip_invisible(s).0
+}
+
+/// Fold one lookalike character to ASCII (1:1, so offsets map back):
+/// compatibility forms (fullwidth, mathematical letters) through NFKC when
+/// that yields a single character, then common Cyrillic/Greek homoglyphs.
+pub fn fold_char(c: char) -> char {
+    use unicode_normalization::UnicodeNormalization;
+    let c = if c.is_ascii() {
+        c
+    } else {
+        let mut it = std::iter::once(c).nfkc();
+        match (it.next(), it.next()) {
+            (Some(x), None) => x,
+            _ => c,
+        }
+    };
+    match c {
+        'а' | 'ɑ' | 'α' => 'a',
+        'А' | 'Α' => 'A',
+        'В' | 'Β' => 'B',
+        'с' | 'ϲ' => 'c',
+        'С' | 'Ϲ' => 'C',
+        'ԁ' => 'd',
+        'е' | 'ε' => 'e',
+        'Е' | 'Ε' => 'E',
+        'ɡ' => 'g',
+        'һ' => 'h',
+        'Н' | 'Η' => 'H',
+        'і' | 'ι' | 'ӏ' => 'i',
+        'І' | 'Ι' => 'I',
+        'ј' => 'j',
+        'Ј' => 'J',
+        'κ' => 'k',
+        'К' | 'Κ' => 'K',
+        'М' | 'Μ' => 'M',
+        'Ν' => 'N',
+        'о' | 'ο' => 'o',
+        'О' | 'Ο' => 'O',
+        'р' | 'ρ' => 'p',
+        'Р' | 'Ρ' => 'P',
+        'ԛ' => 'q',
+        'ѕ' => 's',
+        'Ѕ' => 'S',
+        'τ' => 't',
+        'Т' | 'Τ' => 'T',
+        'υ' => 'u',
+        'ν' => 'v',
+        'ԝ' => 'w',
+        'х' | 'χ' => 'x',
+        'Х' | 'Χ' => 'X',
+        'у' => 'y',
+        'Υ' | 'Ү' => 'Y',
+        'Ζ' => 'Z',
+        '\u{3000}' => ' ',
+        other => other,
+    }
+}
+
+/// Text as the detection rules see it: lookalikes folded (full NFKC, then
+/// [`fold_char`]).
+fn fold_for_matching(s: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    s.nfkc().map(fold_char).collect()
+}
+
+static RE_BLOCK_MARKER: LazyLock<Regex> = LazyLock::new(|| {
+    // Stops at the first `>` or at the end of the line: never swallows
+    // content.
+    Regex::new(r"(?i)<[ \t]*/?[ \t]*untrusted[ \t_-]*data\b[^>\n]*>?").unwrap()
+});
+
+/// Neutralise our block markers, including fullwidth / Cyrillic / Greek
+/// lookalikes (matched on a 1:1 folded copy, replaced in the original).
+fn neutralize_block_markers(s: &str) -> String {
+    let orig: Vec<(usize, char)> = s.char_indices().collect();
+    let folded: String = orig.iter().map(|&(_, c)| fold_char(c)).collect();
+    // Byte offset in `folded` -> char index.
+    let mut fidx = Vec::with_capacity(folded.len() + 1);
+    for (ci, c) in folded.chars().enumerate() {
+        for _ in 0..c.len_utf8() {
+            fidx.push(ci);
+        }
+    }
+    fidx.push(orig.len());
+    let byte_of = |ci: usize| orig.get(ci).map_or(s.len(), |&(b, _)| b);
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    for m in RE_BLOCK_MARKER.find_iter(&folded) {
+        let (a, b) = (byte_of(fidx[m.start()]), byte_of(fidx[m.end()]));
+        out.push_str(&s[last..a]);
+        out.push_str(BOUNDARY_NOTE);
+        last = b;
+    }
+    out.push_str(&s[last..]);
+    out
+}
+
 static RE_HTML_COMMENT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)<!--(.*?)-->").unwrap());
 static RE_MD_COMMENT: LazyLock<Regex> = LazyLock::new(|| {
@@ -245,43 +373,47 @@ static RE_HIDDEN_ELEMENT: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-/// Normalise untrusted content before it reaches a prompt.
-pub fn normalize(content: &str, kind: ContentKind) -> String {
-    let (mut s, notes) = strip_invisible(content);
-
-    // Neutralise anything that looks like our own block markers.
-    s = RE_BLOCK_MARKER.replace_all(&s, BOUNDARY_NOTE).into_owned();
-
-    if kind == ContentKind::Text {
-        s = RE_HTML_COMMENT
-            .replace_all(&s, |c: &regex::Captures| {
-                format!(
-                    "[wshm: hidden HTML comment: {}]",
-                    c[1].split_whitespace().collect::<Vec<_>>().join(" ")
-                )
-            })
-            .into_owned();
-        // An unterminated comment hides everything after it once rendered.
-        if let Some(i) = s.find("<!--") {
-            s.replace_range(
-                i..i + 4,
-                "[wshm: unterminated hidden HTML comment, the rest is hidden when rendered:] ",
-            );
-        }
-        s = RE_MD_COMMENT
-            .replace_all(&s, "[wshm: hidden Markdown comment: $1]")
-            .into_owned();
-        s = RE_DETAILS_OPEN
-            .replace_all(&s, "[wshm: collapsed section start]")
-            .into_owned();
-        s = RE_DETAILS_CLOSE
-            .replace_all(&s, "[wshm: collapsed section end]")
-            .into_owned();
-        s = RE_HIDDEN_ELEMENT
-            .replace_all(&s, "[wshm: hidden HTML element:] ")
-            .into_owned();
+/// Surface content a reader of the rendered Markdown would not see. Prose
+/// only: HTML inside code blocks and code spans is shown verbatim by the
+/// forge, so it is left alone.
+fn surface_hidden(prose: &str) -> String {
+    let mut s = RE_HTML_COMMENT
+        .replace_all(prose, |c: &regex::Captures| {
+            format!(
+                "[wshm: hidden HTML comment: {}]",
+                c[1].split_whitespace().collect::<Vec<_>>().join(" ")
+            )
+        })
+        .into_owned();
+    // An unterminated comment hides everything after it once rendered.
+    if let Some(i) = s.find("<!--") {
+        s.replace_range(
+            i..i + 4,
+            "[wshm: unterminated hidden HTML comment, the rest is hidden when rendered:] ",
+        );
     }
+    s = RE_MD_COMMENT
+        .replace_all(&s, "[wshm: hidden Markdown comment: $1]")
+        .into_owned();
+    s = RE_DETAILS_OPEN
+        .replace_all(&s, "[wshm: collapsed section start]")
+        .into_owned();
+    s = RE_DETAILS_CLOSE
+        .replace_all(&s, "[wshm: collapsed section end]")
+        .into_owned();
+    RE_HIDDEN_ELEMENT
+        .replace_all(&s, "[wshm: hidden HTML element:] ")
+        .into_owned()
+}
 
+/// Normalise untrusted content before it reaches a prompt. Notes about what
+/// was removed come first, one per line.
+pub fn normalize(content: &str, kind: ContentKind) -> String {
+    let (s, notes) = strip_invisible(content);
+    let mut s = neutralize_block_markers(&s);
+    if kind == ContentKind::Text {
+        s = crate::ai::markdown::map_prose(&s, surface_hidden);
+    }
     if notes.is_empty() {
         s
     } else {
@@ -291,6 +423,30 @@ pub fn normalize(content: &str, kind: ContentKind) -> String {
 
 // ── Detection ───────────────────────────────────────────────────────
 
+/// Default suspicion threshold, also used to drop suspicious context lines
+/// (see [`drop_suspicious_lines`]).
+pub const DEFAULT_THRESHOLD: u32 = 3;
+
+/// Most a test or fixture file of a diff can add to the score: injection
+/// samples in test fixtures never flag a PR alone, but still count with
+/// another signal.
+const TEST_PATH_CAP: u32 = 2;
+
+/// Sources that are context around the item (other items' titles, history,
+/// memory), not the item itself: they never decide blocking.
+pub const CONTEXT_SOURCES: &[&str] = &[
+    "open issue titles",
+    "linked pull request titles",
+    "related history",
+    "memory",
+    "pull request titles",
+    "issue titles",
+];
+
+pub fn is_context_source(source: &str) -> bool {
+    CONTEXT_SOURCES.contains(&source)
+}
+
 /// One rule match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
@@ -298,14 +454,18 @@ pub struct Finding {
     pub rule: String,
     /// Which block it was found in (`issue`, `pull request diff`, ...).
     pub source: String,
-    /// The matched text, shortened. Never posted publicly.
+    /// The matched text, shortened, as plain text (never HTML: escape it
+    /// before rendering). Never posted publicly.
     pub excerpt: String,
     pub weight: u32,
+    /// Found in a test/fixture file of a diff (capped contribution).
+    #[serde(default)]
+    pub test_path: bool,
 }
 
 /// Result of a scan: findings and a score (sum of the highest weight of
 /// each distinct rule, so a long text repeating a weak phrase does not add
-/// up).
+/// up; findings in test files add at most [`TEST_PATH_CAP`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scan {
     pub score: u32,
@@ -315,11 +475,18 @@ pub struct Scan {
 impl Scan {
     fn from_findings(findings: Vec<Finding>) -> Self {
         let mut best: BTreeMap<&str, u32> = BTreeMap::new();
+        let mut best_test: BTreeMap<&str, u32> = BTreeMap::new();
         for f in &findings {
-            let w = best.entry(f.rule.as_str()).or_default();
+            let map = if f.test_path {
+                &mut best_test
+            } else {
+                &mut best
+            };
+            let w = map.entry(f.rule.as_str()).or_default();
             *w = (*w).max(f.weight);
         }
-        let score = best.values().sum();
+        let test: u32 = best_test.values().sum();
+        let score = best.values().sum::<u32>() + test.min(TEST_PATH_CAP);
         Self { score, findings }
     }
 
@@ -457,9 +624,41 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         rule("bidi", 2, r"\[wshm: removed \d+ bidi control character"),
         rule("invisible", 1, r"\[wshm: removed \d+ invisible character"),
         rule(
+            "invisible",
+            1,
+            r"\[wshm: removed \d+ stray variation selector",
+        ),
+        rule(
             "tag-smuggling",
             3,
             r"\[wshm: hidden Unicode tag characters decoded",
+        ),
+    ]
+});
+
+/// Non-English variants of the strongest rules (French, Spanish, German,
+/// Italian, Portuguese). Accents optional: matching runs on folded text.
+static RULES_I18N: LazyLock<Vec<Rule>> = LazyLock::new(|| {
+    vec![
+        rule(
+            "override",
+            3,
+            r"(?i)\b(?:ignore[rz]?|oublie[rz]?|ignora(?:r|d)?|olvida(?:r|d)?|ignoriere|ignorier|vergiss|missachte|dimentica|esque[cç]a)\b[^.\n]{0,40}?\b(?:instructions?|consignes|instrucciones|instru[cç](?:ões|oes|ao)|anweisungen|instruktionen|vorgaben|istruzioni|r[eè]gles)\b",
+        ),
+        rule(
+            "new-instructions",
+            2,
+            r"(?i)\btu\s+es\s+(?:maintenant|d[ée]sormais)\b|\bvous\s+[êe]tes\s+(?:maintenant|d[ée]sormais)\b|\bahora\s+eres\b|\bdu\s+bist\s+(?:jetzt|nun|ab\s+sofort)\b|\bora\s+sei\b|\bagora\s+voc[êe]\s+[ée]\b|\bnouvelles\s+instructions\b|\bnuevas\s+instrucciones\b|\bneue\s+anweisungen\b",
+        ),
+        rule(
+            "addressed-to-ai",
+            2,
+            r"(?i)\b(?:en\s+tant\s+qu['’]\s*(?:ia|assistant|mod[eè]le)|si\s+tu\s+es\s+une?\s+(?:ia|assistant)|como\s+(?:una\s+)?ia|si\s+eres\s+una?\s+(?:ia|asistente)|als\s+(?:ki|assistent|sprachmodell)|wenn\s+du\s+eine?\s+(?:ki|assistent))\b",
+        ),
+        rule(
+            "exfiltration",
+            3,
+            r"(?i)\b(?:r[ée]v[eè]le|affiche|montre|muestra|revela|imprime|zeige|gib)\b[^.\n]{0,25}\b(?:prompt\s+syst[eè]me|instructions\s+syst[eè]me|prompt\s+del\s+sistema|system-?prompt)\b",
         ),
     ]
 });
@@ -469,21 +668,18 @@ static RE_HIDDEN_SEGMENT: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 fn excerpt(s: &str) -> String {
-    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat: String = s
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
     let mut out: String = flat.chars().take(120).collect();
     if flat.chars().count() > 120 {
         out.push('…');
     }
     out
-}
-
-/// Only the lines a diff adds (plus the normaliser's notes): removed and
-/// context lines are not what the PR brings in.
-fn added_lines(diff: &str) -> String {
-    diff.lines()
-        .filter(|l| (l.starts_with('+') && !l.starts_with("+++")) || l.starts_with("[wshm: "))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Scan one piece of raw untrusted content. It is normalised first (as
@@ -499,21 +695,27 @@ pub fn scan_text(source: &str, text: &str) -> Scan {
     scan_normalized(source, &normalize(text, kind))
 }
 
-/// Scan content that already went through [`normalize`] (block content).
-fn scan_normalized(source: &str, text: &str) -> Scan {
-    let text = if source.contains("diff") {
-        added_lines(text)
-    } else {
-        text.to_string()
-    };
-    let mut findings = Vec::new();
-    for r in RULES.iter() {
-        if let Some(m) = r.re.find(&text) {
+/// Run every rule on `text`: once with line structure kept (horizontal
+/// whitespace collapsed, for line-anchored rules) and once fully collapsed
+/// (phrases split across lines).
+fn match_rules(source: &str, text: &str, test_path: bool) -> Vec<Finding> {
+    let folded = fold_for_matching(text);
+    let lines: String = folded
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let flat = folded.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut findings: Vec<Finding> = Vec::new();
+    for r in RULES.iter().chain(RULES_I18N.iter()) {
+        let m = r.re.find(&lines).or_else(|| r.re.find(&flat));
+        if let Some(m) = m {
             findings.push(Finding {
                 rule: r.id.to_string(),
                 source: source.to_string(),
                 excerpt: excerpt(m.as_str()),
                 weight: r.weight,
+                test_path,
             });
         }
     }
@@ -522,13 +724,65 @@ fn scan_normalized(source: &str, text: &str) -> Scan {
     let instruction_like = findings
         .iter()
         .any(|f| f.weight >= 2 && !matches!(f.rule.as_str(), "bidi" | "invisible"));
-    if instruction_like && RE_HIDDEN_SEGMENT.is_match(&text) {
+    if instruction_like && RE_HIDDEN_SEGMENT.is_match(text) {
         findings.push(Finding {
             rule: "hidden-instruction".to_string(),
             source: source.to_string(),
             excerpt: String::new(),
             weight: 2,
+            test_path,
         });
+    }
+    findings
+}
+
+/// Scan content that already went through [`normalize`] (block content).
+/// Diffs: only added lines count, and lines of test/fixture files are
+/// scored apart (capped).
+fn scan_normalized(source: &str, text: &str) -> Scan {
+    if !source.contains("diff") {
+        return Scan::from_findings(match_rules(source, text, false));
+    }
+    let parsed = crate::ai::diff::lines(text);
+    let (mut main, mut tests) = (String::new(), String::new());
+    // The normaliser's notes come first, before any diff line.
+    for l in text.lines().take_while(|l| l.starts_with("[wshm: ")) {
+        main.push_str(l);
+        main.push('\n');
+    }
+    if parsed.is_empty() {
+        // Not a unified diff (or a fragment without hunk header): fall back
+        // to the `+` lines.
+        for l in text.lines() {
+            if l.starts_with('+') && !l.starts_with("+++ ") {
+                main.push_str(&l[1..]);
+                main.push('\n');
+            }
+        }
+    } else {
+        // File paths are chosen by the PR author too.
+        let mut paths: Vec<&str> = parsed.iter().filter_map(|d| d.path).collect();
+        paths.dedup();
+        for p in paths {
+            main.push_str(p);
+            main.push('\n');
+        }
+        for d in parsed
+            .iter()
+            .filter(|d| d.kind == crate::ai::diff::LineKind::Added)
+        {
+            let buf = if d.path.is_some_and(crate::ai::diff::is_test_path) {
+                &mut tests
+            } else {
+                &mut main
+            };
+            buf.push_str(d.text);
+            buf.push('\n');
+        }
+    }
+    let mut findings = match_rules(source, &main, false);
+    if !tests.is_empty() {
+        findings.extend(match_rules(source, &tests, true));
     }
     Scan::from_findings(findings)
 }
@@ -537,10 +791,18 @@ static RE_OPEN_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"<untrusted-data source="([^"]*)" boundary="([0-9a-f]{32})">\n"#).unwrap()
 });
 
+/// Scans of an assembled prompt: the item's own blocks (they decide) and the
+/// context blocks (only logged), see [`CONTEXT_SOURCES`].
+#[derive(Debug, Clone, Default)]
+pub struct PromptScan {
+    pub item: Scan,
+    pub context: Scan,
+}
+
 /// Scan every untrusted block of an assembled prompt. Only the content of
 /// the blocks is scanned: our own instructions around them are not.
-pub fn scan_prompt(prompt: &str) -> Scan {
-    let mut scan = Scan::default();
+pub fn scan_prompt_split(prompt: &str) -> PromptScan {
+    let mut out = PromptScan::default();
     let mut pos = 0;
     while let Some(c) = RE_OPEN_BLOCK.captures_at(prompt, pos) {
         let whole = c.get(0).expect("match");
@@ -550,10 +812,64 @@ pub fn scan_prompt(prompt: &str) -> Scan {
         let Some(rel) = prompt[start..].find(&close) else {
             break;
         };
-        scan.merge(scan_normalized(&source, &prompt[start..start + rel]));
+        let scan = scan_normalized(&source, &prompt[start..start + rel]);
+        if is_context_source(&source) {
+            out.context.merge(scan);
+        } else {
+            out.item.merge(scan);
+        }
         pos = start + rel + close.len();
     }
-    scan
+    out
+}
+
+/// Every block of the prompt together (item and context).
+pub fn scan_prompt(prompt: &str) -> Scan {
+    let mut s = scan_prompt_split(prompt);
+    s.item.merge(s.context);
+    s.item
+}
+
+/// Drop the lines of a context list (titles, history entries) that look
+/// like injection attempts on their own. Returns the kept text and how many
+/// lines were dropped.
+pub fn drop_suspicious_lines(source: &str, text: &str) -> (String, usize) {
+    let mut dropped = 0;
+    let mut kept = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        if scan_text(source, line).is_suspicious(DEFAULT_THRESHOLD) {
+            dropped += 1;
+        } else {
+            kept.push_str(line);
+        }
+    }
+    (kept, dropped)
+}
+
+/// A context list (other items' titles, history entries) as an untrusted
+/// block, without the lines that look like injection attempts on their
+/// own. Empty string when nothing is left.
+pub fn wrap_context_lines(source: &str, text: &str) -> String {
+    let (kept, dropped) = drop_suspicious_lines(source, text);
+    if dropped > 0 {
+        tracing::info!("{source}: {dropped} suspicious line(s) left out of the prompt");
+    }
+    if kept.trim().is_empty() {
+        String::new()
+    } else {
+        wrap_text(source, &kept)
+    }
+}
+
+/// A context text (memory) as an untrusted block, or nothing at all when it
+/// looks like an injection attempt.
+pub fn wrap_context_whole(source: &str, text: &str) -> String {
+    if scan_text(source, text).is_suspicious(DEFAULT_THRESHOLD) {
+        tracing::info!("{source}: suspicious, left out of the prompt");
+        String::new()
+    } else {
+        wrap_text(source, text)
+    }
 }
 
 #[cfg(test)]

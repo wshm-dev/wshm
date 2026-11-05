@@ -156,6 +156,11 @@ pub fn find_related(
         if !seen.insert((hit.kind.clone(), hit.number)) {
             continue;
         }
+        // A flagged item (#235) never comes back as context, even closed:
+        // an attacker's issue cannot keep poisoning later prompts.
+        if crate::ai::guard::is_flagged(db, &hit.kind, hit.number) {
+            continue;
+        }
         let (state, labels, title) = if hit.kind == "issue" {
             match db.get_issue(hit.number) {
                 Ok(Some(i)) => (i.state, i.labels, i.title),
@@ -167,13 +172,19 @@ pub fn find_related(
                 _ => continue,
             }
         };
+        let snippet = strip_marks(&hit.snippet);
+        if crate::ai::untrusted::scan_text("related history", &format!("{title}\n{snippet}"))
+            .is_suspicious(crate::ai::untrusted::DEFAULT_THRESHOLD)
+        {
+            continue;
+        }
         items.push(RelatedItem {
             kind: hit.kind,
             number: hit.number,
             title,
             state,
             labels,
-            snippet: strip_marks(&hit.snippet),
+            snippet,
             updated_at: hit.updated_at,
         });
     }

@@ -31,7 +31,10 @@ pub enum SlashCommand {
     Review,
     Label(String),
     Unlabel(String),
-    Fix,
+    /// `fix [--force]`: `--force` overrides the injection gate (#235).
+    Fix {
+        force: bool,
+    },
     Queue,
     Health,
     Help,
@@ -76,7 +79,11 @@ pub fn parse(comment_body: &str, prefix: &str) -> Option<SlashCommand> {
                         SlashCommand::Unknown("unlabel requires a name".into())
                     }
                 }
-                Some(ref c) if c == "fix" || c == "autofix" || c == "auto-fix" => SlashCommand::Fix,
+                Some(ref c) if c == "fix" || c == "autofix" || c == "auto-fix" => {
+                    SlashCommand::Fix {
+                        force: parts.iter().skip(1).any(|p| *p == "--force"),
+                    }
+                }
                 Some(ref c) if c == "queue" || c == "merge-queue" => SlashCommand::Queue,
                 Some(ref c) if c == "health" || c == "check" => SlashCommand::Health,
                 Some(ref c) if c == "help" => SlashCommand::Help,
@@ -256,7 +263,7 @@ pub async fn execute(
                 ))
             }
         }
-        SlashCommand::Fix => {
+        SlashCommand::Fix { force } => {
             if !pro_hooks::is_pro() {
                 return Ok("Auto-fix requires wshm Pro. Visit https://wshm.dev/pro".into());
             }
@@ -270,8 +277,23 @@ pub async fn execute(
                 ));
             }
 
-            // Auth already checked globally above. Proceed to fix.
+            // Auth already checked globally above. The injection gate (#235)
+            // still applies: a coding agent with write access would run on
+            // the issue text. A maintainer can override it with --force.
             gh_sync::sync_issues_now(gh, db).await?;
+            if let Some(issue) = db.get_issue(number)? {
+                let cfg = crate::ai::guard::load(config, db);
+                if let Err(why) = crate::ai::guard::auto_fix_gate(&cfg, db, &issue, *force) {
+                    tracing::warn!("auto-fix #{number} refused: {why}");
+                    return Ok(format!(
+                        "Auto-fix refused for issue #{number}: {why}. Review the issue, then use `{} fix --force` to run it anyway.",
+                        config.branding.command_prefix
+                    ));
+                }
+                if *force {
+                    tracing::warn!("auto-fix #{number}: injection gate overridden with --force");
+                }
+            }
             match pro_hooks::run_auto_fix(config, db, gh, number).await {
                 Ok(true) => Ok(format!(
                     "Auto-fix attempted for issue #{number}. Check for a new draft PR."
@@ -428,11 +450,11 @@ mod tests {
     fn test_slash_prefix() {
         assert!(matches!(
             parse("/wshm fix", "/wshm"),
-            Some(SlashCommand::Fix)
+            Some(SlashCommand::Fix { .. })
         ));
         assert!(matches!(
             parse("/wshm autofix", "/wshm"),
-            Some(SlashCommand::Fix)
+            Some(SlashCommand::Fix { .. })
         ));
         assert!(matches!(
             parse("/wshm triage", "/wshm"),
@@ -444,15 +466,15 @@ mod tests {
     fn test_at_prefix() {
         assert!(matches!(
             parse("@wshm fix", "/wshm"),
-            Some(SlashCommand::Fix)
+            Some(SlashCommand::Fix { .. })
         ));
         assert!(matches!(
             parse("@wshm autofix", "/wshm"),
-            Some(SlashCommand::Fix)
+            Some(SlashCommand::Fix { .. })
         ));
         assert!(matches!(
             parse("@wshm auto-fix", "/wshm"),
-            Some(SlashCommand::Fix)
+            Some(SlashCommand::Fix { .. })
         ));
         assert!(matches!(
             parse("@wshm triage", "/wshm"),
@@ -464,7 +486,7 @@ mod tests {
     fn test_at_prefix_with_extra_text() {
         assert!(matches!(
             parse("@wshm fix please", "/wshm"),
-            Some(SlashCommand::Fix)
+            Some(SlashCommand::Fix { .. })
         ));
     }
 
@@ -476,7 +498,10 @@ Can someone look at this?
 @wshm fix
 
 Thanks!";
-        assert!(matches!(parse(comment, "/wshm"), Some(SlashCommand::Fix)));
+        assert!(matches!(
+            parse(comment, "/wshm"),
+            Some(SlashCommand::Fix { .. })
+        ));
     }
 
     #[test]

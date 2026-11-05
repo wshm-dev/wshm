@@ -80,7 +80,7 @@ pub fn system_prompt(suggested_actions: bool) -> String {
     }
 }
 
-use crate::ai::untrusted::wrap_text;
+use crate::ai::untrusted::{wrap_context_lines, wrap_text};
 use crate::db::pulls::PullRequest;
 
 /// Truncate body to prevent excessive AI token usage.
@@ -147,7 +147,7 @@ pub fn build_user_prompt(
                 )
             })
             .collect();
-        prompt.push_str(&wrap_text("linked pull request titles", &list));
+        prompt.push_str(&wrap_context_lines("linked pull request titles", &list));
         prompt.push_str("\nNote: This issue already has a PR in progress. Factor this into your priority assessment.\n");
     }
 
@@ -158,7 +158,7 @@ pub fn build_user_prompt(
             .take(50)
             .map(|e| format!("- #{}: {}\n", e.number, e.title))
             .collect();
-        prompt.push_str(&wrap_text("open issue titles", &list));
+        prompt.push_str(&wrap_context_lines("open issue titles", &list));
     }
 
     prompt
