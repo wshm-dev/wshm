@@ -1,13 +1,15 @@
 # License & Activation
 
-## Plans
+## Editions
 
-| Plan | Price | Features |
-|------|-------|----------|
-| **Free (OSS)** | $0 forever | Triage, PR analysis, merge queue, notifications, dashboard, TUI |
-| **Pro** | $49/mo ($39/mo annual) | Everything in Free + code review, auto-fix, conflicts, improve, changelog, reports, exports, vault, SSO/RBAC, audit log |
+| Edition | Features |
+|---------|----------|
+| **Open source** (`wshm`, Apache-2.0, no license key) | Triage, PR analysis, merge queue, PR health, inline code review, auto-fix, conflict detection, improvement proposals, changelog, reports, metrics dashboard, action plan, `wshm notify` (Discord, Slack, Teams), webhook export, PR and issue insights, search, usage dashboard, daemon and web UI, TUI, SQLite storage, local users and roles, encrypted SQLite secret store, SSO via your auth proxy (OIDC) |
+| **Enterprise (self-hosted)** (`wshm-pro`) | Everything in open source, plus the user management page, PostgreSQL multi-pod (storage, user store, secret store), `vault()` placeholders (HashiCorp Vault, AWS, GCP), exports (S3, GCS, Azure Blob, Elasticsearch, OpenSearch, MongoDB, MySQL), hosted PR diagram pages, support |
 
-Free during private beta. No credit card required.
+Enterprise: contact us at [contact@wshm.dev](mailto:contact@wshm.dev).
+
+The license is checked at runtime for three features only: `vault()` placeholders (`vault`), exports (`exports`) and hosted PR diagram pages (`diagram_hosting`). Every other feature runs without a license key, in both the `wshm` and `wshm-pro` binaries.
 
 ## Activation
 
@@ -89,25 +91,6 @@ export AWS_ACCESS_KEY_ID=AKIA...
 export AWS_SECRET_ACCESS_KEY=xxxxx
 export AWS_REGION=eu-west-1
 # Or: IAM role on EC2/ECS (automatic)
-```
-
-### Azure Key Vault
-
-```toml
-[vault]
-provider = "azure"
-address = "https://wshm-keyvault.vault.azure.net"
-
-[license]
-key = "vault(wshm-keyvault/license-key)"
-```
-
-Auth via environment or Managed Identity:
-```bash
-export AZURE_CLIENT_ID=xxxxx
-export AZURE_CLIENT_SECRET=xxxxx
-export AZURE_TENANT_ID=xxxxx
-# Or: Managed Identity on Azure VM/AKS (automatic)
 ```
 
 ### GCP Secret Manager

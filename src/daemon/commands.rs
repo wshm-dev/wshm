@@ -5,10 +5,10 @@
 //! Supported commands:
 //!   /wshm triage         — (re)triage this issue
 //!   /wshm analyze        — (re)analyze this PR
-//!   /wshm review         — run inline code review on this PR (Pro)
+//!   /wshm review         — run inline code review on this PR
 //!   /wshm label <name>   — add a label
 //!   /wshm unlabel <name> — remove a label
-//!   /wshm fix            — auto-generate a fix PR for this issue (Pro)
+//!   /wshm fix            — auto-generate a fix PR for this issue
 //!   /wshm queue          — show merge queue position for this PR
 //!   /wshm health         — check PR health (duplicates, staleness)
 //!   /wshm help           — show available commands
@@ -192,9 +192,6 @@ pub async fn execute(
             })
         }
         SlashCommand::Review => {
-            if !pro_hooks::is_pro() {
-                return Ok("Inline review requires wshm Pro. Visit https://wshm.dev/pro".into());
-            }
             if !is_pr {
                 return Ok("This command only works on pull requests.".into());
             }
@@ -243,9 +240,6 @@ pub async fn execute(
             }
         }
         SlashCommand::Fix => {
-            if !pro_hooks::is_pro() {
-                return Ok("Auto-fix requires wshm Pro. Visit https://wshm.dev/pro".into());
-            }
             if is_pr {
                 return Ok("This command only works on issues.".into());
             }
@@ -259,11 +253,8 @@ pub async fn execute(
             // Auth already checked globally above. Proceed to fix.
             gh_sync::sync_issues_now(gh, db).await?;
             match pro_hooks::run_auto_fix(config, db, gh, number).await {
-                Ok(true) => Ok(format!(
+                Ok(_) => Ok(format!(
                     "Auto-fix attempted for issue #{number}. Check for a new draft PR."
-                )),
-                Ok(false) => Ok(format!(
-                    "Auto-fix for issue #{number} requires wshm Pro. Visit https://wshm.dev/pro"
                 )),
                 Err(e) => {
                     tracing::warn!("auto-fix #{number} failed: {e:#}");
@@ -382,13 +373,13 @@ pub async fn execute(
 \
                  | `{p} analyze` | (Re)analyze this PR |
 \
-                 | `{p} review` | Inline AI code review (Pro) |
+                 | `{p} review` | Inline AI code review |
 \
                  | `{p} label <name>` | Add a label |
 \
                  | `{p} unlabel <name>` | Remove a label |
 \
-                 | `{p} fix` | Auto-fix this issue (Pro) |
+                 | `{p} fix` | Auto-fix this issue |
 \
                  | `{p} queue` | Show merge queue position |
 \

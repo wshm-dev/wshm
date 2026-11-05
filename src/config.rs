@@ -1018,9 +1018,11 @@ pub struct ConflictConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
+    /// Not implemented: accepted so existing configs keep loading, ignored.
     #[serde(default)]
     pub auto_resolve: bool,
 
+    /// Not implemented: accepted so existing configs keep loading, ignored.
     #[serde(default = "default_confidence")]
     pub auto_resolve_confidence: f64,
 }
@@ -1505,6 +1507,12 @@ pub struct FixConfig {
     #[serde(default = "default_fix_image")]
     pub docker_image: String,
 
+    /// Container network for `wshm fix --docker` (default "none": no network,
+    /// so the agent cannot reach the model API unless a network with a
+    /// controlled egress is set here).
+    #[serde(default = "default_fix_container_network")]
+    pub container_network: String,
+
     /// Extra env var names to forward into Docker containers
     #[serde(default)]
     pub secret_env: Vec<String>,
@@ -1554,6 +1562,7 @@ impl Default for FixConfig {
         Self {
             tool: default_fix_tool(),
             docker_image: default_fix_image(),
+            container_network: default_fix_container_network(),
             secret_env: Vec::new(),
             trusted_authors_only: true,
             scan_diff: true,
@@ -1577,6 +1586,10 @@ fn default_fix_tool() -> String {
 }
 fn default_fix_image() -> String {
     "wshm-sandbox:latest".to_string()
+}
+
+fn default_fix_container_network() -> String {
+    "none".to_string()
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2215,7 +2228,7 @@ pub struct RepoFeatures {
     /// `[ai.rag] enabled` / `WSHM_RAG_ENABLED`; both must be on.
     #[serde(default = "default_true")]
     pub related_history: bool,
-    /// Pro-only inline code review.
+    /// Inline code review.
     #[serde(default)]
     pub review_prs: bool,
     /// Whether a computed review is also posted to GitHub as inline PR
@@ -2764,8 +2777,6 @@ strategy = "rebase"
 
 [conflicts]
 enabled = true
-auto_resolve = false
-auto_resolve_confidence = 0.85
 
 [sync]
 interval_minutes = 5

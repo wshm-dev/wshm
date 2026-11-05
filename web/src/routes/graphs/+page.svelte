@@ -4,8 +4,8 @@
 	import * as Tabs from '$lib/components/ui/tabs';
 	import GroupGraphTab from '$lib/components/GroupGraphTab.svelte';
 
-	// Aggregate history — daily snapshots. The trend endpoints are a Pro feature;
-	// in OSS they 404, so we swallow errors and show "no history".
+	// Aggregate history, rebuilt from the creation date of open items. Errors
+	// are swallowed and show "no history".
 	type Point = Record<string, number | string>;
 	let prTrend = $state<Point[]>([]);
 	let issueTrend = $state<Point[]>([]);
@@ -108,8 +108,7 @@
 						</div>
 					{:else}
 						<p class="py-6 text-center text-xs text-muted-foreground">
-							No history yet — daily snapshots accrue once the daemon has run for a few days (Pro
-							insights).
+							No history yet — open issues and PRs show up here once they are synced.
 						</p>
 					{/if}
 				</div>

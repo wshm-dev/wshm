@@ -1,10 +1,19 @@
+pub mod autogen;
 pub mod backup;
+pub mod changelog;
+pub mod conflict_resolution;
 pub mod context;
+pub mod dashboard;
 pub mod discover_domains;
 pub mod engine;
+pub mod improve;
 pub mod migrate;
+pub mod notify;
+pub mod plan;
 pub mod pr_groups;
+pub mod report;
 pub mod revert;
+pub mod review;
 
 /// Truncate a string to `max` chars, appending "…" if truncated.
 /// Uses char boundaries to avoid panics on multi-byte UTF-8 input.
