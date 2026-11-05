@@ -31,6 +31,29 @@ max_chars = 3000                  # size cap of the block
 # Logs: one INFO line per triage/analysis listing the retrieved items,
 # the full block at RUST_LOG=debug.
 
+[ai.injection]                    # prompt-injection hardening (defaults shown)
+detection = true                  # flag likely injection attempts (rules, no AI call)
+threshold = 3                     # score at which an item is flagged
+block_mutations = true            # flagged item: no label change, close or auto-fix PR
+maintainer_note = true            # add a short warning to the comment wshm posts
+require_non_ai_condition = true   # an AI-chosen close (duplicate) or auto-fix also
+                                  # needs a trusted author (collaborator or
+                                  # trusted_authors) or the approval label
+approval_label = "wshm:approved"  # set by a maintainer; the model can never apply it
+trusted_authors = []              # trusted in addition to repository collaborators
+# Per-repo override, stored in the DB and shared by every pod:
+#   GET/PUT /api/v1/repos/{slug}/injection   (body: partial object, or null)
+# GET also lists the items currently flagged.
+#
+# Always on, not configurable: issue/PR text, diffs, files and retrieved
+# history are sent as delimited untrusted data (random boundary per block,
+# invisible/bidi characters removed, hidden comments surfaced), and the model
+# output is validated before use (labels from the configured or existing
+# set, known duplicate target, linked issues referenced in the PR, inline
+# review lines present in the diff; mentions, links and HTML removed from
+# posted text). These are mitigations, not guarantees: keep auto actions
+# behind human review for untrusted contributors.
+
 [triage]
 enabled = true
 auto_fix = false                  # attempt auto-fix for simple bugs (Pro)

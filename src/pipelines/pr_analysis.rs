@@ -42,6 +42,9 @@ pub struct DiagramJob {
     posted_section: Option<String>,
     apply: bool,
     preview: bool,
+    /// Maintainer note of a suspicious PR (#235), kept when the comment is
+    /// re-rendered with the diagram.
+    note: Option<String>,
 }
 
 /// Concurrent background diagram steps, all repos together. Separate from
@@ -170,7 +173,11 @@ pub async fn finish_diagram(
     if section.is_none() || section == job.posted_section {
         return DiagramOutcome::Unchanged;
     }
-    let comment = format_analysis_comment(&job.analysis, config, section.as_deref());
+    let mut comment = format_analysis_comment(&job.analysis, config, section.as_deref());
+    if let Some(note) = &job.note {
+        comment.push_str("\n\n");
+        comment.push_str(note);
+    }
     if job.apply {
         if let Some(why) = job_skip_reason(db, &job) {
             info!("PR #{}: diagram not posted ({why})", job.pr.number);
@@ -437,10 +444,16 @@ async fn analyze_pr(
     }
 
     if !icm_context.is_empty() {
+        // Memory entries quote past titles: third-party text.
         user_prompt.push_str(&format!(
-            "\n\n## Past PR analysis context (from memory)\n{icm_context}"
+            "\n\n## Past PR analysis context (from memory)\n{}",
+            crate::ai::untrusted::wrap_text("memory", &icm_context)
         ));
     }
+
+    // Injection detection over every untrusted block of the prompt (#235).
+    let guard_cfg = crate::ai::guard::load(config, db);
+    let assessment = crate::ai::guard::assess_prompt(&guard_cfg, &user_prompt);
 
     let system_prompt = config
         .pr
@@ -448,7 +461,38 @@ async fn analyze_pr(
         .as_deref()
         .unwrap_or(pr_analyze::SYSTEM);
 
-    let analysis: PrAnalysis = ai.complete(system_prompt, &user_prompt).await?;
+    let mut analysis: PrAnalysis = ai.complete(system_prompt, &user_prompt).await?;
+
+    // Output validation (#235): everything outside the allowlists is dropped.
+    let (open_issues, open_pulls) = (
+        db.get_open_issues().unwrap_or_default(),
+        db.get_open_pulls().unwrap_or_default(),
+    );
+    let label_policy = crate::ai::guard::label_policy(
+        config,
+        &guard_cfg,
+        open_issues
+            .iter()
+            .map(|i| &i.labels)
+            .chain(open_pulls.iter().map(|p| &p.labels)),
+    );
+    for fix in crate::ai::output::validate_pr_analysis(
+        &mut analysis,
+        &pr.title,
+        pr.body.as_deref().unwrap_or(""),
+        &label_policy,
+    ) {
+        info!("PR #{}: AI output corrected: {fix}", pr.number);
+    }
+    if apply {
+        crate::ai::guard::record(db, "pull", pr.number, "pr_analysis", &assessment);
+    } else if assessment.suspicious {
+        tracing::warn!(
+            "PR #{}: possible prompt injection ({}) — dry-run, not stored",
+            pr.number,
+            assessment.scan.reasons().join("; ")
+        );
+    }
 
     // Accumulate any newly-seen domains into the DB known set (best-effort),
     // so future reviews reuse them — the stateless-safe replacement for ICM
@@ -463,7 +507,7 @@ async fn analyze_pr(
         })
         .cloned()
         .collect();
-    if !new_domains.is_empty() {
+    if !new_domains.is_empty() && !assessment.blocked {
         let mut merged = review_domains.clone();
         for n in new_domains {
             merged.push(crate::config::DomainDef {
@@ -513,8 +557,20 @@ async fn analyze_pr(
         &["pr-analysis", &analysis.pr_type, &analysis.risk_level],
     );
 
+    let note = (assessment.suspicious && guard_cfg.maintainer_note)
+        .then(|| crate::ai::guard::maintainer_note("pull request", &assessment));
+
     if apply {
-        let mut labels = config.filter_labels(analysis.suggested_labels.clone());
+        // Suspicious PR (#235): no AI-chosen labels.
+        let mut labels = if assessment.blocked {
+            info!(
+                "PR #{}: AI labels skipped (possible prompt injection)",
+                pr.number
+            );
+            Vec::new()
+        } else {
+            config.filter_labels(analysis.suggested_labels.clone())
+        };
         // Apply assigned "grand domains" as `domain:<name>` labels, but ONLY for
         // VALIDATED domains — proposed ones wait for human approval. GitHub
         // auto-creates missing labels; not run through filter_labels.
@@ -523,13 +579,15 @@ async fn analyze_pr(
             .filter(|d| d.validated)
             .map(|d| d.name.to_lowercase())
             .collect();
-        labels.extend(
-            analysis
-                .domains
-                .iter()
-                .filter(|d| validated.contains(&d.to_lowercase()))
-                .map(|d| format!("domain:{d}")),
-        );
+        if !assessment.blocked {
+            labels.extend(
+                analysis
+                    .domains
+                    .iter()
+                    .filter(|d| validated.contains(&d.to_lowercase()))
+                    .map(|d| format!("domain:{d}")),
+            );
+        }
         if !labels.is_empty() {
             gh.label_pr(pr.number, &labels).await?;
         }
@@ -543,7 +601,11 @@ async fn analyze_pr(
             }
         }
 
-        let comment = format_analysis_comment(&analysis, config, diagram.as_deref());
+        let mut comment = format_analysis_comment(&analysis, config, diagram.as_deref());
+        if let Some(note) = &note {
+            comment.push_str("\n\n");
+            comment.push_str(note);
+        }
         gh.comment_pr(pr.number, &comment).await?;
 
         info!("Applied analysis to PR #{}", pr.number);
@@ -572,6 +634,7 @@ async fn analyze_pr(
         posted_section: diagram,
         apply,
         preview,
+        note,
     });
     Ok((analysis, job))
 }
@@ -711,6 +774,7 @@ mod tests {
             posted_section: None,
             apply,
             preview,
+            note: None,
         }
     }
 

@@ -6,6 +6,7 @@ use crate::ai::schemas::IssueClassification;
 use crate::db::diagrams::PrDiagramRow;
 use crate::db::events::WebhookEventRow;
 use crate::db::history::{ChangeEvent, ChangeEventFilter};
+use crate::db::injection::InjectionFlagRow;
 use crate::db::issues::Issue;
 use crate::db::pulls::{PrAnalysisRow, PullRequest};
 use crate::db::reviews::PrReviewRow;
@@ -191,6 +192,30 @@ pub trait DatabaseBackend: Send + Sync {
     fn delete_pr_diagram(&self, pr_number: u64) -> Result<()> {
         let _ = pr_number;
         Ok(())
+    }
+
+    // ── Injection flags (see `db::injection`, #235) ─────────────
+    //
+    // Defaults keep backends without the table compiling (nothing stored,
+    // nothing flagged). SQLite and Postgres (Pro) override them.
+
+    fn upsert_injection_flag(&self, row: &InjectionFlagRow) -> Result<()> {
+        let _ = row;
+        Ok(())
+    }
+
+    fn delete_injection_flag(&self, kind: &str, number: u64, pipeline: &str) -> Result<()> {
+        let _ = (kind, number, pipeline);
+        Ok(())
+    }
+
+    fn get_injection_flags(&self, kind: &str, number: u64) -> Result<Vec<InjectionFlagRow>> {
+        let _ = (kind, number);
+        Ok(Vec::new())
+    }
+
+    fn list_injection_flags(&self) -> Result<Vec<InjectionFlagRow>> {
+        Ok(Vec::new())
     }
 
     /// Insert `value` only if `key` has never been written. Returns `true`
@@ -602,6 +627,22 @@ impl DatabaseBackend for super::Database {
 
     fn delete_pr_diagram(&self, pr_number: u64) -> Result<()> {
         self.delete_pr_diagram(pr_number)
+    }
+
+    fn upsert_injection_flag(&self, row: &InjectionFlagRow) -> Result<()> {
+        self.upsert_injection_flag(row)
+    }
+
+    fn delete_injection_flag(&self, kind: &str, number: u64, pipeline: &str) -> Result<()> {
+        self.delete_injection_flag(kind, number, pipeline)
+    }
+
+    fn get_injection_flags(&self, kind: &str, number: u64) -> Result<Vec<InjectionFlagRow>> {
+        self.get_injection_flags(kind, number)
+    }
+
+    fn list_injection_flags(&self) -> Result<Vec<InjectionFlagRow>> {
+        self.list_injection_flags()
     }
 
     fn as_sqlite_db(&self) -> Option<&super::Database> {

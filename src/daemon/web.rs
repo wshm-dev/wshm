@@ -3042,6 +3042,94 @@ async fn api_repo_diagrams_put(
     Json(diagrams_settings_json(&ds)).into_response()
 }
 
+/// Body of the injection settings endpoints (#235): the effective policy,
+/// the raw per-repo override (null when none), the TOML value, and the
+/// items currently flagged as possible prompt injection.
+fn injection_settings_json(ds: &crate::daemon::DaemonState) -> serde_json::Value {
+    let over: Option<serde_json::Value> = ds
+        .db
+        .get_app_setting(crate::ai::guard::SETTINGS_KEY)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .filter(|v: &serde_json::Value| v.is_object());
+    json!({
+        "effective": crate::ai::guard::load(&ds.config, ds.db.as_ref()),
+        "override": over,
+        "toml": ds.config.ai.injection,
+        "flags": ds.db.list_injection_flags().unwrap_or_default(),
+    })
+}
+
+/// GET /api/v1/repos/{slug}/injection -- the repo's `[ai.injection]`
+/// (DB override > TOML > defaults) and its flagged items.
+async fn api_repo_injection_get(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> Response {
+    let repos = state.multi.repos.read().await;
+    match repos.get(&slug) {
+        Some(ds) => Json(injection_settings_json(ds)).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("repo '{slug}' not configured")})),
+        )
+            .into_response(),
+    }
+}
+
+/// PUT /api/v1/repos/{slug}/injection -- set the per-repo override. Body: a
+/// (possibly partial) `[ai.injection]` object, or `null` to drop it. Stored
+/// in the DB (app_settings), so every pod applies it on its next pass.
+async fn api_repo_injection_put(
+    State(state): State<Arc<WebState>>,
+    user: axum::Extension<Option<crate::auth::User>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if state.users.is_some() {
+        if let Err(e) = require_admin(&user) {
+            return e;
+        }
+    }
+    let repos = state.multi.repos.read().await;
+    let ds = match repos.get(&slug) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("repo '{slug}' not configured")})),
+            )
+                .into_response();
+        }
+    };
+    drop(repos);
+
+    let stored = if body.is_null() {
+        String::new()
+    } else {
+        if let Err(e) = crate::ai::guard::apply_override(&ds.config.ai.injection, &body) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("{e:#}") })),
+            )
+                .into_response();
+        }
+        body.to_string()
+    };
+    if let Err(e) = ds
+        .db
+        .set_app_setting(crate::ai::guard::SETTINGS_KEY, &stored)
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+    Json(injection_settings_json(&ds)).into_response()
+}
+
 /// POST /api/v1/repos/{slug}/domains/discover -- infer the repo's grand domains
 /// from the frequency of subjects across ALL its PR & issue titles and merge
 /// the top ones into the DB set as PROPOSED. Deterministic and instant (no AI),
@@ -4329,6 +4417,10 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         .route(
             "/api/v1/repos/{slug}/diagrams",
             get(api_repo_diagrams_get).put(api_repo_diagrams_put),
+        )
+        .route(
+            "/api/v1/repos/{slug}/injection",
+            get(api_repo_injection_get).put(api_repo_injection_put),
         )
         .route("/diagrams/_assets/{file}", get(diagram_asset))
         .route("/diagrams/{owner}/{repo}/{pr}", get(diagram_page))

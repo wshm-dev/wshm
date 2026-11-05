@@ -13,6 +13,7 @@ Never resolve conflicts that change public APIs, database schemas, or configurat
 
 pub fn build_user_prompt(file_path: &str, conflict_content: &str) -> String {
     format!(
-        "## Conflict in: {file_path}\n\n```\n{conflict_content}\n```\n\nResolve this merge conflict."
+        "## Conflict in: {file_path:?}\n\n{}\nResolve this merge conflict.",
+        crate::ai::untrusted::wrap_code("merge conflict", conflict_content)
     )
 }

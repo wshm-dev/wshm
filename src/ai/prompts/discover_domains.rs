@@ -76,14 +76,19 @@ pub fn build_user_prompt(
         }
     }
 
+    let list = |items: &[String]| -> String {
+        items.iter().take(40).map(|t| format!("- {t}\n")).collect()
+    };
     out.push_str("\n### Sample of recent pull request titles\n");
-    for t in pr_titles.iter().take(40) {
-        out.push_str(&format!("- {t}\n"));
-    }
+    out.push_str(&crate::ai::untrusted::wrap_text(
+        "pull request titles",
+        &list(pr_titles),
+    ));
     out.push_str("\n### Sample of recent issue titles\n");
-    for t in issue_titles.iter().take(40) {
-        out.push_str(&format!("- {t}\n"));
-    }
+    out.push_str(&crate::ai::untrusted::wrap_text(
+        "issue titles",
+        &list(issue_titles),
+    ));
     out.push_str(
         "\nCluster the recurrent terms into the grand domains for this repo. Respond as JSON.\n",
     );

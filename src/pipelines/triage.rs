@@ -410,10 +410,16 @@ async fn triage_issue(
     }
 
     if !icm_context.is_empty() {
+        // Memory entries quote past titles: third-party text.
         user_prompt.push_str(&format!(
-            "\n\n## Past triage context (from memory)\n{icm_context}"
+            "\n\n## Past triage context (from memory)\n{}",
+            crate::ai::untrusted::wrap_text("memory", &icm_context)
         ));
     }
+
+    // Injection detection over every untrusted block of the prompt (#235).
+    let guard_cfg = crate::ai::guard::load(config, db);
+    let assessment = crate::ai::guard::assess_prompt(&guard_cfg, &user_prompt);
 
     // Only build the default prompt when no override is configured
     // (review note on #115: avoid the allocation on the override path).
@@ -424,7 +430,47 @@ async fn triage_issue(
         )),
     };
 
-    let classification: IssueClassification = ai.complete(&system_prompt, &user_prompt).await?;
+    let mut classification: IssueClassification = ai.complete(&system_prompt, &user_prompt).await?;
+
+    // Output validation (#235): everything outside the allowlists is dropped.
+    let mut known_issues: std::collections::HashSet<u64> =
+        existing_issues.iter().map(|i| i.number).collect();
+    if let Some(d) = classification.is_duplicate_of {
+        if matches!(db.get_issue(d), Ok(Some(_))) {
+            known_issues.insert(d);
+        }
+    }
+    let label_policy = crate::ai::guard::label_policy(
+        config,
+        &guard_cfg,
+        existing_issues
+            .iter()
+            .map(|i| &i.labels)
+            .chain(open_prs.iter().map(|p| &p.labels)),
+    );
+    for fix in crate::ai::output::validate_classification(
+        &mut classification,
+        &crate::ai::output::ClassificationContext {
+            issue_number: issue.number,
+            known_issues: &known_issues,
+            labels: &label_policy,
+        },
+    ) {
+        info!("Issue #{}: AI output corrected: {fix}", issue.number);
+    }
+    if assessment.blocked {
+        // Not applied, so not recorded as wshm-applied labels either.
+        classification.suggested_labels.clear();
+    }
+    if apply {
+        crate::ai::guard::record(db, "issue", issue.number, "triage", &assessment);
+    } else if assessment.suspicious {
+        tracing::warn!(
+            "Issue #{}: possible prompt injection ({}) — dry-run, not stored",
+            issue.number,
+            assessment.scan.reasons().join("; ")
+        );
+    }
 
     // Accumulate newly-seen domains into the DB known set (best-effort) so
     // future reviews reuse them — the stateless-safe replacement for ICM.
@@ -438,7 +484,7 @@ async fn triage_issue(
         })
         .cloned()
         .collect();
-    if !new_domains.is_empty() {
+    if !new_domains.is_empty() && !assessment.blocked {
         let mut merged = review_domains.clone();
         for n in new_domains {
             merged.push(crate::config::DomainDef {
@@ -482,59 +528,69 @@ async fn triage_issue(
 
     // Apply labels/comments when confidence meets triage threshold
     if apply && classification.confidence >= config.triage.triage_confidence {
-        // Build new label set
-        let mut new_labels = classification.suggested_labels.clone();
-        if let Some(ref priority) = classification.priority {
-            let priority_label = format!("priority:{priority}");
-            if !new_labels.contains(&priority_label) {
-                new_labels.push(priority_label);
+        if assessment.blocked {
+            // Suspicious item (#235): no label change, no close, no
+            // auto-fix. Only the comment (with the maintainer note) is
+            // posted, so a human looks at it.
+            info!(
+                "Issue #{}: automatic actions skipped (possible prompt injection)",
+                issue.number
+            );
+        } else {
+            // Build new label set
+            let mut new_labels = classification.suggested_labels.clone();
+            if let Some(ref priority) = classification.priority {
+                let priority_label = format!("priority:{priority}");
+                if !new_labels.contains(&priority_label) {
+                    new_labels.push(priority_label);
+                }
             }
-        }
-        let mut new_labels = config.filter_labels(new_labels);
-        // Apply assigned "grand domains" as `domain:<name>` labels, but ONLY for
-        // VALIDATED domains — proposed ones wait for human approval. Added after
-        // filter_labels (so an allowlist doesn't strip them) and NOT part of the
-        // wshm-managed suggested_labels set, so re-triage never removes them.
-        let validated: std::collections::HashSet<String> = review_domains
-            .iter()
-            .filter(|d| d.validated)
-            .map(|d| d.name.to_lowercase())
-            .collect();
-        new_labels.extend(
-            classification
-                .domains
+            let mut new_labels = config.filter_labels(new_labels);
+            // Apply assigned "grand domains" as `domain:<name>` labels, but ONLY for
+            // VALIDATED domains — proposed ones wait for human approval. Added after
+            // filter_labels (so an allowlist doesn't strip them) and NOT part of the
+            // wshm-managed suggested_labels set, so re-triage never removes them.
+            let validated: std::collections::HashSet<String> = review_domains
                 .iter()
-                .filter(|d| validated.contains(&d.to_lowercase()))
-                .map(|d| format!("domain:{d}")),
-        );
+                .filter(|d| d.validated)
+                .map(|d| d.name.to_lowercase())
+                .collect();
+            new_labels.extend(
+                classification
+                    .domains
+                    .iter()
+                    .filter(|d| validated.contains(&d.to_lowercase()))
+                    .map(|d| format!("domain:{d}")),
+            );
 
-        // Get labels previously applied by wshm (to know what to remove on re-triage)
-        let old_wshm_labels = db.get_wshm_applied_labels(issue.number)?;
+            // Get labels previously applied by wshm (to know what to remove on re-triage)
+            let old_wshm_labels = db.get_wshm_applied_labels(issue.number)?;
 
-        // Labels to remove: previously applied by wshm but not in the new set
-        let to_remove: Vec<String> = old_wshm_labels
-            .iter()
-            .filter(|old| !new_labels.iter().any(|new| new.eq_ignore_ascii_case(old)))
-            .cloned()
-            .collect();
+            // Labels to remove: previously applied by wshm but not in the new set
+            let to_remove: Vec<String> = old_wshm_labels
+                .iter()
+                .filter(|old| !new_labels.iter().any(|new| new.eq_ignore_ascii_case(old)))
+                .cloned()
+                .collect();
 
-        // Remove stale wshm labels from GitHub
-        for label in &to_remove {
-            if let Err(e) = gh.remove_label(issue.number, label).await {
-                tracing::warn!(
-                    "Failed to remove label '{label}' from #{}: {e}",
-                    issue.number
-                );
+            // Remove stale wshm labels from GitHub
+            for label in &to_remove {
+                if let Err(e) = gh.remove_label(issue.number, label).await {
+                    tracing::warn!(
+                        "Failed to remove label '{label}' from #{}: {e}",
+                        issue.number
+                    );
+                }
             }
-        }
 
-        // Add new labels on GitHub (additive, no-op if already present)
-        if !new_labels.is_empty() {
-            gh.label_issue(issue.number, &new_labels).await?;
-        }
+            // Add new labels on GitHub (additive, no-op if already present)
+            if !new_labels.is_empty() {
+                gh.label_issue(issue.number, &new_labels).await?;
+            }
 
-        // Update DB cache: merge (remove old wshm labels, add new ones, keep human labels)
-        db.merge_issue_labels(issue.number, &new_labels, &to_remove)?;
+            // Update DB cache: merge (remove old wshm labels, add new ones, keep human labels)
+            db.merge_issue_labels(issue.number, &new_labels, &to_remove)?;
+        }
 
         // Auto-assign issue
         if config.assign.enabled {
@@ -545,19 +601,72 @@ async fn triage_issue(
             }
         }
 
+        // Auto-fix opens a PR from a model decision: it also needs a non-AI
+        // condition. Checked before the comment so it does not announce an
+        // auto-fix that will not run. Outer None = auto-fix not applicable.
+        let auto_fix_gate: Option<Option<String>> = if will_auto_fix(&classification, config) {
+            Some(if assessment.blocked {
+                None
+            } else {
+                crate::ai::guard::non_ai_condition(
+                    &guard_cfg,
+                    gh,
+                    issue.author.as_deref(),
+                    &issue.labels,
+                )
+                .await
+            })
+        } else {
+            None
+        };
+
         // Post triage comment
-        let comment = format_triage_comment(&classification, config);
+        let mut comment = format_triage_comment_with(
+            &classification,
+            config,
+            matches!(auto_fix_gate, Some(Some(_))),
+        );
+        if assessment.suspicious && guard_cfg.maintainer_note {
+            comment.push_str("\n\n");
+            comment.push_str(&crate::ai::guard::maintainer_note("issue", &assessment));
+        }
         gh.comment_issue(issue.number, &comment).await?;
 
         // Handle special categories
         match classification.category.as_str() {
             "duplicate" => {
+                // Closing is chosen by the model: it also needs a non-AI
+                // condition (trusted author or approval label), and the
+                // target was checked to be a known issue.
                 if let Some(original) = classification.is_duplicate_of {
-                    let close_msg = format!(
-                        "Closing as duplicate of #{original}. See the original issue for updates."
-                    );
-                    gh.comment_issue(issue.number, &close_msg).await?;
-                    gh.close_issue_not_planned(issue.number).await?;
+                    let why = if assessment.blocked {
+                        None
+                    } else {
+                        crate::ai::guard::non_ai_condition(
+                            &guard_cfg,
+                            gh,
+                            issue.author.as_deref(),
+                            &issue.labels,
+                        )
+                        .await
+                    };
+                    match why {
+                        Some(why) => {
+                            info!(
+                                "Closing issue #{} as duplicate of #{original} ({why})",
+                                issue.number
+                            );
+                            let close_msg = format!(
+                                "Closing as duplicate of #{original}. See the original issue for updates."
+                            );
+                            gh.comment_issue(issue.number, &close_msg).await?;
+                            gh.close_issue_not_planned(issue.number).await?;
+                        }
+                        None => info!(
+                            "Issue #{} looks like a duplicate of #{original}; not closing (no trusted author or approval label '{}')",
+                            issue.number, guard_cfg.approval_label
+                        ),
+                    }
                 }
             }
             "wontfix" => {
@@ -572,25 +681,34 @@ async fn triage_issue(
         }
 
         // Auto-fix: if enabled and issue is a simple fix with high confidence
-        if config.triage.auto_fix
-            && classification.is_simple_fix
-            && matches!(classification.category.as_str(), "bug" | "feature")
-            && classification.confidence >= config.triage.auto_fix_confidence
-        {
-            info!(
-                "Auto-fix triggered for issue #{} (confidence: {:.0}%)",
-                issue.number,
-                classification.confidence * 100.0
-            );
-            match pro_hooks::run_auto_fix(config, db, gh, issue.number).await {
-                Ok(true) => info!("Auto-fix completed for issue #{}", issue.number),
-                Ok(false) => {
-                    tracing::warn!(
-                        "Auto-fix skipped for issue #{}: requires wshm Pro",
-                        issue.number
+        // (and the non-AI condition checked above holds).
+        if let Some(why) = auto_fix_gate {
+            match why {
+                None => info!(
+                    "Auto-fix not started for issue #{}: needs a trusted author or the approval label '{}'{}",
+                    issue.number,
+                    guard_cfg.approval_label,
+                    if assessment.blocked { " (flagged as possible prompt injection)" } else { "" }
+                ),
+                Some(why) => {
+                    info!(
+                        "Auto-fix triggered for issue #{} (confidence: {:.0}%, {why})",
+                        issue.number,
+                        classification.confidence * 100.0
                     );
+                    match pro_hooks::run_auto_fix(config, db, gh, issue.number).await {
+                        Ok(true) => info!("Auto-fix completed for issue #{}", issue.number),
+                        Ok(false) => {
+                            tracing::warn!(
+                                "Auto-fix skipped for issue #{}: requires wshm Pro",
+                                issue.number
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!("Auto-fix failed for issue #{}: {e:#}", issue.number)
+                        }
+                    }
                 }
-                Err(e) => tracing::error!("Auto-fix failed for issue #{}: {e:#}", issue.number),
             }
         }
 
@@ -639,7 +757,13 @@ fn priority_emoji(pri: Option<&str>) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn format_triage_comment(c: &IssueClassification, config: &Config) -> String {
+    format_triage_comment_with(c, config, will_auto_fix(c, config))
+}
+
+/// `auto_fix`: an auto-fix will actually start (gates included).
+fn format_triage_comment_with(c: &IssueClassification, config: &Config, auto_fix: bool) -> String {
     let cat_emoji = category_emoji(&c.category);
     let pri_emoji = priority_emoji(c.priority.as_deref());
     let priority = c.priority.as_deref().unwrap_or("unset");
@@ -700,7 +824,7 @@ fn format_triage_comment(c: &IssueClassification, config: &Config) -> String {
     ));
 
     if c.is_simple_fix {
-        if will_auto_fix(c, config) {
+        if auto_fix {
             comment.push_str("\n> This looks like a **trivial fix** — attempting auto-fix now. A draft PR will be opened for review.\n");
         } else {
             // Use custom message if configured, or default. Empty string hides the message.
