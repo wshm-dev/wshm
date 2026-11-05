@@ -54,10 +54,29 @@ pub async fn run_with_filters(
     exporter: Option<&ExportManager>,
     filters: Option<&crate::config::RepoFilters>,
 ) -> Result<()> {
-    let json = format == OutputFormat::Json;
-    let model = config.model_for("triage");
-    let backend = AiBackend::from_config(config, model)?;
+    run_with_report(config, db, gh, args, format, exporter, filters)
+        .await
+        .map(|_| ())
+}
 
+/// Per-issue failures of a triage pass. They are logged and do not fail
+/// the pass (one bad issue must not stop a batch); the pipeline step and
+/// the scheduler read them here.
+#[derive(Debug, Default)]
+pub struct TriageReport {
+    pub failures: Vec<(u64, String)>,
+}
+
+/// The issues a pass would triage (one issue, the stale ones, or the batch
+/// needing triage, after seeding stubs from managed labels). Prints the
+/// same messages as before when there is nothing to do.
+pub fn select_issues(
+    config: &Config,
+    db: &dyn DatabaseBackend,
+    args: &TriageArgs,
+    json: bool,
+    filters: Option<&crate::config::RepoFilters>,
+) -> Result<Vec<Issue>> {
     let is_retriage = args.retriage;
 
     let issues = if let Some(number) = args.issue {
@@ -69,7 +88,7 @@ pub async fn run_with_filters(
                 } else {
                     println!("Issue #{number} not found in cache. Run `wshm sync` first.");
                 }
-                return Ok(());
+                return Ok(Vec::new());
             }
         }
     } else if is_retriage {
@@ -86,7 +105,7 @@ pub async fn run_with_filters(
             } else {
                 println!("No stale triage results to re-evaluate.");
             }
-            return Ok(());
+            return Ok(Vec::new());
         }
         // Fetch the full Issue objects for stale results
         let mut issues = Vec::with_capacity(stale.len());
@@ -134,9 +153,31 @@ pub async fn run_with_filters(
         } else {
             println!("No issues to triage.");
         }
-        return Ok(());
+        return Ok(Vec::new());
     }
+    Ok(issues)
+}
 
+/// [`run_with_filters`], returning the per-issue failures.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_report(
+    config: &Config,
+    db: &dyn DatabaseBackend,
+    gh: &GhClient,
+    args: &TriageArgs,
+    format: OutputFormat,
+    exporter: Option<&ExportManager>,
+    filters: Option<&crate::config::RepoFilters>,
+) -> Result<TriageReport> {
+    let json = format == OutputFormat::Json;
+    let mut report = TriageReport::default();
+    let issues = select_issues(config, db, args, json, filters)?;
+    if issues.is_empty() {
+        return Ok(report);
+    }
+    let is_retriage = args.retriage;
+    let model = config.model_for("triage");
+    let backend = AiBackend::from_config(config, model)?;
     if is_retriage {
         info!("Re-triaging {} previously triaged issues", issues.len());
     } else {
@@ -246,6 +287,7 @@ pub async fn run_with_filters(
             }
             Err(e) => {
                 tracing::error!("Failed to triage issue #{}: {e:#}", issue.number);
+                report.failures.push((issue.number, format!("{e:#}")));
                 // The AI provider is rate limited — every remaining issue in
                 // this batch will fail identically, so stop instead of burning
                 // a failed request per issue every cycle.
@@ -287,7 +329,7 @@ pub async fn run_with_filters(
         OutputFormat::Text => {}
     }
 
-    Ok(())
+    Ok(report)
 }
 
 fn relabel_labels_from(filters: Option<&crate::config::RepoFilters>) -> Vec<String> {
@@ -701,13 +743,10 @@ async fn triage_issue(
                         issue.number,
                         classification.confidence * 100.0
                     );
-                    match pro_hooks::run_auto_fix(config, db, gh, issue.number).await {
-                        Ok(true) => info!("Auto-fix completed for issue #{}", issue.number),
-                        Ok(false) => {
-                            tracing::warn!(
-                                "Auto-fix skipped for issue #{}: requires wshm Pro",
-                                issue.number
-                            );
+                    match pro_hooks::run_auto_fix(config, db, gh, issue.number, false).await {
+                        Ok(_) => info!("Auto-fix completed for issue #{}", issue.number),
+                        Err(e) if e.is::<crate::pipelines::autogen::AutoFixRefused>() => {
+                            info!("Auto-fix refused for issue #{}: {e}", issue.number)
                         }
                         Err(e) => {
                             tracing::error!("Auto-fix failed for issue #{}: {e:#}", issue.number)
@@ -988,21 +1027,6 @@ mod tests {
 mod injection_flow {
     use super::*;
     use crate::git_provider::recording::RecordingForge;
-    use std::sync::Mutex;
-
-    /// Issue numbers the auto-fix hook was started for (tests use distinct
-    /// numbers, the hook is process-global).
-    static AUTO_FIXED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
-
-    fn hook<'a>(
-        _c: &'a Config,
-        _d: &'a dyn DatabaseBackend,
-        _g: &'a GhClient,
-        n: u64,
-    ) -> pro_hooks::BoxFuture<'a, Result<()>> {
-        AUTO_FIXED.lock().unwrap().push(n);
-        Box::pin(async { Ok(()) })
-    }
 
     fn issue(number: u64, title: &str, body: &str, author: &str, labels: &[&str]) -> Issue {
         serde_json::from_value(serde_json::json!({
@@ -1051,7 +1075,6 @@ mod injection_flow {
         dup: u64,
     ) {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        pro_hooks::set_auto_fix_hook(hook);
         for i in others.iter().chain([target]) {
             db.upsert_issue(i).unwrap();
         }
@@ -1061,7 +1084,12 @@ mod injection_flow {
     }
 
     fn auto_fixed(n: u64) -> bool {
-        AUTO_FIXED.lock().unwrap().contains(&n)
+        // Issues for which autogen::run passed every gate (tests use
+        // distinct numbers, the record is process-global).
+        crate::pipelines::autogen::test_seam::STARTED
+            .lock()
+            .unwrap()
+            .contains(&n)
     }
 
     #[tokio::test]

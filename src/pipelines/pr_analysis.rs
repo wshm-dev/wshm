@@ -90,11 +90,16 @@ fn release_job(key: &str, id: u64) {
 
 /// Spawn a diagram job in the background (daemon). One job per PR at a
 /// time in the queue (the newest wins), at most [`MAX_PENDING_JOBS`] queued.
+///
+/// `on_ai_calls` receives the number of AI calls the job made (pipeline
+/// run accounting); the job runs outside the run's task, so they are
+/// counted here.
 pub fn spawn_diagram_job(
     config: std::sync::Arc<Config>,
     db: std::sync::Arc<dyn DatabaseBackend>,
     gh: std::sync::Arc<GhClient>,
     job: DiagramJob,
+    on_ai_calls: Option<crate::pipelines::engine::AiCallSink>,
 ) {
     let key = format!("{}#{}", config.repo_slug(), job.pr.number);
     let Some(id) = register_job(&key) else {
@@ -107,7 +112,16 @@ pub fn spawn_diagram_job(
             return;
         };
         if is_latest_job(&key, id) {
-            finish_diagram(&config, db.as_ref(), gh.as_ref(), job).await;
+            let (_, calls) = crate::pipelines::engine::count_ai_calls(finish_diagram(
+                &config,
+                db.as_ref(),
+                gh.as_ref(),
+                job,
+            ))
+            .await;
+            if let Some(sink) = on_ai_calls {
+                sink(calls);
+            }
         } else {
             info!(
                 "PR #{}: diagram job superseded by a newer one",

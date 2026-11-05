@@ -1,31 +1,85 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { selectedRepo } from '$lib/stores';
-	import { fetchPulls, type PullRequest } from '$lib/api';
-	import { timeAgo, exactTime } from '$lib/time';
-	import { Badge } from '$lib/components/ui/badge';
-	import * as Card from '$lib/components/ui/card';
-	import * as Dialog from '$lib/components/ui/dialog';
+	import { fetchReviews, type ReviewEntry } from '$lib/api';
+	import { multiSort, toggleSort as toggle, sortArrow, sortIndex, sortArrowClass, type SortColumn } from '$lib/sort';
+	import { applyFilters, distinctValues } from '$lib/filter';
+	import { paginate, totalPages } from '$lib/paginate';
 	import * as Table from '$lib/components/ui/table';
-	import PrDetail from '$lib/components/PrDetail.svelte';
+	import { Badge } from '$lib/components/ui/badge';
+	import { Input } from '$lib/components/ui/input';
+	import FilterSelect from '$lib/components/FilterSelect.svelte';
+	import QuickFilters from '$lib/components/QuickFilters.svelte';
+	import type { QuickChip } from '$lib/filter';
 
-	let pulls: PullRequest[] = $state([]);
+	let reviews: ReviewEntry[] = $state([]);
 	let error: string | null = $state(null);
-	let loading = $state(true);
+	let sortColumns: SortColumn[] = $state([{ key: 'reviewed_at', asc: false }]);
+	let filters: Record<string, string> = $state({
+		pr_number: '', title: '', findings: '', posted: '', ci_status: ''
+	});
+	let expanded: Set<string> = $state(new Set());
 
-	let loadToken = 0;
+	function handleSort(key: string, event: MouseEvent) {
+		sortColumns = toggle(sortColumns, key, event.shiftKey);
+	}
+
+	function rowKey(r: ReviewEntry): string {
+		return `${r.repo}#${r.pr_number}`;
+	}
+
+	function toggleExpand(r: ReviewEntry) {
+		const key = rowKey(r);
+		const next = new Set(expanded);
+		if (next.has(key)) {
+			next.delete(key);
+		} else {
+			next.add(key);
+		}
+		expanded = next;
+	}
+
+	// Derived facets for filtering: worst finding severity and posting state.
+	let enriched = $derived(reviews.map((r) => ({
+		...r,
+		findings: r.stats.errors > 0 ? 'errors' : r.stats.warnings > 0 ? 'warnings' : r.stats.infos > 0 ? 'infos' : 'clean',
+		posted: r.posted_to_github ? 'posted' : 'web only'
+	})));
+
+	let filtered = $derived(applyFilters(enriched, {
+		pr_number: filters.pr_number,
+		title: filters.title,
+		findings: filters.findings,
+		posted: filters.posted,
+		ci_status: filters.ci_status
+	}));
+
+	let findingsOptions = $derived(distinctValues(enriched, 'findings'));
+	let postedOptions = $derived(distinctValues(enriched, 'posted'));
+	let ciOptions = $derived(distinctValues(enriched, 'ci_status'));
+
+	let sorted = $derived(multiSort(filtered, sortColumns));
+
+	const chip = (label: string, patch: Record<string, string>): QuickChip =>
+		({ label, patch, count: applyFilters(enriched, patch).length });
+	let chips: QuickChip[] = $derived([
+		chip('Errors', { findings: '=errors' }),
+		chip('Warnings', { findings: '=warnings' }),
+		chip('Clean', { findings: '=clean' }),
+		chip('Web only', { posted: '=web only' }),
+		chip('Posted to GitHub', { posted: '=posted' })
+	]);
+	let page = $state(0);
+	let pages = $derived(totalPages(sorted.length));
+	let paged = $derived(paginate(sorted, page));
+
 	async function load() {
-		const myToken = ++loadToken;
+		page = 0;
 		try {
 			error = null;
-			const data = await fetchPulls({ limit: 500 });
-			if (myToken !== loadToken) return;
-			pulls = data.items.filter((p) => p.state === 'open');
+			reviews = await fetchReviews();
 		} catch (e) {
-			if (myToken !== loadToken) return;
-			error = e instanceof Error ? e.message : 'Failed to load pull requests';
-		} finally {
-			if (myToken === loadToken) loading = false;
+			error = e instanceof Error ? e.message : 'Failed to load reviews';
 		}
 	}
 
@@ -35,280 +89,150 @@
 		return unsub;
 	});
 
-	// ── Buckets ─────────────────────────────────────────────────────
-	// Ready to merge: approved, and nothing known-bad blocks the merge.
-	let readyToMerge = $derived(
-		pulls
-			.filter(
-				(p) =>
-					p.review_decision === 'approved' &&
-					p.mergeable !== false &&
-					p.ci_status !== 'failure'
-			)
-			.sort((a, b) => (a.updated_at < b.updated_at ? -1 : 1))
-	);
-
-	// Awaiting re-review: you asked for changes and the author has pushed
-	// (or commented) since the decision was recorded — go take a look.
-	let awaitingReReview = $derived(
-		pulls
-			.filter(
-				(p) =>
-					p.review_decision === 'changes_requested' &&
-					p.review_decision_at &&
-					p.updated_at > p.review_decision_at
-			)
-			.sort((a, b) => (a.updated_at < b.updated_at ? -1 : 1))
-	);
-
-	// Waiting on author: changes requested, no activity since — nothing for
-	// you to do, listed for context.
-	let waitingOnAuthor = $derived(
-		pulls.filter(
-			(p) =>
-				p.review_decision === 'changes_requested' &&
-				!(p.review_decision_at && p.updated_at > p.review_decision_at)
-		)
-	);
-
-	// Needs first review: nobody has reviewed yet. Oldest first — those are
-	// the ones rotting.
-	let needsFirstReview = $derived(
-		pulls
-			.filter((p) => p.review_decision === 'review_required')
-			.sort((a, b) => (a.created_at < b.created_at ? -1 : 1))
-	);
-
-	let hasDecisionData = $derived(pulls.some((p) => p.review_decision != null));
-
-	let modalOpen = $state(false);
-	let activePr: PullRequest | null = $state(null);
-	function openPr(pr: PullRequest) {
-		activePr = pr;
-		modalOpen = true;
+	function severityClass(severity: string): string {
+		if (severity === 'error') return 'border-red-500/30 bg-red-500/15 text-red-600 dark:text-red-400';
+		if (severity === 'warning') return 'border-yellow-500/30 bg-yellow-500/15 text-yellow-600 dark:text-yellow-400';
+		return 'border-blue-500/30 bg-blue-500/15 text-blue-600 dark:text-blue-400';
 	}
 
-	function ciBadge(ci: string | null | undefined): { class: string | null; label: string } {
-		if (ci === 'success')
-			return { class: 'border-green-500/30 bg-green-500/15 text-green-600 dark:text-green-400', label: 'CI ✓' };
-		if (ci === 'failure')
-			return { class: 'border-red-500/30 bg-red-500/15 text-red-600 dark:text-red-400', label: 'CI ✗' };
-		return { class: null, label: 'CI –' };
+	function ciBadgeClass(status: string | null): string {
+		if (status === 'success') return 'border-green-500/30 bg-green-500/15 text-green-600 dark:text-green-400';
+		if (status === 'failure') return 'border-red-500/30 bg-red-500/15 text-red-600 dark:text-red-400';
+		return 'border-yellow-500/30 bg-yellow-500/15 text-yellow-600 dark:text-yellow-400';
 	}
 </script>
 
 <svelte:head>
-	<title>wshm - To Validate</title>
+	<title>wshm - Code Review</title>
 </svelte:head>
 
-<div class="mb-6">
-	<h2 class="text-xl font-semibold text-foreground mb-1">To Validate</h2>
-	<p class="text-sm text-muted-foreground">Review radar — PRs waiting on you, so nothing slips through</p>
-</div>
+	<div class="mb-6">
+		<h2 class="text-xl font-semibold text-foreground mb-1">Code Reviews</h2>
+		<p class="text-sm text-muted-foreground">AI-powered inline code review results for pull requests</p>
+	</div>
 
-{#if error}
-	<Card.Root class="border-red-500">
-		<Card.Content>
+	{#if error}
+		<div class="rounded-lg border border-red-500 bg-card p-5">
 			<p class="text-red-600 dark:text-red-400">{error}</p>
-		</Card.Content>
-	</Card.Root>
-{:else if loading}
-	<Card.Root>
-		<Card.Content>
-			<p class="text-muted-foreground text-center py-6">Loading…</p>
-		</Card.Content>
-	</Card.Root>
-{:else}
-	{#if !hasDecisionData}
-		<Card.Root class="mb-4">
-			<Card.Content>
-				<p class="text-sm text-muted-foreground">
-					No review data yet — decisions are fetched during PR sync.
-					<span class="block text-xs text-muted-foreground mt-1">
-						Trigger a sync from the sidebar (requires a GitHub token with repo access).
-					</span>
-				</p>
-			</Card.Content>
-		</Card.Root>
-	{/if}
-
-	<!-- Ready to merge -->
-	<div class="mt-2">
-		<div class="flex items-baseline gap-2 mb-1">
-			<h2 class="text-lg font-semibold text-green-600 dark:text-green-400">Ready to merge</h2>
-			<span class="text-xs text-muted-foreground mono">{readyToMerge.length}</span>
 		</div>
-		<p class="text-sm text-muted-foreground mb-3">Approved, no known conflicts, CI not failing — one click away</p>
-		{#if readyToMerge.length === 0}
-			<Card.Root>
-				<Card.Content>
-					<p class="text-muted-foreground text-center py-3 text-sm">Nothing approved is waiting.</p>
-				</Card.Content>
-			</Card.Root>
-		{:else}
-			<div class="w-full overflow-x-auto rounded-lg border">
-				<Table.Root class="w-full">
-					<Table.Header class="text-xs uppercase text-muted-foreground">
-						<Table.Row>
-							<Table.Head class="px-2 py-1.5 w-[70px]">#</Table.Head>
-							<Table.Head class="px-2 py-1.5">Title</Table.Head>
-							<Table.Head class="px-2 py-1.5 w-[70px]">CI</Table.Head>
-							<Table.Head class="px-2 py-1.5 w-[130px]">Approved</Table.Head>
+	{:else if reviews.length === 0}
+		<div class="rounded-lg border bg-card p-10 text-center">
+			<p class="text-muted-foreground">No code reviews yet. Enable "Review PRs" for a repo in Settings, or run <code class="bg-muted/40 px-2 py-1 rounded text-xs">wshm review --pr N --apply</code> to generate one.</p>
+		</div>
+	{:else}
+		<QuickFilters {chips} bind:filters />
+		<div class="rounded-lg border">
+			<Table.Root class="w-full table-fixed">
+				<Table.Header class="text-xs uppercase text-muted-foreground">
+					<Table.Row>
+						<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[70px]" onclick={(e: MouseEvent) => handleSort('pr_number', e)}>
+							PR <span class={sortArrowClass(sortColumns, 'pr_number')}>{sortArrow(sortColumns, 'pr_number')}</span>{#if sortIndex(sortColumns, 'pr_number') > 0}<span class="text-[0.625rem] text-primary ml-0.5">{sortIndex(sortColumns, 'pr_number')}</span>{/if}
+						</Table.Head>
+						<Table.Head class="cursor-pointer select-none px-2 py-1.5" onclick={(e: MouseEvent) => handleSort('title', e)}>
+							Title <span class={sortArrowClass(sortColumns, 'title')}>{sortArrow(sortColumns, 'title')}</span>{#if sortIndex(sortColumns, 'title') > 0}<span class="text-[0.625rem] text-primary ml-0.5">{sortIndex(sortColumns, 'title')}</span>{/if}
+						</Table.Head>
+						<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[150px]" onclick={(e: MouseEvent) => handleSort('findings', e)}>
+							Findings <span class={sortArrowClass(sortColumns, 'findings')}>{sortArrow(sortColumns, 'findings')}</span>{#if sortIndex(sortColumns, 'findings') > 0}<span class="text-[0.625rem] text-primary ml-0.5">{sortIndex(sortColumns, 'findings')}</span>{/if}
+						</Table.Head>
+						<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[90px]" onclick={(e: MouseEvent) => handleSort('posted', e)}>
+							Posted <span class={sortArrowClass(sortColumns, 'posted')}>{sortArrow(sortColumns, 'posted')}</span>{#if sortIndex(sortColumns, 'posted') > 0}<span class="text-[0.625rem] text-primary ml-0.5">{sortIndex(sortColumns, 'posted')}</span>{/if}
+						</Table.Head>
+						<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[90px]" onclick={(e: MouseEvent) => handleSort('ci_status', e)}>
+							CI <span class={sortArrowClass(sortColumns, 'ci_status')}>{sortArrow(sortColumns, 'ci_status')}</span>{#if sortIndex(sortColumns, 'ci_status') > 0}<span class="text-[0.625rem] text-primary ml-0.5">{sortIndex(sortColumns, 'ci_status')}</span>{/if}
+						</Table.Head>
+						<Table.Head class="px-2 py-1.5 w-[130px]">Branch</Table.Head>
+						<Table.Head class="cursor-pointer select-none px-2 py-1.5 w-[100px]" onclick={(e: MouseEvent) => handleSort('reviewed_at', e)}>
+							Reviewed <span class={sortArrowClass(sortColumns, 'reviewed_at')}>{sortArrow(sortColumns, 'reviewed_at')}</span>{#if sortIndex(sortColumns, 'reviewed_at') > 0}<span class="text-[0.625rem] text-primary ml-0.5">{sortIndex(sortColumns, 'reviewed_at')}</span>{/if}
+						</Table.Head>
+					</Table.Row>
+				</Table.Header>
+				<Table.Body>
+					<Table.Row>
+						<Table.Cell class="px-2 py-1"><Input type="text" bind:value={filters.pr_number} placeholder="#" class="h-8 px-2 text-xs" /></Table.Cell>
+						<Table.Cell class="px-2 py-1"><Input type="text" bind:value={filters.title} placeholder="filter..." class="h-8 px-2 text-xs" /></Table.Cell>
+						<Table.Cell class="px-2 py-1"><FilterSelect bind:value={filters.findings} options={findingsOptions} /></Table.Cell>
+						<Table.Cell class="px-2 py-1"><FilterSelect bind:value={filters.posted} options={postedOptions} /></Table.Cell>
+						<Table.Cell class="px-2 py-1"><FilterSelect bind:value={filters.ci_status} options={ciOptions} /></Table.Cell>
+						<Table.Cell class="px-2 py-1"></Table.Cell>
+						<Table.Cell class="px-2 py-1"></Table.Cell>
+					</Table.Row>
+					{#each paged as r}
+						<Table.Row class="cursor-pointer" onclick={() => toggleExpand(r)}>
+							<Table.Cell class="px-2 py-1.5 font-mono text-primary">#{r.pr_number}</Table.Cell>
+							<Table.Cell class="px-2 py-1.5 overflow-hidden">
+								<div class="truncate">{r.title}</div>
+								{#if r.summary}
+									<div class="text-xs text-muted-foreground mt-1 truncate">{r.summary}</div>
+								{/if}
+							</Table.Cell>
+							<Table.Cell>
+								<div class="flex gap-1">
+									{#if r.stats.errors > 0}
+										<Badge variant="outline" class={severityClass('error')}>{r.stats.errors} err</Badge>
+									{/if}
+									{#if r.stats.warnings > 0}
+										<Badge variant="outline" class={severityClass('warning')}>{r.stats.warnings} warn</Badge>
+									{/if}
+									{#if r.stats.infos > 0}
+										<Badge variant="outline" class={severityClass('info')}>{r.stats.infos} info</Badge>
+									{/if}
+									{#if r.stats.errors === 0 && r.stats.warnings === 0 && r.stats.infos === 0}
+										<span class="text-xs text-muted-foreground">clean</span>
+									{/if}
+								</div>
+							</Table.Cell>
+							<Table.Cell>
+								{#if r.posted_to_github}
+									<Badge variant="secondary">posted</Badge>
+								{:else}
+									<span class="text-xs text-muted-foreground">web only</span>
+								{/if}
+							</Table.Cell>
+							<Table.Cell>
+								{#if r.ci_status}
+									<Badge variant="outline" class={ciBadgeClass(r.ci_status)}>{r.ci_status}</Badge>
+								{:else}
+									<span class="text-xs text-muted-foreground">—</span>
+								{/if}
+							</Table.Cell>
+							<Table.Cell class="text-xs text-muted-foreground font-mono">{r.head_ref ?? ''}</Table.Cell>
+							<Table.Cell class="text-xs text-muted-foreground">{r.reviewed_at?.slice(0, 10) ?? ''}</Table.Cell>
 						</Table.Row>
-					</Table.Header>
-					<Table.Body>
-						{#each readyToMerge as pr}
-							{@const ci = ciBadge(pr.ci_status)}
-							<Table.Row class="cursor-pointer" onclick={() => openPr(pr)}>
-								<Table.Cell class="px-2 py-1.5 mono">{pr.number}</Table.Cell>
-								<Table.Cell class="px-2 py-1.5">{pr.title}</Table.Cell>
-								<Table.Cell class="px-2 py-1.5">
-									{#if ci.class}
-										<Badge variant="outline" class={ci.class}>{ci.label}</Badge>
+						{#if expanded.has(rowKey(r))}
+							<Table.Row>
+								<Table.Cell colspan={7} class="bg-muted/20">
+									{#if r.comments.length === 0}
+										<p class="text-xs text-muted-foreground py-2">No inline findings.</p>
 									{:else}
-										<Badge variant="secondary">{ci.label}</Badge>
+										<div class="flex flex-col gap-2 py-2">
+											{#each r.comments as c}
+												<div class="rounded border bg-card p-2 text-xs">
+													<div class="flex items-center gap-2 mb-1">
+														<Badge variant="outline" class={severityClass(c.severity)}>{c.severity}</Badge>
+														<Badge variant="secondary">{c.category}</Badge>
+														<span class="font-mono text-muted-foreground">{c.path}:{c.line}</span>
+													</div>
+													<p class="text-foreground">{c.body}</p>
+													{#if c.suggestion}
+														<pre class="mt-1 bg-muted/40 rounded p-2 overflow-x-auto">{c.suggestion}</pre>
+													{/if}
+												</div>
+											{/each}
+										</div>
 									{/if}
 								</Table.Cell>
-								<Table.Cell class="px-2 py-1.5 text-muted-foreground" title={exactTime(pr.review_decision_at)}>
-									{timeAgo(pr.review_decision_at)}
-								</Table.Cell>
 							</Table.Row>
-						{/each}
-					</Table.Body>
-				</Table.Root>
+						{/if}
+					{/each}
+				</Table.Body>
+			</Table.Root>
+		</div>
+
+		{#if pages > 1}
+			<div class="flex justify-center gap-2 mt-4">
+				<button disabled={page === 0} onclick={() => page--} class="px-3 py-1 text-xs rounded bg-muted disabled:opacity-40">&laquo;</button>
+				<span class="text-xs text-muted-foreground py-1">{page + 1} / {pages}</span>
+				<button disabled={page >= pages - 1} onclick={() => page++} class="px-3 py-1 text-xs rounded bg-muted disabled:opacity-40">&raquo;</button>
 			</div>
 		{/if}
-	</div>
-
-	<!-- Awaiting re-review -->
-	<div class="mt-6">
-		<div class="flex items-baseline gap-2 mb-1">
-			<h2 class="text-lg font-semibold text-yellow-600 dark:text-yellow-400">Awaiting your re-review</h2>
-			<span class="text-xs text-muted-foreground mono">{awaitingReReview.length}</span>
-		</div>
-		<p class="text-sm text-muted-foreground mb-3">You requested changes and the author has since pushed — don't leave them hanging</p>
-		{#if awaitingReReview.length === 0}
-			<Card.Root>
-				<Card.Content>
-					<p class="text-muted-foreground text-center py-3 text-sm">No PRs updated since your change requests.</p>
-				</Card.Content>
-			</Card.Root>
-		{:else}
-			<div class="w-full overflow-x-auto rounded-lg border">
-				<Table.Root class="w-full">
-					<Table.Header class="text-xs uppercase text-muted-foreground">
-						<Table.Row>
-							<Table.Head class="px-2 py-1.5 w-[70px]">#</Table.Head>
-							<Table.Head class="px-2 py-1.5">Title</Table.Head>
-							<Table.Head class="px-2 py-1.5 w-[150px]">Changes requested</Table.Head>
-							<Table.Head class="px-2 py-1.5 w-[130px]">Updated</Table.Head>
-						</Table.Row>
-					</Table.Header>
-					<Table.Body>
-						{#each awaitingReReview as pr}
-							<Table.Row class="cursor-pointer" onclick={() => openPr(pr)}>
-								<Table.Cell class="px-2 py-1.5 mono">{pr.number}</Table.Cell>
-								<Table.Cell class="px-2 py-1.5">{pr.title}</Table.Cell>
-								<Table.Cell class="px-2 py-1.5 text-muted-foreground" title={exactTime(pr.review_decision_at)}>
-									{timeAgo(pr.review_decision_at)}
-								</Table.Cell>
-								<Table.Cell class="px-2 py-1.5 text-foreground/90" title={exactTime(pr.updated_at)}>
-									{timeAgo(pr.updated_at)}
-								</Table.Cell>
-							</Table.Row>
-						{/each}
-					</Table.Body>
-				</Table.Root>
-			</div>
-		{/if}
-	</div>
-
-	<!-- Needs first review -->
-	<div class="mt-6">
-		<div class="flex items-baseline gap-2 mb-1">
-			<h2 class="text-lg font-semibold text-foreground">Needs first review</h2>
-			<span class="text-xs text-muted-foreground mono">{needsFirstReview.length}</span>
-		</div>
-		<p class="text-sm text-muted-foreground mb-3">Never reviewed, oldest first</p>
-		{#if needsFirstReview.length === 0}
-			<Card.Root>
-				<Card.Content>
-					<p class="text-muted-foreground text-center py-3 text-sm">Every open PR has at least one review.</p>
-				</Card.Content>
-			</Card.Root>
-		{:else}
-			<div class="w-full overflow-x-auto rounded-lg border">
-				<Table.Root class="w-full">
-					<Table.Header class="text-xs uppercase text-muted-foreground">
-						<Table.Row>
-							<Table.Head class="px-2 py-1.5 w-[70px]">#</Table.Head>
-							<Table.Head class="px-2 py-1.5">Title</Table.Head>
-							<Table.Head class="px-2 py-1.5 w-[70px]">CI</Table.Head>
-							<Table.Head class="px-2 py-1.5 w-[110px]">Age</Table.Head>
-						</Table.Row>
-					</Table.Header>
-					<Table.Body>
-						{#each needsFirstReview.slice(0, 30) as pr}
-							{@const ci = ciBadge(pr.ci_status)}
-							<Table.Row class="cursor-pointer" onclick={() => openPr(pr)}>
-								<Table.Cell class="px-2 py-1.5 mono">{pr.number}</Table.Cell>
-								<Table.Cell class="px-2 py-1.5">{pr.title}</Table.Cell>
-								<Table.Cell class="px-2 py-1.5">
-									{#if ci.class}
-										<Badge variant="outline" class={ci.class}>{ci.label}</Badge>
-									{:else}
-										<Badge variant="secondary">{ci.label}</Badge>
-									{/if}
-								</Table.Cell>
-								<Table.Cell class="px-2 py-1.5 text-muted-foreground" title={exactTime(pr.created_at)}>
-									{timeAgo(pr.created_at)}
-								</Table.Cell>
-							</Table.Row>
-						{/each}
-					</Table.Body>
-				</Table.Root>
-			</div>
-			{#if needsFirstReview.length > 30}
-				<p class="text-xs text-muted-foreground mt-2">Showing the 30 oldest of {needsFirstReview.length} — see <a href="/prs" class="text-primary hover:underline">Pull Requests</a> for the full list.</p>
-			{/if}
-		{/if}
-	</div>
-
-	<!-- Waiting on author (context only) -->
-	{#if waitingOnAuthor.length > 0}
-		<div class="mt-6">
-			<div class="flex items-baseline gap-2 mb-1">
-				<h2 class="text-sm font-semibold text-muted-foreground">Waiting on author</h2>
-				<span class="text-xs text-muted-foreground mono">{waitingOnAuthor.length}</span>
-			</div>
-			<p class="text-xs text-muted-foreground mb-2">Changes requested, no activity since — nothing for you to do yet.</p>
-			<div class="flex flex-wrap gap-2">
-				{#each waitingOnAuthor.slice(0, 20) as pr}
-					<button
-						type="button"
-						class="text-xs px-2 py-1 rounded border bg-card text-muted-foreground hover:text-foreground hover:border-muted-foreground/50"
-						onclick={() => openPr(pr)}
-						title={pr.title}
-					>#{pr.number}</button>
-				{/each}
-			</div>
-		</div>
 	{/if}
-
-	<Dialog.Root bind:open={modalOpen}>
-		<Dialog.Content class="max-h-[85vh] w-[80vw] max-w-[80vw] overflow-y-auto sm:max-w-[80vw]">
-			<Dialog.Header>
-				<Dialog.Title class="flex w-full items-center gap-3 pr-2">
-					<span class="mono text-muted-foreground text-sm">#{activePr?.number ?? ''}</span>
-					<span class="text-base font-semibold text-foreground truncate">{activePr?.title ?? ''}</span>
-				</Dialog.Title>
-			</Dialog.Header>
-			{#if activePr}
-				<PrDetail pr={activePr} />
-				<div class="text-right pt-2">
-					<a href="/prs/{activePr.number}" class="text-xs text-primary hover:text-primary/80">Open full page →</a>
-				</div>
-			{/if}
-		</Dialog.Content>
-	</Dialog.Root>
-{/if}

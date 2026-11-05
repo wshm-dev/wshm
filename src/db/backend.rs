@@ -10,6 +10,9 @@ use crate::db::injection::InjectionFlagRow;
 use crate::db::issues::Issue;
 use crate::db::pulls::{PrAnalysisRow, PullRequest};
 use crate::db::reviews::PrReviewRow;
+use crate::db::runs::{
+    NewPipelineRun, PipelineRunFilter, PipelineRunFinish, PipelineRunRow, PipelineStepRunRow,
+};
 use crate::db::search::SearchHit;
 use crate::db::sync::SyncEntry;
 use crate::db::triage::TriageResultRow;
@@ -108,7 +111,7 @@ pub trait DatabaseBackend: Send + Sync {
     /// against any backend that implements this trait.
     fn upsert_pr_analysis(&self, row: &PrAnalysisRow) -> Result<()>;
 
-    // ── PR inline review (Pro) ──────────────────────────────────
+    // ── PR inline review ────────────────────────────────────────
     //
     // Distinct from PR analysis above: `pr_reviews` stores the actual
     // line-anchored inline-comment findings from `pipelines::review`
@@ -192,6 +195,55 @@ pub trait DatabaseBackend: Send + Sync {
     fn delete_pr_diagram(&self, pr_number: u64) -> Result<()> {
         let _ = pr_number;
         Ok(())
+    }
+
+    // ── Pipeline runs (see `db::runs`) ──────────────────────────
+    //
+    // Default impls keep backends without the tables compiling: nothing is
+    // recorded (`start_pipeline_run` returns `None`, so no step is written
+    // either). SQLite and Postgres (Pro) override them.
+
+    /// Record the start of a run (status `running`). Returns its id.
+    fn start_pipeline_run(&self, run: &NewPipelineRun) -> Result<Option<i64>> {
+        let _ = run;
+        Ok(None)
+    }
+
+    /// Record one finished step of a run.
+    fn record_pipeline_step(&self, step: &PipelineStepRunRow) -> Result<()> {
+        let _ = step;
+        Ok(())
+    }
+
+    /// Record the end of a run.
+    fn finish_pipeline_run(&self, finish: &PipelineRunFinish) -> Result<()> {
+        let _ = finish;
+        Ok(())
+    }
+
+    /// Add AI calls made after the step returned (background diagram
+    /// jobs) to a step and its run.
+    fn add_pipeline_ai_calls(&self, run_id: i64, seq: u32, n: u32) -> Result<()> {
+        let _ = (run_id, seq, n);
+        Ok(())
+    }
+
+    /// Runs (newest first, with their steps), at most `limit` (capped at
+    /// [`crate::db::runs::MAX_LIST`]).
+    fn list_pipeline_runs(
+        &self,
+        filter: &PipelineRunFilter,
+        limit: usize,
+    ) -> Result<Vec<PipelineRunRow>> {
+        let _ = (filter, limit);
+        Ok(Vec::new())
+    }
+
+    /// Retention: drop runs older than `retention_days` and beyond the
+    /// `max_per_item` newest per issue/PR (0 disables either bound).
+    fn cleanup_pipeline_runs(&self, retention_days: u32, max_per_item: u32) -> Result<u64> {
+        let _ = (retention_days, max_per_item);
+        Ok(0)
     }
 
     // ── Injection flags (see `db::injection`, #235) ─────────────
@@ -322,15 +374,13 @@ pub trait DatabaseBackend: Send + Sync {
 
     // ── LLM accounting ──────────────────────────────────────────
 
-    /// Record one successful LLM invocation so the Pro usage dashboard
+    /// Record one successful LLM invocation so the usage dashboard
     /// can show real call counts (vs cache-hit "triages" that touch no
     /// LLM). `kind` is a short label like `"triage"` or `"pr_analysis"`;
     /// `model` is the model identifier if known.
     ///
-    /// Default impl is a no-op: OSS SQLite installs don't need the
-    /// accounting and we don't want to slow the hot path with an extra
-    /// write per LLM call. The Pro Postgres backend overrides this to
-    /// insert into the `llm_invocations` table.
+    /// The SQLite and Postgres backends insert into `llm_invocations`;
+    /// the default impl is a no-op for other backends.
     fn record_llm_invocation(&self, kind: &str, model: Option<&str>) -> Result<()> {
         let _ = (kind, model);
         Ok(())
@@ -338,9 +388,7 @@ pub trait DatabaseBackend: Send + Sync {
 
     /// Roll-up of LLM invocation counts over the last 24h / 7d / 30d
     /// (plus all-time total and a per-kind breakdown) for this repo's
-    /// backend. Default impl returns zeroes so OSS SQLite installs
-    /// render an empty Pro usage dashboard rather than failing the
-    /// route; only the Pro Postgres backend queries `llm_invocations`.
+    /// backend. Default impl returns zeroes.
     fn usage_counts(&self) -> Result<UsageCounts> {
         Ok(UsageCounts::default())
     }
@@ -544,6 +592,14 @@ impl DatabaseBackend for super::Database {
         self.get_pending_events()
     }
 
+    fn record_llm_invocation(&self, kind: &str, model: Option<&str>) -> Result<()> {
+        self.with_conn(|conn| super::usage::record(conn, kind, model))
+    }
+
+    fn usage_counts(&self) -> Result<UsageCounts> {
+        self.with_conn(super::usage::counts)
+    }
+
     fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         // SQLite path applies the FTS5-specific sanitisation (token*-AND);
         // Postgres backends sanitise differently inside their impl, so we
@@ -627,6 +683,36 @@ impl DatabaseBackend for super::Database {
 
     fn delete_pr_diagram(&self, pr_number: u64) -> Result<()> {
         self.delete_pr_diagram(pr_number)
+    }
+
+    fn start_pipeline_run(&self, run: &NewPipelineRun) -> Result<Option<i64>> {
+        self.with_conn(|conn| crate::db::runs::start_pipeline_run(conn, run).map(Some))
+    }
+
+    fn record_pipeline_step(&self, step: &PipelineStepRunRow) -> Result<()> {
+        self.with_conn(|conn| crate::db::runs::record_pipeline_step(conn, step))
+    }
+
+    fn finish_pipeline_run(&self, finish: &PipelineRunFinish) -> Result<()> {
+        self.with_conn(|conn| crate::db::runs::finish_pipeline_run(conn, finish))
+    }
+
+    fn add_pipeline_ai_calls(&self, run_id: i64, seq: u32, n: u32) -> Result<()> {
+        self.with_conn(|conn| crate::db::runs::add_pipeline_ai_calls(conn, run_id, seq, n))
+    }
+
+    fn list_pipeline_runs(
+        &self,
+        filter: &PipelineRunFilter,
+        limit: usize,
+    ) -> Result<Vec<PipelineRunRow>> {
+        self.with_conn(|conn| crate::db::runs::list_pipeline_runs(conn, filter, limit))
+    }
+
+    fn cleanup_pipeline_runs(&self, retention_days: u32, max_per_item: u32) -> Result<u64> {
+        self.with_conn(|conn| {
+            crate::db::runs::cleanup_pipeline_runs(conn, retention_days, max_per_item)
+        })
     }
 
     fn upsert_injection_flag(&self, row: &InjectionFlagRow) -> Result<()> {

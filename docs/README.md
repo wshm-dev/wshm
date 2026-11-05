@@ -8,10 +8,10 @@
 |-------|-------------|
 | [Getting Started](getting-started.md) | Install, configure, first run |
 | [Configuration](configuration.md) | Full config.toml reference |
-| [License & Activation](license.md) | License types, activation, vault integration |
-| [Vault Integration](vault.md) | HashiCorp, AWS, Azure, GCP secret managers |
-| [Pro Features](pro-features.md) | Code review, auto-fix, conflicts, changelog, reports |
-| [SSO & RBAC](sso-rbac.md) | SAML, OIDC, organizations, roles, permissions |
+| [License & Activation](license.md) | Editions, license activation, vault integration |
+| [Vault Integration](vault.md) | HashiCorp Vault, AWS, GCP secret managers (Enterprise) |
+| [Open source vs Enterprise](pro-features.md) | Code review, auto-fix, conflicts, changelog, reports and the Enterprise additions |
+| [SSO & RBAC](sso-rbac.md) | SSO via your auth proxy (OIDC), roles, users |
 | [Daemon & Web UI](daemon.md) | Webhook server, polling, embedded dashboard |
 | [Deployment](deployment.md) | Docker image, Helm/Kustomize, compose, Ansible, cloud-init |
 | [CLI Reference](cli-reference.md) | All commands and flags |

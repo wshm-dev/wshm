@@ -28,6 +28,7 @@ impl AiBackend {
     /// prompt (built-in or from the config) gets the untrusted-data clause,
     /// see `ai::untrusted`.
     pub async fn complete<T: DeserializeOwned>(&self, system: &str, user: &str) -> Result<T> {
+        crate::pipelines::engine::note_ai_call();
         let system = super::untrusted::harden_system(system);
         match self {
             AiBackend::Remote(ai) => ai.complete(&system, user).await,

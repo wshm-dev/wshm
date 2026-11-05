@@ -15,6 +15,7 @@ use std::sync::OnceLock;
 use crate::config::Config;
 use crate::db::backend::DatabaseBackend;
 use crate::git_provider::Forge as GhClient;
+pub use crate::pipelines::review::ReviewOutcome;
 
 // --- Feature gate hook ---
 // Checks if a pro feature is available (license validation).
@@ -85,80 +86,70 @@ pub fn apply_output_hook(text: &str) -> String {
     }
 }
 
-// --- Async Pro pipeline hooks ---
-// These allow wshm-core code paths (triage auto-fix, daemon slash commands)
-// to invoke Pro-only pipelines (autogen, review) without depending on Pro
-// source code at compile time.
-//
-// Each hook takes a borrowed context (Config, Database, Client, plus a
-// minimal set of primitive args) and returns a boxed future resolving to
-// `anyhow::Result<()>`. In the OSS build the hook is `None` and calls are
-// skipped with a warning.
-//
-// Note: we use `OnceLock` + `&'static dyn` rather than `thread_local!` to
-// ensure the hook survives tokio task migrations across worker threads.
+// --- Review / auto-fix entry points ---
+// Inline review and auto-fix are part of wshm-core. These thin wrappers are
+// the single entry points used by the pipeline engine's `review` step and by
+// triage / the `/wshm fix` command. There is no hook: they call the core
+// pipelines directly.
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-pub type AutoFixHook = for<'a> fn(
-    &'a Config,
-    &'a dyn DatabaseBackend,
-    &'a GhClient,
-    u64,
-) -> BoxFuture<'a, anyhow::Result<()>>;
-
-pub type ReviewHook = for<'a> fn(
-    &'a Config,
-    &'a dyn DatabaseBackend,
-    &'a GhClient,
-    u64,
-    bool,
-) -> BoxFuture<'a, anyhow::Result<()>>;
-
-static AUTO_FIX_HOOK: OnceLock<AutoFixHook> = OnceLock::new();
-static REVIEW_HOOK: OnceLock<ReviewHook> = OnceLock::new();
-
-pub fn set_auto_fix_hook(f: AutoFixHook) {
-    let _ = AUTO_FIX_HOOK.set(f);
-}
-
-pub fn set_review_hook(f: ReviewHook) {
-    let _ = REVIEW_HOOK.set(f);
-}
-
-/// Invoke the Pro auto-fix pipeline for a given issue number.
-/// Returns `Ok(false)` if no Pro hook is registered (OSS build).
+/// Run the auto-fix pipeline for a given issue number (opens a fix PR).
 pub async fn run_auto_fix(
     config: &Config,
     db: &dyn DatabaseBackend,
     gh: &GhClient,
     issue_number: u64,
 ) -> anyhow::Result<bool> {
-    match AUTO_FIX_HOOK.get() {
-        Some(f) => {
-            f(config, db, gh, issue_number).await?;
-            Ok(true)
-        }
-        None => Ok(false),
-    }
+    let fix_args = crate::cli::FixArgs {
+        issue: issue_number,
+        tool: None,
+        model: None,
+        docker: false,
+        image: None,
+        apply: true,
+    };
+    crate::pipelines::autogen::run(config, db, gh, &fix_args, None).await?;
+    Ok(true)
 }
 
-/// Invoke the Pro review pipeline for a given PR number.
-/// Returns `Ok(false)` if no Pro hook is registered (OSS build).
+/// Run the inline review for a given PR number and report what it did.
 pub async fn run_review(
     config: &Config,
     db: &dyn DatabaseBackend,
     gh: &GhClient,
     pr_number: u64,
     apply: bool,
-) -> anyhow::Result<bool> {
-    match REVIEW_HOOK.get() {
-        Some(f) => {
-            f(config, db, gh, pr_number, apply).await?;
-            Ok(true)
-        }
-        None => Ok(false),
-    }
+) -> anyhow::Result<ReviewOutcome> {
+    let args = crate::cli::ReviewArgs {
+        pr: Some(pr_number),
+        apply,
+    };
+    let outcomes = crate::pipelines::review::run(config, db, gh, &args, false).await?;
+    Ok(outcomes
+        .into_iter()
+        .find(|(n, _)| *n == pr_number)
+        .map(|(_, o)| o)
+        .unwrap_or_else(|| ReviewOutcome::Skipped("nothing reviewed".into())))
+}
+
+// --- Pipeline step hook ---
+// Pro registers its extra pipeline step kinds here (see
+// `pipelines::engine::steps::Step`). They join the built-in catalog in
+// `StepRegistry::global()`; a Pro kind with the name of a built-in one
+// replaces it.
+
+pub type PipelineStepsFn = fn() -> Vec<std::sync::Arc<dyn crate::pipelines::engine::steps::Step>>;
+
+static PIPELINE_STEPS_HOOK: OnceLock<PipelineStepsFn> = OnceLock::new();
+
+pub fn set_pipeline_steps(f: PipelineStepsFn) {
+    let _ = PIPELINE_STEPS_HOOK.set(f);
+}
+
+/// Extra step kinds registered by Pro (none in the OSS build).
+pub fn pipeline_steps() -> Vec<std::sync::Arc<dyn crate::pipelines::engine::steps::Step>> {
+    PIPELINE_STEPS_HOOK.get().map(|f| f()).unwrap_or_default()
 }
 
 // --- Update hooks ---

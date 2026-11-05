@@ -99,6 +99,15 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS llm_invocations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind        TEXT NOT NULL,
+            model       TEXT,
+            occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_llm_invocations_at
+          ON llm_invocations (occurred_at);
+
         CREATE TABLE IF NOT EXISTS pr_diagrams (
             pr_number   INTEGER PRIMARY KEY,
             diff_hash   TEXT NOT NULL,
@@ -143,6 +152,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         ",
     )?;
 
+    // Pipeline run tracking (see `db::runs`).
+    conn.execute_batch(crate::db::runs::SQLITE_DDL)?;
     conn.execute_batch(crate::db::injection::CREATE_TABLE)?;
 
     // Migration: pr_diagrams from early builds stored the page HTML; the
