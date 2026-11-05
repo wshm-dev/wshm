@@ -47,6 +47,7 @@ pub async fn run(
     json: bool,
 ) -> Result<Vec<(u64, ReviewOutcome)>> {
     let ai = AiBackend::from_config(config, &config.ai.model)?;
+    let guard_cfg = crate::ai::guard::load(config, db);
 
     // Skills — standing instructions configured in Settings, same mechanism
     // triage/PR-analysis already use. Fetched once per run (constant across
@@ -130,13 +131,42 @@ pub async fn run(
             ai.complete(inline_review::SYSTEM, &user_prompt).await
         };
 
-        let result = match result {
+        let mut result = match result {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("Failed to review PR #{}: {e:#}", pr.number);
                 outcomes.push((pr.number, ReviewOutcome::Failed(format!("{e:#}"))));
                 continue;
             }
+        };
+
+        // Output validation (#235): comments must target a line of the new
+        // side of the diff; text loses mentions, links and HTML.
+        let dropped = crate::ai::output::validate_review(&mut result, &diff);
+        if dropped > 0 {
+            info!(
+                "PR #{}: {dropped} review comment(s) dropped (line not in the diff or invalid)",
+                pr.number
+            );
+        }
+
+        // Injection detection over the PR text and the added lines (#235).
+        let pr_text = format!("{}\n\n{pr_body}", pr.title);
+        let assessment = crate::ai::guard::assess_texts(
+            &guard_cfg,
+            &[
+                ("pull request", pr_text.as_str()),
+                ("pull request diff", diff.as_str()),
+            ],
+        );
+        crate::ai::guard::record(db, "pull", pr.number, "review", &assessment);
+        let note = if assessment.suspicious && guard_cfg.maintainer_note {
+            format!(
+                "\n\n{}",
+                crate::ai::guard::maintainer_note("pull request", &assessment)
+            )
+        } else {
+            String::new()
         };
 
         // Print results
@@ -163,7 +193,7 @@ pub async fn run(
 
 {}
 
-{}
+{}{note}
 
 {}",
                 config.branding.header(),

@@ -189,6 +189,11 @@ pub struct AiConfig {
     /// PR-analysis prompts. Lexical only (FTS5 / tsvector), no embeddings.
     #[serde(default)]
     pub rag: RagConfig,
+
+    /// Prompt-injection hardening (`[ai.injection]`), see `ai::guard`.
+    /// Overridable per repo in the DB.
+    #[serde(default)]
+    pub injection: crate::ai::guard::InjectionConfig,
 }
 
 impl Default for AiConfig {
@@ -198,6 +203,7 @@ impl Default for AiConfig {
             model: default_ai_model(),
             base_url: None,
             rag: RagConfig::default(),
+            injection: crate::ai::guard::InjectionConfig::default(),
         }
     }
 }
@@ -2679,6 +2685,24 @@ model = "claude-sonnet-4-20250514"
 #   ollama     → no key needed (local)
 #   azure      → AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT
 #   custom     → WSHM_AI_API_KEY + base_url
+
+# Prompt-injection hardening. Issue/PR text, diffs and files are sent to the
+# model as delimited untrusted data; the model output is validated against
+# allowlists before wshm acts. Per-repo override: PUT
+# /api/v1/repos/{slug}/injection (stored in the DB, shared by pods).
+# [ai.injection]
+# detection = true                  # flag likely injection attempts (no AI call)
+# threshold = 3                     # score at which an item is flagged (1..=20)
+# block_mutations = true            # flagged item: no label change, close, auto-fix or diagram
+# maintainer_note = true            # add a short warning to wshm's comment
+# require_non_ai_condition = true   # AI-chosen duplicate close / auto-fix start needs the
+#                                   # issue author to be a collaborator or trusted, or a
+#                                   # collaborator's approval of the current content.
+#                                   # Auto-fix still applies [fix] trusted_authors_only.
+# approval_label = "wshm:approved"  # added by a collaborator (GitHub webhook `labeled`
+#                                   # event); bound to the content, an edit voids it;
+#                                   # re-runs triage; ignored on Azure DevOps
+# trusted_authors = []              # trusted in addition to collaborators
 
 [triage]
 enabled = true

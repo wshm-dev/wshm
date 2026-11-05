@@ -2,6 +2,7 @@ pub mod backend;
 pub mod diagrams;
 pub mod events;
 pub mod history;
+pub mod injection;
 pub mod issues;
 pub mod licenses;
 pub mod pulls;

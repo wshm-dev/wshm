@@ -154,6 +154,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     // Pipeline run tracking (see `db::runs`).
     conn.execute_batch(crate::db::runs::SQLITE_DDL)?;
+    conn.execute_batch(crate::db::injection::CREATE_TABLE)?;
 
     // Migration: pr_diagrams from early builds stored the page HTML; the
     // page is now rendered on request and only its size is kept.

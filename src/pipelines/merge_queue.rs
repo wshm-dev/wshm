@@ -64,7 +64,20 @@ pub async fn run(
 
     if args.apply {
         if let Some(top) = scored.first() {
-            if top.score >= config.queue.merge_threshold {
+            // A PR flagged as possible prompt injection (#235) is never
+            // merged automatically, whatever its score.
+            if crate::ai::guard::is_flagged(db, "pull", top.pr.number) {
+                info!(
+                    "Top PR #{} is flagged as possible prompt injection: not merging",
+                    top.pr.number
+                );
+                if !json {
+                    println!(
+                        "\nTop PR #{} is flagged as possible prompt injection. Not merging.",
+                        top.pr.number
+                    );
+                }
+            } else if top.score >= config.queue.merge_threshold {
                 info!("Would merge PR #{} (score: {})", top.pr.number, top.score);
                 if !json {
                     println!(

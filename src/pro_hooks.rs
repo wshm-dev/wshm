@@ -95,11 +95,14 @@ pub fn apply_output_hook(text: &str) -> String {
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Run the auto-fix pipeline for a given issue number (opens a fix PR).
+/// `force` overrides the prompt-injection gate of `autogen::run`; a refusal
+/// is an error that downcasts to `autogen::AutoFixRefused`.
 pub async fn run_auto_fix(
     config: &Config,
     db: &dyn DatabaseBackend,
     gh: &GhClient,
     issue_number: u64,
+    force: bool,
 ) -> anyhow::Result<bool> {
     let fix_args = crate::cli::FixArgs {
         issue: issue_number,
@@ -108,6 +111,7 @@ pub async fn run_auto_fix(
         docker: false,
         image: None,
         apply: true,
+        force,
     };
     crate::pipelines::autogen::run(config, db, gh, &fix_args, None).await?;
     Ok(true)
