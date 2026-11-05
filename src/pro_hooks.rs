@@ -161,6 +161,25 @@ pub async fn run_review(
     }
 }
 
+// --- Pipeline step hook ---
+// Pro registers its extra pipeline step kinds here (see
+// `pipelines::engine::steps::Step`). They join the built-in catalog in
+// `StepRegistry::global()`; a Pro kind with the name of a built-in one
+// replaces it.
+
+pub type PipelineStepsFn = fn() -> Vec<std::sync::Arc<dyn crate::pipelines::engine::steps::Step>>;
+
+static PIPELINE_STEPS_HOOK: OnceLock<PipelineStepsFn> = OnceLock::new();
+
+pub fn set_pipeline_steps(f: PipelineStepsFn) {
+    let _ = PIPELINE_STEPS_HOOK.set(f);
+}
+
+/// Extra step kinds registered by Pro (none in the OSS build).
+pub fn pipeline_steps() -> Vec<std::sync::Arc<dyn crate::pipelines::engine::steps::Step>> {
+    PIPELINE_STEPS_HOOK.get().map(|f| f()).unwrap_or_default()
+}
+
 // --- Update hooks ---
 // Allow wshm-pro to override the update target (binary name, repo, version
 // suffix) without duplicating the download/verify/replace logic.

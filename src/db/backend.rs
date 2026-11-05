@@ -9,6 +9,9 @@ use crate::db::history::{ChangeEvent, ChangeEventFilter};
 use crate::db::issues::Issue;
 use crate::db::pulls::{PrAnalysisRow, PullRequest};
 use crate::db::reviews::PrReviewRow;
+use crate::db::runs::{
+    NewPipelineRun, PipelineRunFilter, PipelineRunFinish, PipelineRunRow, PipelineStepRunRow,
+};
 use crate::db::search::SearchHit;
 use crate::db::sync::SyncEntry;
 use crate::db::triage::TriageResultRow;
@@ -191,6 +194,48 @@ pub trait DatabaseBackend: Send + Sync {
     fn delete_pr_diagram(&self, pr_number: u64) -> Result<()> {
         let _ = pr_number;
         Ok(())
+    }
+
+    // ── Pipeline runs (see `db::runs`) ──────────────────────────
+    //
+    // Default impls keep backends without the tables compiling: nothing is
+    // recorded (`start_pipeline_run` returns `None`, so no step is written
+    // either). SQLite and Postgres (Pro) override them.
+
+    /// Record the start of a run (status `running`). Returns its id.
+    fn start_pipeline_run(&self, run: &NewPipelineRun) -> Result<Option<i64>> {
+        let _ = run;
+        Ok(None)
+    }
+
+    /// Record one finished step of a run.
+    fn record_pipeline_step(&self, step: &PipelineStepRunRow) -> Result<()> {
+        let _ = step;
+        Ok(())
+    }
+
+    /// Record the end of a run.
+    fn finish_pipeline_run(&self, finish: &PipelineRunFinish) -> Result<()> {
+        let _ = finish;
+        Ok(())
+    }
+
+    /// Runs (newest first, with their steps), at most `limit` (capped at
+    /// [`crate::db::runs::MAX_LIST`]).
+    fn list_pipeline_runs(
+        &self,
+        filter: &PipelineRunFilter,
+        limit: usize,
+    ) -> Result<Vec<PipelineRunRow>> {
+        let _ = (filter, limit);
+        Ok(Vec::new())
+    }
+
+    /// Retention: drop runs older than `retention_days` and beyond the
+    /// `max_per_item` newest per issue/PR (0 disables either bound).
+    fn cleanup_pipeline_runs(&self, retention_days: u32, max_per_item: u32) -> Result<u64> {
+        let _ = (retention_days, max_per_item);
+        Ok(0)
     }
 
     /// Insert `value` only if `key` has never been written. Returns `true`
@@ -602,6 +647,32 @@ impl DatabaseBackend for super::Database {
 
     fn delete_pr_diagram(&self, pr_number: u64) -> Result<()> {
         self.delete_pr_diagram(pr_number)
+    }
+
+    fn start_pipeline_run(&self, run: &NewPipelineRun) -> Result<Option<i64>> {
+        self.with_conn(|conn| crate::db::runs::start_pipeline_run(conn, run).map(Some))
+    }
+
+    fn record_pipeline_step(&self, step: &PipelineStepRunRow) -> Result<()> {
+        self.with_conn(|conn| crate::db::runs::record_pipeline_step(conn, step))
+    }
+
+    fn finish_pipeline_run(&self, finish: &PipelineRunFinish) -> Result<()> {
+        self.with_conn(|conn| crate::db::runs::finish_pipeline_run(conn, finish))
+    }
+
+    fn list_pipeline_runs(
+        &self,
+        filter: &PipelineRunFilter,
+        limit: usize,
+    ) -> Result<Vec<PipelineRunRow>> {
+        self.with_conn(|conn| crate::db::runs::list_pipeline_runs(conn, filter, limit))
+    }
+
+    fn cleanup_pipeline_runs(&self, retention_days: u32, max_per_item: u32) -> Result<u64> {
+        self.with_conn(|conn| {
+            crate::db::runs::cleanup_pipeline_runs(conn, retention_days, max_per_item)
+        })
     }
 
     fn as_sqlite_db(&self) -> Option<&super::Database> {

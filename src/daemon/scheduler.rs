@@ -229,6 +229,11 @@ pub async fn run(state: Arc<DaemonState>) {
                 error!("Change history cleanup failed: {e:#}");
             }
         }
+        // Bounded pipeline run history ([pipeline_runs] retention_days /
+        // max_per_item, DB override included).
+        if let Err(e) = crate::pipelines::engine::cleanup_runs(&state.config, state.db.as_ref()) {
+            error!("Pipeline run cleanup failed: {e:#}");
+        }
 
         // Auto-update check — gated on a process-global atomic so only
         // one repo's scheduler triggers the download per interval, even

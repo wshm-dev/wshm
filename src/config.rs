@@ -114,6 +114,21 @@ pub struct Config {
     #[serde(default)]
     pub skills: Vec<SkillDef>,
 
+    /// `[[pipelines]]` — pipeline templates (ordered steps with conditions).
+    /// The built-in `standard` template (today's behaviour) is the default.
+    /// The DB override (`app_settings` key `pipelines`) replaces this list
+    /// when set; see `pipelines::engine::template::load`.
+    #[serde(default)]
+    pub pipelines: Vec<crate::pipelines::engine::template::PipelineTemplate>,
+
+    /// `[[pipeline_routes]]` — rules picking the template of a run.
+    #[serde(default)]
+    pub pipeline_routes: Vec<crate::pipelines::engine::template::PipelineRoute>,
+
+    /// `[pipeline_runs]` — retention of the run history.
+    #[serde(default)]
+    pub pipeline_runs: crate::pipelines::engine::template::PipelineRunsConfig,
+
     /// Resolved at runtime, not from config file
     #[serde(skip)]
     pub repo_owner: String,
@@ -548,7 +563,7 @@ pub const DIAGRAM_KINDS: &[&str] = &["architecture", "flow", "changes", "delta",
 
 /// Recursively overlay `over` onto `base` (objects merged key by key, any
 /// other value replaced).
-fn merge_json(base: &mut serde_json::Value, over: &serde_json::Value) {
+pub(crate) fn merge_json(base: &mut serde_json::Value, over: &serde_json::Value) {
     match (base, over) {
         (serde_json::Value::Object(b), serde_json::Value::Object(o)) => {
             for (k, v) in o {
@@ -2470,6 +2485,9 @@ impl Config {
         } else {
             Config::default()
         };
+        config
+            .validate_pipelines()
+            .with_context(|| format!("Invalid pipeline config in {}", config_path.display()))?;
 
         config.wshm_dir = wshm_dir;
 
@@ -2482,6 +2500,16 @@ impl Config {
 
         config.ai.rag.apply_env_overrides();
         Ok(config)
+    }
+
+    /// Structural check of `[[pipelines]]` / `[[pipeline_routes]]` (names,
+    /// step ids, `needs`, conditions, limits). Step kinds are checked when a
+    /// run starts, against the edition's step catalog.
+    pub fn validate_pipelines(&self) -> Result<()> {
+        crate::pipelines::engine::template::validate(
+            &crate::pipelines::engine::template::from_config(self),
+        )
+        .map_err(|e| anyhow::anyhow!(e))
     }
 
     pub fn fix_secret_env_vars(&self) -> Vec<String> {
@@ -2537,6 +2565,9 @@ impl Config {
         } else {
             Config::default()
         };
+        config
+            .validate_pipelines()
+            .context("Invalid pipeline config in .wshm/config.toml")?;
 
         config.wshm_dir = wshm_dir;
 
@@ -2809,6 +2840,36 @@ full_sync_interval_hours = 24
 # pipelines = ["pr_review", "review"]
 # enabled = true
 
+# Pipelines: how an issue / PR event is processed. Without any of this, the
+# built-in "standard" pipeline runs: exactly the repo toggles
+# (collect_*, triage_issues, review_prs, analyze_prs, filters). Every run is
+# recorded per step (GET /api/v1/repos/{slug}/runs?item=N). Never read from
+# an issue or PR. Override per repo in the DB: PUT /api/v1/repos/{slug}/pipelines.
+# [[pipelines]]
+# name = "light"                        # a-z 0-9 - _ ; "standard" is reserved
+# max_ai_calls = 2                      # AI call budget of a run (optional)
+#
+# [[pipelines.steps]]
+# id = "sync"
+# uses = "sync"                         # sync | triage | review | analyze | memory
+#
+# [[pipelines.steps]]
+# id = "analyze"
+# uses = "analyze"
+# needs = ["sync"]                      # earlier steps that must be done
+# on_failure = "abort"                  # abort (default) | continue
+# timeout_secs = 300
+# when = { item = "pr", features = ["analyze_prs"], labels_none = ["skip-ai"] }
+#
+# [[pipeline_routes]]                   # highest priority first; no match = standard
+# template = "light"
+# priority = 10
+# when = { item = "pr", paths = ["docs/**", "**/*.md"] }
+#
+# [pipeline_runs]
+# retention_days = 30                   # 0 = no age limit
+# max_per_item = 20                     # runs kept per issue/PR (0 = no limit)
+
 # [assign]
 # enabled = true
 #
@@ -3046,6 +3107,9 @@ impl Default for Config {
             prs_blacklist: Vec::new(),
             labels: Vec::new(),
             skills: Vec::new(),
+            pipelines: Vec::new(),
+            pipeline_routes: Vec::new(),
+            pipeline_runs: Default::default(),
             repo_owner: String::new(),
             repo_name: String::new(),
             wshm_dir: PathBuf::from(".wshm"),
