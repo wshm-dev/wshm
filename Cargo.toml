@@ -119,6 +119,8 @@ google-cloud-secretmanager-v1 = { version = "1", optional = true }
 mime_guess = "2"
 rust-embed = "8"
 urlencoding = "2.1.3"
+# NFKC folding of lookalike characters before injection detection (#235).
+unicode-normalization = "0.1.25"
 futures = "0.3.32"
 ratatui = "0.29"
 crossterm = "0.28"

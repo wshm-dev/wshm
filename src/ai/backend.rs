@@ -9,6 +9,9 @@ use crate::config::Config;
 pub enum AiBackend {
     Remote(AiClient),
     Local(LocalClient),
+    /// Canned JSON response (tests only).
+    #[cfg(test)]
+    Mock(String),
 }
 
 impl AiBackend {
@@ -21,12 +24,20 @@ impl AiBackend {
         }
     }
 
-    /// Call the AI and deserialize the JSON response into T.
+    /// Call the AI and deserialize the JSON response into T. Every system
+    /// prompt (built-in or from the config) gets the untrusted-data clause,
+    /// see `ai::untrusted`.
     pub async fn complete<T: DeserializeOwned>(&self, system: &str, user: &str) -> Result<T> {
         crate::pipelines::engine::note_ai_call();
+        let system = super::untrusted::harden_system(system);
         match self {
-            AiBackend::Remote(ai) => ai.complete(system, user).await,
-            AiBackend::Local(local) => local.complete(system, user),
+            AiBackend::Remote(ai) => ai.complete(&system, user).await,
+            AiBackend::Local(local) => local.complete(&system, user),
+            #[cfg(test)]
+            AiBackend::Mock(raw) => {
+                let _ = (system, user);
+                Ok(serde_json::from_str(raw)?)
+            }
         }
     }
 }

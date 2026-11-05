@@ -31,6 +31,56 @@ max_chars = 3000                  # size cap of the block
 # Logs: one INFO line per triage/analysis listing the retrieved items,
 # the full block at RUST_LOG=debug.
 
+[ai.injection]                    # prompt-injection hardening (defaults shown)
+detection = true                  # flag likely injection attempts (rules, no AI call)
+threshold = 3                     # score at which an item is flagged (1..=20)
+block_mutations = true            # flagged item: no label change, close, auto-fix PR
+                                  # or diagram
+maintainer_note = true            # add a short warning to the comment wshm posts
+require_non_ai_condition = true   # an AI-chosen duplicate close or auto-fix start needs,
+                                  # on the issue it acts on: an author who is a
+                                  # collaborator or in trusted_authors, or a
+                                  # collaborator's approval of its current content.
+                                  # The auto-fix itself still applies [fix]
+                                  # trusted_authors_only / allowed_users.
+approval_label = "wshm:approved"  # approval: added by a collaborator, recorded from
+                                  # the GitHub `issues.labeled` webhook event and
+                                  # bound to the issue content at that moment (an
+                                  # edit voids it); the event re-runs triage. Not
+                                  # usable in polling mode, ignored on Azure DevOps
+                                  # (any contributor can set tags). Must not be a
+                                  # label wshm applies itself. The model can never
+                                  # apply it.
+trusted_authors = []              # trusted in addition to repository collaborators
+# Per-repo override, stored in the DB and shared by every pod:
+#   GET/PUT /api/v1/repos/{slug}/injection   (body: partial object, or null;
+#   PUT: admin). GET also lists the flagged items; the matched excerpts are
+#   only returned to operators and admins, as plain text (escape before
+#   rendering).
+#
+# Slash command: `/wshm fix` refuses a flagged or suspicious issue; a
+# maintainer can override with `/wshm fix --force`.
+#
+# Always on, not configurable:
+# - issue/PR text, diffs, file paths, files, retrieved history and memory are
+#   sent as delimited untrusted data (random boundary per block, invisible,
+#   bidi and tag characters removed, lookalike characters folded for
+#   detection, hidden comments and collapsed sections surfaced). Only the
+#   item's own content decides; suspicious context lines (other titles,
+#   history, memory) are left out of the prompt, and flagged items never
+#   come back as related history or memory.
+# - in test/fixture files of a diff, findings add at most 2 to the score.
+# - model output is validated: labels from [[labels]] or, without it, the
+#   standard set only; CI/merge trigger labels (ok-to-test, automerge, lgtm,
+#   run-ci...) never on PRs; known duplicate target; linked issues referenced
+#   in the PR; inline review lines present in the diff. Posted text loses
+#   mentions, links and secrets; HTML is escaped (code is kept verbatim).
+# - the `claude -p` backend runs without tools or MCP servers, with the
+#   system prompt in its own flag, the prompt on stdin, no saved session and
+#   an empty working directory.
+# These are mitigations, not guarantees: keep automatic actions behind human
+# review for untrusted contributors.
+
 [triage]
 enabled = true
 auto_fix = false                  # attempt auto-fix for simple bugs

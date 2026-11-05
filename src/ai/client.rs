@@ -287,20 +287,39 @@ impl AiClient {
 
     /// Call Claude via the `claude` CLI (`claude -p`).
     /// Used for Max/Pro/Team subscriptions (OAuth) — no API key needed.
+    ///
+    /// Analysis-only (#235): no built-in tools, no MCP servers, no session
+    /// saved, the system prompt in its own channel, the user prompt on stdin
+    /// (never in argv, visible to other local users), and an empty working
+    /// directory, so injected content cannot make the CLI read local files.
     async fn call_claude_cli(&self, system: &str, user: &str) -> Result<String> {
-        debug!("Calling claude CLI (OAuth/Max/Pro mode)");
+        use tokio::io::AsyncWriteExt;
+        debug!("Calling claude CLI (OAuth/Max/Pro mode, no tools)");
 
-        let prompt = format!("{system}\n\n{user}");
-
-        let output = tokio::process::Command::new("claude")
-            .args(["-p", &prompt, "--output-format", "text"])
+        let workdir = EmptyDir::new()?;
+        let mut child = tokio::process::Command::new("claude")
+            .args(claude_cli_args(system))
             .env("CLAUDE_MODEL", &self.provider.model)
+            .current_dir(workdir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             // A caller that gives up (timeout, dropped task) must not leave
             // the CLI running.
             .kill_on_drop(true)
-            .output()
-            .await
+            .spawn()
             .context("Failed to run `claude -p`. Is claude CLI installed? (npm install -g @anthropic-ai/claude-code)")?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(user.as_bytes())
+                .await
+                .context("writing the prompt to `claude -p`")?;
+            // Dropping stdin closes it: the CLI starts on EOF.
+        }
+        let output = child
+            .wait_with_output()
+            .await
+            .context("waiting for `claude -p`")?;
 
         if !output.status.success() {
             // The claude CLI writes operational failures (usage limit, auth,
@@ -528,9 +547,78 @@ fn truncate_error_body(body: &str) -> String {
     }
 }
 
+/// argv of the analysis-only `claude -p` call (prompt on stdin).
+fn claude_cli_args(system: &str) -> Vec<String> {
+    [
+        "-p",
+        "--output-format",
+        "text",
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--no-session-persistence",
+        "--system-prompt",
+        system,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// An empty private directory, removed on drop: the working directory of
+/// the CLI, so even a tool slipping through finds nothing to read.
+struct EmptyDir(std::path::PathBuf);
+
+impl EmptyDir {
+    fn new() -> Result<Self> {
+        let p = std::env::temp_dir().join(format!("wshm-ai-{:032x}", rand::random::<u128>()));
+        std::fs::create_dir(&p).with_context(|| format!("creating {}", p.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700));
+        }
+        Ok(Self(p))
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for EmptyDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_cli_runs_without_tools_and_keeps_the_prompt_off_argv() {
+        let args = claude_cli_args("SYSTEM TEXT");
+        assert_eq!(
+            args,
+            vec![
+                "-p",
+                "--output-format",
+                "text",
+                "--tools",
+                "",
+                "--strict-mcp-config",
+                "--no-session-persistence",
+                "--system-prompt",
+                "SYSTEM TEXT",
+            ]
+        );
+        let d = EmptyDir::new().unwrap();
+        let p = d.path().to_path_buf();
+        assert!(std::fs::read_dir(&p).unwrap().next().is_none());
+        drop(d);
+        assert!(!p.exists());
+    }
 
     #[test]
     fn test_extract_json_plain() {
