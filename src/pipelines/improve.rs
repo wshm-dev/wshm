@@ -139,7 +139,8 @@ pub async fn run(
                     )
                 },
                 if args.auto_fix {
-                    "> 🔧 Auto-fix will be attempted on this issue.".to_string()
+                    "> 🔧 Auto-fix candidate: a maintainer can run `/wshm fix` to generate a PR."
+                        .to_string()
                 } else {
                     "> Use `/wshm fix` to auto-generate a PR for this improvement.".to_string()
                 },
@@ -204,7 +205,9 @@ pub async fn run(
             })?
         );
     } else if args.apply && args.auto_fix {
-        println!("\nIssues created. Auto-fix will be triggered by the daemon on next poll.");
+        println!(
+            "\nIssues created. Auto-fix is not started automatically: run `wshm fix --issue <N> --apply` or comment `/wshm fix` on an issue."
+        );
     }
 
     Ok(())

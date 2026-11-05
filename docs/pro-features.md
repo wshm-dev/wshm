@@ -3,9 +3,20 @@
 wshm follows an open-core model:
 
 - **Open source** (`wshm`, Apache-2.0): every feature on this page except the Enterprise section. No license key needed.
-- **Enterprise (self-hosted)** (`wshm-pro`): everything in open source, plus users & RBAC, audit log, PostgreSQL multi-pod, vault/secrets storage, exports and support. Contact us at [contact@wshm.dev](mailto:contact@wshm.dev).
+- **Enterprise (self-hosted)** (`wshm-pro`): everything in open source, plus the user management page and PostgreSQL user store, PostgreSQL multi-pod, vault placeholders and PostgreSQL secret store, exports, hosted diagram pages and support. Contact us at [contact@wshm.dev](mailto:contact@wshm.dev).
 
 The commands below use the `wshm` binary name. The Enterprise binary is `wshm-pro` and accepts the same commands (the Docker image installs it as `wshm`).
+
+## Upgrading from an open-source release before the open-core split
+
+Some settings had no effect in the open-source `wshm` binary and now run. Check them before upgrading:
+
+- `review_prs = true` (repo features): inline review runs on PR events. With the daemon in apply mode and `review_post_comments = true` (the default), review comments are posted on the PR.
+- `[triage] auto_fix = true`: `wshm triage --apply` (and the daemon in apply mode) now starts auto-fix and opens draft PRs.
+- `[notify] on_run = true`: `wshm run` now sends the notification summary.
+- `wshm run` now also runs conflict detection (read-only).
+
+`wshm-pro` installs are not affected: these settings already ran there.
 
 # Open-source features
 
@@ -67,20 +78,30 @@ wshm review --pr 42 --apply
 
 ## Auto-Fix
 
-Automatically generate fix PRs from issue descriptions.
+Generate a draft fix PR from an issue description.
 
 ```bash
-# Generate a fix for an issue
+# Dry run: show the prompt and the tool that would run
+wshm fix --issue 15
+
+# Generate the fix and open a draft PR
 wshm fix --issue 15 --apply
+
+# Run the agent in a rootless Podman container
+wshm fix --issue 15 --docker --apply
 ```
 
 **What it does:**
-1. Reads the issue description from the cache
-2. Uses AI (Claude Code, Codex, or Podman container) to generate a fix
-3. Runs security scan on the diff (17 patterns: curl, eval, API keys, SSH keys...)
-4. Optionally runs tests with configurable retries
-5. Creates a draft PR on branch `wshm/fix-<issue_number>`
-6. Comments on the issue with a link to the PR
+1. Reads the issue from the cache and checks out a clean `wshm/fix-<N>` branch from `[fix] base_branch`, in the repository root.
+2. Runs the coding agent (`[fix] tool`: `claude-code` or `codex`, `[fix] model`) in the repository root:
+   - claude: `--permission-mode acceptEdits`, only Read / Grep / Glob / Edit / Write tools, Bash only for `[fix] test_command`, no web tools, no MCP servers, no session persistence;
+   - codex: `codex exec --sandbox workspace-write` with network access off;
+   - the prompt is sent on stdin; the agent gets PATH, HOME and the model API variables only (never the forge token or `DATABASE_URL`);
+   - `--docker`: `[fix] docker_image`, `--network=none`, all capabilities dropped, no-new-privileges, memory and pids limits, only the repository mounted. With `--network=none` the agent cannot reach the model API: set `WSHM_FIX_CONTAINER_NETWORK` to a network with a controlled egress, or run without `--docker`.
+3. Stages every change (new files included) and rejects the fix if it touches CI or build files (`.github/`, `.gitlab-ci.yml` and other CI configs, `build.rs`, `package.json`, `Makefile`, `Dockerfile`, …).
+4. Scans the staged diff for suspicious patterns (network calls, process execution, secrets) when `[fix] scan_diff = true` (default).
+5. Optionally runs `[fix] test_command` with `[fix] test_retries`.
+6. Commits, pushes the branch and opens a draft PR, then comments on the issue.
 
 **Eligible issues:** bugs with `is_simple_fix = true` and confidence >= 85%.
 
@@ -89,34 +110,33 @@ wshm fix --issue 15 --apply
 **Config:**
 ```toml
 [triage]
-auto_fix = true
+auto_fix = true             # triggers auto-fix from triage (with --apply)
 auto_fix_confidence = 0.85
 
 [fix]
+tool = "claude-code"        # or "codex"
 test_command = "cargo test"
 test_retries = 2
-trusted_authors_only = false
+trusted_authors_only = true # default: only fix issues opened by collaborators
 ```
+
+> **Warning:** auto-fix runs an AI coding agent on text written by the issue author. Keep `trusted_authors_only = true` (the default) and draft PRs on, and review every generated PR. Turning `trusted_authors_only` off lets anyone who can open an issue steer the agent.
 
 ---
 
-## Conflict Resolution
+## Conflict Detection
 
-Detect and resolve merge conflicts across open PRs.
+Detect conflicting PRs.
 
 ```bash
-# Scan for conflicts (dry run)
 wshm conflicts
-
-# Attempt AI resolution
-wshm conflicts --apply
 ```
 
 **What it does:**
 - Scans all open PRs for `mergeable = false`
 - Groups PRs by clean / conflicting / unknown status
-- (With `--apply`) Attempts AI-powered rebase resolution
-- Never force-pushes — creates new commits
+
+wshm does not rebase or resolve conflicts. `--apply` is accepted for compatibility and changes nothing. `[conflicts] auto_resolve` is not implemented and ignored.
 
 **Web UI:** `/conflicts` tab — summary cards + conflict table.
 
@@ -217,7 +237,7 @@ Priority summary sent to Discord, Slack, Teams or generic webhooks.
 wshm notify
 ```
 
-With `[notify] on_run = true`, `wshm run` sends it at the end of each cycle.
+With `[notify] on_run = true`, `wshm run` sends it at the end of each cycle. The daemon does not send notifications: run `wshm notify` from cron for a scheduled digest.
 
 ---
 
@@ -225,7 +245,7 @@ With `[notify] on_run = true`, `wshm run` sends it at the end of each cycle.
 
 - `/pr-insights` and `/issue-insights` — open PR / issue breakdowns and trends
 - `/search` — full-text search across issues and PRs of every repo
-- `/usage` — AI call counts and GitHub API rate limit
+- `/usage` — AI call counts (recorded from this release on, SQLite and PostgreSQL) and GitHub API rate limit
 - `/review/radar` — PRs waiting on you (approved, or changed since you asked for changes)
 
 ---
@@ -253,27 +273,26 @@ wshm revert --apply
 
 # Enterprise (self-hosted) features
 
-These need a license. Contact us at [contact@wshm.dev](mailto:contact@wshm.dev).
+These ship in the `wshm-pro` binary. Contact us at [contact@wshm.dev](mailto:contact@wshm.dev).
+
+Only three of them check the license at runtime: `vault()` placeholders, exports and hosted diagram pages. The others are available in the `wshm-pro` binary without a license check.
 
 ## Users & RBAC
 
-User management page in the web UI and a PostgreSQL-backed user store shared by every daemon replica. SSO via your auth proxy (OIDC) and the role model are open source. See [SSO & RBAC](sso-rbac.md).
-
-## Audit Log
-
-Trail of actions taken in wshm.
+The open-source edition already has local users, the four roles enforced server-side and the `/api/v1/users` API (SQLite user store). The Enterprise edition adds the **user management page** (`/users`) and a **PostgreSQL user store** shared by every daemon replica. See [SSO & RBAC](sso-rbac.md).
 
 ## PostgreSQL Multi-Pod
 
-Set `DATABASE_URL` to run several stateless daemon replicas on one PostgreSQL database (repositories, settings, users, secrets and license are stored there). The open-source edition uses SQLite.
+Set `DATABASE_URL` to run several stateless daemon replicas on one PostgreSQL database (repository data, tracked-repo registry, settings, users, secrets and license are stored there). The open-source edition uses SQLite.
 
 ## Vault / Secrets Storage
 
-Encrypted secret store in PostgreSQL (AES-256-GCM, master key from `WSHM_MASTER_KEY`) and `vault()` placeholders resolved from HashiCorp Vault, AWS Secrets Manager or GCP Secret Manager. See [Vault](vault.md).
+- Encrypted secret store in PostgreSQL (AES-256-GCM, master key from `WSHM_MASTER_KEY`). The open-source edition has the same store on SQLite.
+- `vault()` placeholders resolved from HashiCorp Vault, AWS Secrets Manager or GCP Secret Manager (license feature `vault`). See [Vault](vault.md).
 
 ## Export Sinks
 
-Send pipeline events to external systems.
+Send pipeline events to external systems (license feature `exports`).
 
 **Object storage:** S3 (and S3-compatible), GCS, Azure Blob
 **Databases:** Elasticsearch, OpenSearch, MongoDB, MySQL
@@ -283,6 +302,9 @@ Generic HTTP webhooks with HMAC signing are open source. See [Configuration](con
 ---
 
 ## Hosted PR Diagrams
+
+License feature `diagram_hosting`.
+
 
 With `[pr.review_diagrams.publish] target = "wshm"` (license feature
 `diagram_hosting`), the daemon serves the interactive architecture page of

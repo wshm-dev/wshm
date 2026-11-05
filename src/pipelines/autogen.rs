@@ -10,6 +10,10 @@ use crate::git_provider::Forge as GhClient;
 
 /// Pipeline: Auto-generate a PR fix from an issue description.
 ///
+/// Single entry point for auto-fix: the CLI, triage auto-fix and the
+/// `/wshm fix` slash command all call this function, so any pre-flight gate
+/// on the issue belongs at the top of it.
+///
 /// Modes:
 ///   1. claude-code: spawn `claude -p` with the issue context
 ///   2. codex: spawn `codex` CLI
@@ -60,6 +64,7 @@ pub async fn run(
     }
 
     let tool = resolve_tool(config, args);
+    let trusted_checked = config.fix.trusted_authors_only;
     let branch = format!("wshm/fix-{}", issue.number);
 
     // ICM: recall past fix attempts and context for this issue
@@ -86,15 +91,20 @@ pub async fn run(
         return Ok(());
     }
 
-    // Step 1: Start from a clean base branch, then create fix branch
-    let repo_dir = config.wshm_dir.parent().unwrap_or(Path::new("."));
+    // Step 1: Start from a clean base branch, then create fix branch.
+    // Every step (git, AI tool, tests, container mount) runs in the
+    // canonical repo root, never in the process cwd.
+    let repo_root = resolve_repo_root(&config.wshm_dir)?;
+    let repo_dir = repo_root.as_path();
     let base_branch = &config.fix.base_branch;
     ensure_clean_base(repo_dir, base_branch)?;
     create_branch(repo_dir, &branch)?;
 
     // Step 2: Run the AI tool
     println!("Running {}...", tool.name());
-    let result = tool.execute(&prompt).await?;
+    let result = tool
+        .execute(&prompt, repo_dir, config.fix.test_command.as_deref())
+        .await?;
 
     if !result.success {
         println!("AI tool failed: {}", result.output);
@@ -102,17 +112,26 @@ pub async fn run(
         return Ok(());
     }
 
-    // Step 3: Check if any files were changed
-    let has_changes = check_changes(repo_dir)?;
-    if !has_changes {
+    // Step 3: Stage every change (new files included, sensitive paths
+    // unstaged) so the scan below sees exactly what would be committed.
+    stage_changes(repo_dir)?;
+    let staged = staged_files(repo_dir)?;
+    if staged.is_empty() {
         println!("No changes generated. The AI tool did not modify any files.");
         cleanup_branch(repo_dir, base_branch, &branch)?;
         return Ok(());
     }
 
-    // ── Security: diff scan ──
+    // ── Security: protected paths (always enforced) + diff scan ──
+    let mut violations: Vec<String> = staged
+        .iter()
+        .filter(|f| is_protected_path(f))
+        .map(|f| format!("Change to protected path (CI / build / package scripts): `{f}`"))
+        .collect();
     if config.fix.scan_diff {
-        let violations = scan_diff_for_threats(repo_dir)?;
+        violations.extend(scan_diff_for_threats(repo_dir)?);
+    }
+    {
         if !violations.is_empty() {
             tracing::warn!(
                 "Diff scan found suspicious patterns in auto-fix for issue #{}:",
@@ -146,7 +165,7 @@ pub async fn run(
 
             return Ok(());
         }
-        info!("Diff scan passed — no suspicious patterns");
+        info!("Diff scan passed — no protected path or suspicious pattern");
     }
 
     // Step 4: Run tests if configured
@@ -173,6 +192,7 @@ pub async fn run(
 
         for attempt in 1..=max_attempts {
             let test_output = std::process::Command::new(program)
+                .current_dir(repo_dir)
                 .args(args)
                 .output()
                 .context("Failed to run test command")?;
@@ -208,7 +228,9 @@ pub async fn run(
                         .join("\n")
                 );
                 info!("Retrying with AI (attempt {})...", attempt + 1);
-                let retry_result = tool.execute(&retry_prompt).await?;
+                let retry_result = tool
+                    .execute(&retry_prompt, repo_dir, Some(test_cmd.as_str()))
+                    .await?;
                 if !retry_result.success {
                     tracing::error!("AI retry failed");
                     break;
@@ -238,7 +260,26 @@ pub async fn run(
         }
     }
 
-    // Step 5: Commit and push
+    // Step 5: Commit and push. Tests may have changed files after the scan:
+    // re-stage and re-check before committing.
+    stage_changes(repo_dir)?;
+    if config.fix.test_command.is_some() {
+        let mut late: Vec<String> = staged_files(repo_dir)?
+            .into_iter()
+            .filter(|f| is_protected_path(f))
+            .collect();
+        if config.fix.scan_diff {
+            late.extend(scan_diff_for_threats(repo_dir)?);
+        }
+        if !late.is_empty() {
+            println!("Aborting auto-fix: the retried fix touches protected paths or suspicious patterns.");
+            for v in &late {
+                tracing::warn!("  ⚠ {v}");
+            }
+            cleanup_branch(repo_dir, base_branch, &branch)?;
+            return Ok(());
+        }
+    }
     commit_and_push(repo_dir, &branch, issue.number)?;
 
     // Step 6: Open PR (as draft by default for mandatory review)
@@ -248,8 +289,9 @@ pub async fn run(
          > ⚠️ **This is a draft PR** — a human must review and approve before merging.\n\n\
          ### Issue\n> {}\n\n{}\n\n\
          ### Security\n\
-         - [x] Author verified as collaborator\n\
-         - [x] Generated diff scanned for suspicious patterns\n\
+         - [{}] Issue author verified as collaborator\n\
+         - [x] No change to protected paths (CI, build scripts, package scripts)\n\
+         - [{}] Generated diff scanned for suspicious patterns\n\
          - [ ] **Human review required**\n\n{}",
         config.branding.header(),
         issue.number,
@@ -257,6 +299,8 @@ pub async fn run(
         tool.name(),
         issue.title,
         issue.body.as_deref().unwrap_or(""),
+        if trusted_checked { "x" } else { " " },
+        if config.fix.scan_diff { "x" } else { " " },
         config.branding.footer("Generated"),
     );
 
@@ -362,11 +406,18 @@ const SUSPICIOUS_PATTERNS: &[(&str, &str)] = &[
     ("secret", "Secret reference"),
 ];
 
-/// Scan unstaged diff for suspicious patterns. Returns list of violations.
+/// Scan the staged diff (new files included) for suspicious patterns.
+/// Returns list of violations. Call [`stage_changes`] first.
 fn scan_diff_for_threats(repo_dir: &Path) -> Result<Vec<String>> {
     let output = std::process::Command::new("git")
         .current_dir(repo_dir)
-        .args(["diff", "--unified=0"])
+        .args([
+            "diff",
+            "--cached",
+            "--unified=0",
+            "--no-ext-diff",
+            "--no-textconv",
+        ])
         .output()
         .context("Failed to run git diff")?;
 
@@ -392,12 +443,61 @@ fn scan_diff_for_threats(repo_dir: &Path) -> Result<Vec<String>> {
 }
 
 // ── Tool abstraction ──────────────────────────────────────────
+//
+// The coding agent is the risky part of auto-fix: it reads untrusted issue
+// text and edits files. It therefore runs:
+//   - in the repo root only (`current_dir(repo_dir)` / single bind mount);
+//   - with a cleared environment: PATH, HOME and the model auth variables
+//     only. The forge token and DATABASE_URL are never passed (the push
+//     happens later, outside the agent);
+//   - with the prompt on stdin, never in argv;
+//   - claude: `--permission-mode acceptEdits` with an explicit tool allowlist
+//     (Read, Grep, Glob, Edit, Write, and Bash only for the configured test
+//     command), web tools denied, no MCP servers, no session persistence;
+//   - codex: `codex exec --sandbox workspace-write` with network access off;
+//   - container mode: `--network=none` by default, all capabilities dropped,
+//     no-new-privileges, memory and pids limits, credentials mounted read-only.
 
+/// Model auth variables forwarded to the agent (besides PATH and HOME).
+const AGENT_AUTH_ENV: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "CODEX_HOME",
+];
+
+/// Variables that must never reach the agent, even through `[fix] secret_env`.
+const AGENT_FORBIDDEN_ENV: &[&str] = &[
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITLAB_TOKEN",
+    "GITEA_TOKEN",
+    "FORGEJO_TOKEN",
+    "AZURE_DEVOPS_TOKEN",
+    "AZURE_DEVOPS_PAT",
+    "DATABASE_URL",
+    "WSHM_MASTER_KEY",
+    "WSHM_LICENSE_KEY",
+    "WSHM_PROXY_AUTH_TOKEN",
+    "WSHM_WEBHOOK_SECRET",
+];
+
+/// Container network for `--docker` mode. `none` by default: the agent then
+/// cannot reach the model API either, so set `WSHM_FIX_CONTAINER_NETWORK` to
+/// a network with a controlled egress (or run without `--docker`).
+const DEFAULT_CONTAINER_NETWORK: &str = "none";
+
+#[derive(Debug)]
 enum AiTool {
     ClaudeCode {
         model: Option<String>,
     },
-    Codex,
+    Codex {
+        model: Option<String>,
+    },
     Podman {
         image: String,
         env_vars: Vec<(String, String)>,
@@ -410,50 +510,217 @@ impl AiTool {
     fn name(&self) -> &str {
         match self {
             AiTool::ClaudeCode { .. } => "claude-code",
-            AiTool::Codex => "codex",
+            AiTool::Codex { .. } => "codex",
             AiTool::Podman { tool, .. } => match tool.as_ref() {
                 AiTool::ClaudeCode { .. } => "podman:claude-code",
-                AiTool::Codex => "podman:codex",
+                AiTool::Codex { .. } => "podman:codex",
                 AiTool::Podman { .. } => "podman",
             },
         }
     }
 
-    async fn execute(&self, prompt: &str) -> Result<ToolResult> {
-        match self {
-            AiTool::ClaudeCode { model } => run_claude_code(prompt, model.as_deref()).await,
-            AiTool::Codex => run_codex(prompt).await,
+    async fn execute(
+        &self,
+        prompt: &str,
+        repo_dir: &Path,
+        test_command: Option<&str>,
+    ) -> Result<ToolResult> {
+        let cmd = match self {
+            AiTool::ClaudeCode { model } => {
+                info!("Starting claude -p (this may take a few minutes)...");
+                let mut c = claude_command(model.as_deref(), test_command);
+                c.current_dir(repo_dir);
+                apply_agent_env(&mut c, &[]);
+                c
+            }
+            AiTool::Codex { model } => {
+                let mut c = codex_command(model.as_deref(), repo_dir);
+                c.current_dir(repo_dir);
+                apply_agent_env(&mut c, &[]);
+                c
+            }
             AiTool::Podman {
                 image,
                 env_vars,
                 claude_dir,
                 tool,
-            } => run_in_podman(image, env_vars, claude_dir.as_deref(), tool, prompt).await,
+            } => {
+                let network = std::env::var("WSHM_FIX_CONTAINER_NETWORK")
+                    .ok()
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| DEFAULT_CONTAINER_NETWORK.to_string());
+                let mut c = podman_command(
+                    image,
+                    env_vars,
+                    claude_dir.as_deref(),
+                    tool,
+                    repo_dir,
+                    &network,
+                    test_command,
+                )?;
+                c.current_dir(repo_dir);
+                // podman reads the `-e KEY` values from its own (cleared)
+                // environment: PATH/HOME, model auth and filtered extras.
+                apply_agent_env(&mut c, env_vars);
+                c
+            }
+        };
+        let result = run_agent(cmd, prompt, self.name()).await;
+        if matches!(self, AiTool::Podman { .. }) {
+            cleanup_ci_claude_dir();
         }
+        result
     }
 }
 
+#[derive(Debug)]
 struct ToolResult {
     success: bool,
     output: String,
+}
+
+/// `claude -p` locked down to editing files in the repo. The prompt comes on
+/// stdin.
+fn claude_args(model: Option<&str>, test_command: Option<&str>) -> Vec<String> {
+    let mut allowed = vec![
+        "Read".to_string(),
+        "Grep".to_string(),
+        "Glob".to_string(),
+        "Edit".to_string(),
+        "Write".to_string(),
+    ];
+    if let Some(tc) = test_command.map(str::trim).filter(|t| !t.is_empty()) {
+        allowed.push(format!("Bash({tc})"));
+        allowed.push(format!("Bash({tc} *)"));
+    }
+    let mut args = vec![
+        "-p".to_string(),
+        "--permission-mode".to_string(),
+        "acceptEdits".to_string(),
+        "--allowedTools".to_string(),
+        allowed.join(","),
+        "--disallowedTools".to_string(),
+        "WebFetch,WebSearch".to_string(),
+        "--strict-mcp-config".to_string(),
+        "--no-session-persistence".to_string(),
+        "--output-format".to_string(),
+        "text".to_string(),
+    ];
+    if let Some(m) = model {
+        args.push("--model".to_string());
+        args.push(m.to_string());
+    }
+    args
+}
+
+fn claude_command(model: Option<&str>, test_command: Option<&str>) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.args(claude_args(model, test_command));
+    cmd
+}
+
+/// `codex exec` in its workspace-write sandbox with network access disabled.
+/// The prompt comes on stdin (`-`).
+fn codex_args(model: Option<&str>, workdir: &str) -> Vec<String> {
+    let mut args = vec![
+        "exec".to_string(),
+        "--sandbox".to_string(),
+        "workspace-write".to_string(),
+        "-c".to_string(),
+        "sandbox_workspace_write.network_access=false".to_string(),
+        "--ephemeral".to_string(),
+        "--cd".to_string(),
+        workdir.to_string(),
+    ];
+    if let Some(m) = model {
+        args.push("--model".to_string());
+        args.push(m.to_string());
+    }
+    args.push("-".to_string());
+    args
+}
+
+fn codex_command(model: Option<&str>, repo_dir: &Path) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("codex");
+    cmd.args(codex_args(model, &repo_dir.to_string_lossy()));
+    cmd
+}
+
+/// Agent environment: PATH, HOME and the model auth variables only, plus
+/// `extra` (already filtered).
+fn agent_env(extra: &[(String, String)]) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    for key in ["PATH", "HOME"].iter().chain(AGENT_AUTH_ENV.iter()) {
+        if let Ok(v) = std::env::var(key) {
+            env.push((key.to_string(), v));
+        }
+    }
+    for (k, v) in extra {
+        if !AGENT_FORBIDDEN_ENV.contains(&k.as_str()) && !env.iter().any(|(e, _)| e == k) {
+            env.push((k.clone(), v.clone()));
+        }
+    }
+    env
+}
+
+fn apply_agent_env(cmd: &mut tokio::process::Command, extra: &[(String, String)]) {
+    cmd.env_clear();
+    for (k, v) in agent_env(extra) {
+        cmd.env(k, v);
+    }
+}
+
+/// Spawn the agent, write the prompt to its stdin, collect its output.
+async fn run_agent(
+    mut cmd: tokio::process::Command,
+    prompt: &str,
+    name: &str,
+) -> Result<ToolResult> {
+    use tokio::io::AsyncWriteExt;
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("Failed to start `{name}`. Is it installed?"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .context("Failed to write the prompt to the agent")?;
+        drop(stdin);
+    }
+    let output = child
+        .wait_with_output()
+        .await
+        .with_context(|| format!("Failed to wait for `{name}`"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if output.status.success() {
+        info!("{name} completed ({} bytes output)", stdout.len());
+    } else {
+        tracing::error!("{name} failed: {stderr}");
+    }
+    Ok(ToolResult {
+        success: output.status.success(),
+        output: stdout + &stderr,
+    })
 }
 
 /// Resolve credential source for Claude Code in Podman.
 ///
 /// Priority:
 ///   1. CLAUDE_CREDENTIALS_JSON env var (CI: GitHub Secret containing the JSON)
-///      → write to temp file, mount as ~/.claude/.credentials.json
+///      → write to temp file, mount read-only
 ///   2. ~/.claude/.credentials.json on host (local: OAuth/Max subscription)
-///      → mount entire ~/.claude dir
+///      → mount ~/.claude read-only
 ///   3. ANTHROPIC_API_KEY env var (fallback: API key)
 ///      → pass as -e
 fn resolve_claude_dir() -> Option<PathBuf> {
     // Priority 1: CI secret → write to temp dir with restricted permissions
     if let Ok(creds_json) = std::env::var("CLAUDE_CREDENTIALS_JSON") {
-        let unique_id = std::process::id();
-        let tmp_claude_dir = std::env::temp_dir().join(format!("wshm-claude-creds-{unique_id}"));
+        let tmp_claude_dir = ci_claude_dir();
         if std::fs::create_dir_all(&tmp_claude_dir).is_ok() {
-            // Restrict directory permissions to owner only
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -464,7 +731,6 @@ fn resolve_claude_dir() -> Option<PathBuf> {
             }
             let creds_path = tmp_claude_dir.join(".credentials.json");
             if std::fs::write(&creds_path, &creds_json).is_ok() {
-                // Restrict file permissions to owner only
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -493,49 +759,54 @@ fn resolve_claude_dir() -> Option<PathBuf> {
     None
 }
 
+fn ci_claude_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("wshm-claude-creds-{}", std::process::id()))
+}
+
+fn cleanup_ci_claude_dir() {
+    if std::env::var("CLAUDE_CREDENTIALS_JSON").is_ok() {
+        let _ = std::fs::remove_dir_all(ci_claude_dir());
+    }
+}
+
+/// CLI flags win; otherwise the `[fix]` settings (`tool`, `model`,
+/// `docker_image`) apply.
 fn resolve_tool(config: &Config, args: &FixArgs) -> AiTool {
-    let base_tool = match args.tool.as_deref().unwrap_or("claude-code") {
-        "codex" => AiTool::Codex,
-        _ => AiTool::ClaudeCode {
-            model: args.model.clone(),
-        },
+    let tool_name = args.tool.as_deref().unwrap_or(config.fix.tool.as_str());
+    let model = args.model.clone().or_else(|| config.fix.model.clone());
+    let base_tool = match tool_name {
+        "codex" => AiTool::Codex { model },
+        _ => AiTool::ClaudeCode { model },
     };
 
     if args.docker {
         let image = args
             .image
             .clone()
-            .unwrap_or_else(|| "wshm-sandbox:latest".to_string());
+            .filter(|i| !i.trim().is_empty())
+            .unwrap_or_else(|| config.fix.docker_image.clone());
 
         // Resolve Claude credentials (OAuth > API key)
         let claude_dir = resolve_claude_dir();
 
-        // Collect env vars to inject
+        // Model auth variables only. The forge token is never forwarded:
+        // the branch is pushed by wshm after the container exits.
         let mut env_vars = Vec::new();
-
-        // Only inject API key if no OAuth credentials found
-        if claude_dir.is_none() {
-            if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-                env_vars.push(("ANTHROPIC_API_KEY".to_string(), key));
+        for key in AGENT_AUTH_ENV {
+            if *key == "ANTHROPIC_API_KEY" && claude_dir.is_some() {
+                continue; // OAuth credentials take precedence
+            }
+            if let Ok(val) = std::env::var(key) {
+                env_vars.push((key.to_string(), val));
             }
         }
-        if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-            env_vars.push(("OPENAI_API_KEY".to_string(), key));
-        }
-        // NOTE: this only forwards a static GITHUB_TOKEN. An install
-        // authenticated purely via GitHub App (no PAT — see
-        // `Config::github_app_auth_optional`) has no long-lived token to
-        // forward here: installation tokens are minted on demand and expire
-        // in ~1h, so the sandboxed auto-fix container would need its own
-        // App-auth flow to push branches / open PRs. Not implemented — App
-        // auth today covers read-only polling (issues/PRs) only, and no
-        // repo in this fleet has `auto_pr` enabled with App-only auth.
-        if let Ok(key) = std::env::var("GITHUB_TOKEN") {
-            env_vars.push(("GITHUB_TOKEN".to_string(), key));
-        }
 
-        // Forward custom secret env vars from config
+        // Custom secret env vars from config, minus forge/DB secrets.
         for key_name in &config.fix_secret_env_vars() {
+            if AGENT_FORBIDDEN_ENV.contains(&key_name.as_str()) {
+                tracing::warn!("[fix] secret_env: `{key_name}` is never passed to the agent");
+                continue;
+            }
             if let Ok(val) = std::env::var(key_name) {
                 env_vars.push((key_name.clone(), val));
             }
@@ -552,139 +823,95 @@ fn resolve_tool(config: &Config, args: &FixArgs) -> AiTool {
     }
 }
 
-// ── Tool runners ──────────────────────────────────────────────
-
-async fn run_claude_code(prompt: &str, model: Option<&str>) -> Result<ToolResult> {
-    info!("Starting claude -p (this may take a few minutes)...");
-    let mut cmd = tokio::process::Command::new("claude");
-    cmd.arg("-p")
-        .arg(prompt)
-        .arg("--dangerously-skip-permissions")
-        .arg("--output-format")
-        .arg("text");
-
-    if let Some(model) = model {
-        cmd.arg("--model").arg(model);
-        info!("Using model: {model}");
-    }
-
-    let output = cmd
-        .output()
-        .await
-        .context("Failed to run `claude`. Is Claude Code installed?")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if output.status.success() {
-        info!(
-            "claude -p completed successfully ({} bytes output)",
-            stdout.len()
-        );
-    } else {
-        tracing::error!("claude -p failed: {stderr}");
-    }
-
-    Ok(ToolResult {
-        success: output.status.success(),
-        output: stdout + &stderr,
-    })
-}
-
-async fn run_codex(prompt: &str) -> Result<ToolResult> {
-    let output = tokio::process::Command::new("codex")
-        .arg("--approval-mode")
-        .arg("full-auto")
-        .arg(prompt)
-        .output()
-        .await
-        .context("Failed to run `codex`. Is OpenAI Codex CLI installed?")?;
-
-    Ok(ToolResult {
-        success: output.status.success(),
-        output: String::from_utf8_lossy(&output.stdout).to_string()
-            + &String::from_utf8_lossy(&output.stderr),
-    })
-}
-
-async fn run_in_podman(
+/// `podman run` arguments: only `repo_dir` mounted read-write, credentials
+/// read-only, no network by default, no capabilities, no privilege gain,
+/// memory and pids limits, prompt on stdin (`-i`).
+fn podman_args(
     image: &str,
     env_vars: &[(String, String)],
-    claude_dir: Option<&std::path::Path>,
+    claude_dir: Option<&Path>,
     tool: &AiTool,
-    prompt: &str,
-) -> Result<ToolResult> {
-    let cwd = std::env::current_dir()?;
-    let mut cmd = tokio::process::Command::new("podman");
+    repo_dir: &Path,
+    network: &str,
+    test_command: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut args: Vec<String> = [
+        "run",
+        "--rm",
+        "-i",
+        "--userns=keep-id:uid=1000,gid=1000",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "256",
+        "--memory",
+        "4g",
+        "--tmpfs",
+        "/tmp:rw,nosuid,size=512m",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.push(format!("--network={network}"));
 
-    cmd.arg("run")
-        .arg("--rm")
-        // Rootless security (à la OpenClaw)
-        .arg("--userns=keep-id:uid=1000,gid=1000")
-        .arg("--cap-drop")
-        .arg("ALL")
-        .arg("--pids-limit")
-        .arg("256")
-        .arg("--tmpfs")
-        .arg("/tmp:rw,nosuid,size=512m");
+    args.push("-v".to_string());
+    args.push(format!("{}:/workspace:rw", repo_dir.display()));
+    args.push("-w".to_string());
+    args.push("/workspace".to_string());
 
-    // Mount workspace
-    cmd.arg("-v")
-        .arg(format!("{}:/workspace:rw", cwd.display()))
-        .arg("-w")
-        .arg("/workspace");
-
-    // Mount Claude credentials if available (OAuth/Max)
     if let Some(claude_path) = claude_dir {
-        cmd.arg("-v")
-            .arg(format!("{}:/home/claude/.claude:ro", claude_path.display()));
-        info!("Mounting Claude credentials: {}", claude_path.display());
+        args.push("-v".to_string());
+        args.push(format!("{}:/home/claude/.claude:ro", claude_path.display()));
     }
 
-    // Inject secrets as env vars
-    for (key, val) in env_vars {
-        cmd.arg("-e").arg(format!("{key}={val}"));
+    for (key, _) in env_vars {
+        if AGENT_FORBIDDEN_ENV.contains(&key.as_str()) {
+            continue;
+        }
+        // `-e KEY` (no value): podman copies it from its own environment,
+        // so secrets never appear in argv.
+        args.push("-e".to_string());
+        args.push(key.clone());
     }
 
-    cmd.arg(image);
+    args.push(image.to_string());
 
-    // Build the inner command
     match tool {
         AiTool::ClaudeCode { model } => {
-            cmd.arg("claude")
-                .arg("-p")
-                .arg(prompt)
-                .arg("--dangerously-skip-permissions");
-            if let Some(model) = model {
-                cmd.arg("--model").arg(model);
-            }
+            args.push("claude".to_string());
+            args.extend(claude_args(model.as_deref(), test_command));
         }
-        AiTool::Codex => {
-            cmd.arg("codex")
-                .arg("--approval-mode")
-                .arg("full-auto")
-                .arg(prompt);
+        AiTool::Codex { model } => {
+            args.push("codex".to_string());
+            args.extend(codex_args(model.as_deref(), "/workspace"));
         }
-        AiTool::Podman { .. } => unreachable!(),
+        AiTool::Podman { .. } => anyhow::bail!("nested container tool is not supported"),
     }
+    Ok(args)
+}
 
-    let output = cmd
-        .output()
-        .await
-        .context("Failed to run Podman container. Is Podman installed?")?;
-
-    // Cleanup temp credentials if we created them from CI secret
-    if std::env::var("CLAUDE_CREDENTIALS_JSON").is_ok() {
-        let unique_id = std::process::id();
-        let tmp_dir = std::env::temp_dir().join(format!("wshm-claude-creds-{unique_id}"));
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-    }
-
-    Ok(ToolResult {
-        success: output.status.success(),
-        output: String::from_utf8_lossy(&output.stdout).to_string()
-            + &String::from_utf8_lossy(&output.stderr),
-    })
+fn podman_command(
+    image: &str,
+    env_vars: &[(String, String)],
+    claude_dir: Option<&Path>,
+    tool: &AiTool,
+    repo_dir: &Path,
+    network: &str,
+    test_command: Option<&str>,
+) -> Result<tokio::process::Command> {
+    let mut cmd = tokio::process::Command::new("podman");
+    cmd.args(podman_args(
+        image,
+        env_vars,
+        claude_dir,
+        tool,
+        repo_dir,
+        network,
+        test_command,
+    )?);
+    Ok(cmd)
 }
 
 // ── Git helpers ───────────────────────────────────────────────
@@ -741,13 +968,131 @@ fn create_branch(repo_dir: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-fn check_changes(repo_dir: &Path) -> Result<bool> {
-    let output = std::process::Command::new("git")
-        .current_dir(repo_dir)
-        .args(["status", "--porcelain"])
+/// Canonical repository root for a repo's `.wshm` directory.
+///
+/// `Path::new(".wshm").parent()` is `Some("")`, which is not a usable
+/// working directory, so the parent is resolved against the process cwd,
+/// canonicalized, then normalised to the git top-level.
+fn resolve_repo_root(wshm_dir: &Path) -> Result<PathBuf> {
+    let parent = wshm_dir
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let dir = parent
+        .canonicalize()
+        .with_context(|| format!("Cannot resolve repository directory {}", parent.display()))?;
+    let out = std::process::Command::new("git")
+        .current_dir(&dir)
+        .args(["rev-parse", "--show-toplevel"])
         .output()
-        .context("Failed to check git status")?;
-    Ok(!output.stdout.is_empty())
+        .context("Failed to run git rev-parse")?;
+    if !out.status.success() {
+        anyhow::bail!("{} is not inside a git repository", dir.display());
+    }
+    let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if top.is_empty() {
+        anyhow::bail!("git rev-parse returned no top-level for {}", dir.display());
+    }
+    Ok(PathBuf::from(top))
+}
+
+/// Stage every change (new files included), then unstage sensitive paths.
+fn stage_changes(repo_dir: &Path) -> Result<()> {
+    let status = std::process::Command::new("git")
+        .current_dir(repo_dir)
+        .args(["add", "-A"])
+        .status()
+        .context("Failed to git add")?;
+    if !status.success() {
+        anyhow::bail!("git add failed");
+    }
+    for pattern in EXCLUDED_PATHS {
+        std::process::Command::new("git")
+            .current_dir(repo_dir)
+            .args(["reset", "-q", "HEAD", "--", pattern])
+            .output()
+            .ok();
+    }
+    Ok(())
+}
+
+/// Paths staged for commit (relative to the repo root).
+fn staged_files(repo_dir: &Path) -> Result<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .current_dir(repo_dir)
+        .args(["diff", "--cached", "--name-only", "-z"])
+        .output()
+        .context("Failed to list staged files")?;
+    if !out.status.success() {
+        anyhow::bail!("git diff --cached --name-only failed");
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Directories an auto-fix must never touch (CI pipelines, hooks, tooling
+/// config that runs code on CI or on a developer machine).
+const PROTECTED_DIRS: &[&str] = &[
+    ".github/",
+    ".gitlab/",
+    ".gitea/",
+    ".forgejo/",
+    ".circleci/",
+    ".buildkite/",
+    ".woodpecker/",
+    ".azure-pipelines/",
+    ".husky/",
+    ".githooks/",
+    ".devcontainer/",
+    ".cargo/",
+    ".vscode/",
+    ".idea/",
+];
+
+/// File names (any directory) an auto-fix must never touch: CI configs,
+/// build scripts and manifests whose scripts run on install/build.
+const PROTECTED_FILES: &[&str] = &[
+    ".gitlab-ci.yml",
+    ".travis.yml",
+    ".drone.yml",
+    ".woodpecker.yml",
+    "azure-pipelines.yml",
+    "bitbucket-pipelines.yml",
+    "Jenkinsfile",
+    "appveyor.yml",
+    "cloudbuild.yaml",
+    ".pre-commit-config.yaml",
+    ".gitattributes",
+    ".gitmodules",
+    "build.rs",
+    "package.json",
+    ".npmrc",
+    ".yarnrc",
+    ".yarnrc.yml",
+    "bunfig.toml",
+    "setup.py",
+    "setup.cfg",
+    "pyproject.toml",
+    "Makefile",
+    "Dockerfile",
+    "Containerfile",
+];
+
+/// True when `path` (repo-relative) is a CI config, build script or package
+/// manifest an auto-fix must not change.
+fn is_protected_path(path: &str) -> bool {
+    let p = path.trim_start_matches("./");
+    if PROTECTED_DIRS
+        .iter()
+        .any(|d| p.starts_with(d) || p.contains(&format!("/{d}")))
+    {
+        return true;
+    }
+    let name = p.rsplit('/').next().unwrap_or(p);
+    PROTECTED_FILES.contains(&name)
 }
 
 /// Paths that must never be committed by auto-fix (credentials, state, secrets).
@@ -762,26 +1107,8 @@ const EXCLUDED_PATHS: &[&str] = &[
     ".fastembed_cache/",
 ];
 
+/// Commit what [`stage_changes`] staged, then push the branch.
 fn commit_and_push(repo_dir: &Path, branch: &str, issue_number: u64) -> Result<()> {
-    // Add all changes including new files (needed for auto-fix that creates files)
-    let status = std::process::Command::new("git")
-        .current_dir(repo_dir)
-        .args(["add", "-A"])
-        .status()
-        .context("Failed to git add")?;
-    if !status.success() {
-        anyhow::bail!("git add failed");
-    }
-
-    // Unstage any sensitive/excluded paths
-    for pattern in EXCLUDED_PATHS {
-        std::process::Command::new("git")
-            .current_dir(repo_dir)
-            .args(["reset", "HEAD", "--", pattern])
-            .output()
-            .ok();
-    }
-
     let msg = format!("fix: auto-fix for issue #{issue_number} [wshm]");
     let status = std::process::Command::new("git")
         .current_dir(repo_dir)
@@ -805,6 +1132,15 @@ fn commit_and_push(repo_dir: &Path, branch: &str, issue_number: u64) -> Result<(
 }
 
 fn cleanup_branch(repo_dir: &Path, base_branch: &str, branch: &str) -> Result<()> {
+    // Drop the generated changes (staged new files included) so the base
+    // branch checkout below starts clean.
+    if let Err(e) = std::process::Command::new("git")
+        .current_dir(repo_dir)
+        .args(["reset", "-q", "--hard", "HEAD"])
+        .status()
+    {
+        tracing::warn!("Failed to discard generated changes during cleanup: {e}");
+    }
     if let Err(e) = std::process::Command::new("git")
         .current_dir(repo_dir)
         .args(["checkout", base_branch])
@@ -836,4 +1172,190 @@ Instructions:
 3. Add a test if appropriate
 4. Do not modify unrelated files"#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protected_paths_are_detected() {
+        for p in [
+            ".github/workflows/ci.yml",
+            ".gitlab-ci.yml",
+            "sub/.gitlab-ci.yml",
+            "build.rs",
+            "crates/x/build.rs",
+            "package.json",
+            "web/package.json",
+            "Jenkinsfile",
+            ".cargo/config.toml",
+            "pkg/.github/actions/x.yml",
+            ".husky/pre-commit",
+        ] {
+            assert!(is_protected_path(p), "{p} should be protected");
+        }
+        for p in [
+            "src/main.rs",
+            "web/src/app.ts",
+            "docs/github.md",
+            "src/build.rs.md",
+        ] {
+            assert!(!is_protected_path(p), "{p} should not be protected");
+        }
+    }
+
+    #[test]
+    fn repo_root_resolves_bare_wshm_dir() {
+        let tmp = std::env::temp_dir().join(format!("wshm-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".wshm")).unwrap();
+        let ok = std::process::Command::new("git")
+            .current_dir(&tmp)
+            .args(["init", "-q"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            let root = resolve_repo_root(&tmp.join(".wshm")).unwrap();
+            assert_eq!(root, tmp.canonicalize().unwrap());
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn args_of(cmd: &tokio::process::Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn claude_command_is_locked_down() {
+        let cmd = claude_command(Some("m1"), Some("cargo test"));
+        let args = args_of(&cmd);
+        assert_eq!(cmd.as_std().get_program(), "claude");
+        assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"));
+        let pos = |f: &str| args.iter().position(|a| a == f).unwrap();
+        assert_eq!(args[pos("--permission-mode") + 1], "acceptEdits");
+        assert_eq!(
+            args[pos("--allowedTools") + 1],
+            "Read,Grep,Glob,Edit,Write,Bash(cargo test),Bash(cargo test *)"
+        );
+        assert_eq!(args[pos("--disallowedTools") + 1], "WebFetch,WebSearch");
+        assert!(args.contains(&"--strict-mcp-config".to_string()));
+        assert!(args.contains(&"--no-session-persistence".to_string()));
+        assert_eq!(args[pos("--model") + 1], "m1");
+        // No Bash at all without a test command.
+        let args = args_of(&claude_command(None, None));
+        let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(args[i + 1], "Read,Grep,Glob,Edit,Write");
+    }
+
+    #[test]
+    fn codex_command_is_sandboxed() {
+        let args = args_of(&codex_command(None, Path::new("/repo")));
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "--sandbox",
+                "workspace-write",
+                "-c",
+                "sandbox_workspace_write.network_access=false",
+                "--ephemeral",
+                "--cd",
+                "/repo",
+                "-"
+            ]
+        );
+    }
+
+    #[test]
+    fn prompt_never_in_argv() {
+        let marker = "PROMPT-MARKER-123";
+        for args in [
+            args_of(&claude_command(None, None)),
+            args_of(&codex_command(None, Path::new("/r"))),
+            podman_args(
+                "img",
+                &[],
+                None,
+                &AiTool::ClaudeCode { model: None },
+                Path::new("/r"),
+                "none",
+                None,
+            )
+            .unwrap(),
+        ] {
+            assert!(!args.iter().any(|a| a.contains(marker)));
+            assert!(!args.iter().any(|a| a.len() > 200));
+        }
+    }
+
+    #[test]
+    fn podman_args_are_confined() {
+        let env = vec![
+            ("ANTHROPIC_API_KEY".to_string(), "sk-secret".to_string()),
+            ("GITHUB_TOKEN".to_string(), "ghp_secret".to_string()),
+        ];
+        let args = podman_args(
+            "img:1",
+            &env,
+            Some(Path::new("/home/u/.claude")),
+            &AiTool::ClaudeCode { model: None },
+            Path::new("/repo"),
+            "none",
+            None,
+        )
+        .unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("--network=none"));
+        assert!(joined.contains("--cap-drop ALL"));
+        assert!(joined.contains("--security-opt no-new-privileges"));
+        assert!(joined.contains("--pids-limit 256"));
+        assert!(joined.contains("--memory 4g"));
+        assert!(joined.contains("-v /repo:/workspace:rw"));
+        assert!(joined.contains("-v /home/u/.claude:/home/claude/.claude:ro"));
+        assert_eq!(args.iter().filter(|a| a.as_str() == "-v").count(), 2);
+        assert!(joined.contains("-e ANTHROPIC_API_KEY"));
+        assert!(!joined.contains("GITHUB_TOKEN"));
+        assert!(!joined.contains("sk-secret"));
+        assert!(!joined.contains("--dangerously-skip-permissions"));
+        assert!(joined.contains("img:1 claude -p --permission-mode acceptEdits"));
+    }
+
+    #[test]
+    fn agent_env_drops_forge_and_db_secrets() {
+        let extra = vec![
+            ("GITHUB_TOKEN".to_string(), "x".to_string()),
+            ("DATABASE_URL".to_string(), "postgres://x".to_string()),
+            ("MY_TEST_SECRET".to_string(), "ok".to_string()),
+        ];
+        let env = agent_env(&extra);
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(!keys.contains(&"GITHUB_TOKEN"));
+        assert!(!keys.contains(&"DATABASE_URL"));
+        assert!(keys.contains(&"MY_TEST_SECRET"));
+        for k in &keys {
+            assert!(
+                *k == "PATH"
+                    || *k == "HOME"
+                    || *k == "MY_TEST_SECRET"
+                    || AGENT_AUTH_ENV.contains(k),
+                "unexpected env var {k}"
+            );
+        }
+        // env_clear is applied on the real command.
+        let mut cmd = claude_command(None, None);
+        apply_agent_env(&mut cmd, &extra);
+        let set: Vec<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| v.map(|_| k.to_string_lossy().to_string()))
+            .collect();
+        assert!(!set
+            .iter()
+            .any(|k| k == "GITHUB_TOKEN" || k == "DATABASE_URL"));
+    }
 }

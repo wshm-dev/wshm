@@ -57,7 +57,7 @@
 </script>
 
 <svelte:head>
-	<title>Usage — wshm Pro</title>
+	<title>Usage — wshm</title>
 </svelte:head>
 
 <div class="p-6 max-w-6xl mx-auto space-y-4">

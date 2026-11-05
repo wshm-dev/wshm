@@ -1793,7 +1793,7 @@
 										<option value="off">off</option>
 										<option value="local">local directory</option>
 										<option value="github-pages">GitHub Pages (gh-pages branch)</option>
-										<option value="wshm">hosted by wshm (Pro){diagramsInfo?.hosting_available ? '' : ' — not licensed'}</option>
+										<option value="wshm">hosted by wshm (Enterprise){diagramsInfo?.hosting_available ? '' : ' — not licensed'}</option>
 										<option value="s3">S3 / S3-compatible</option>
 										<option value="gcs">Google Cloud Storage</option>
 										<option value="azure">Azure Blob Storage</option>

@@ -998,9 +998,11 @@ pub struct ConflictConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
+    /// Not implemented: accepted so existing configs keep loading, ignored.
     #[serde(default)]
     pub auto_resolve: bool,
 
+    /// Not implemented: accepted so existing configs keep loading, ignored.
     #[serde(default = "default_confidence")]
     pub auto_resolve_confidence: f64,
 }
@@ -2744,8 +2746,6 @@ strategy = "rebase"
 
 [conflicts]
 enabled = true
-auto_resolve = false
-auto_resolve_confidence = 0.85
 
 [sync]
 interval_minutes = 5

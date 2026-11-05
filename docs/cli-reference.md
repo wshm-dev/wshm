@@ -29,7 +29,7 @@ wshm pr --apply                  Analyze + label + comment
 wshm queue                       Show ranked merge queue
 wshm queue --apply               Merge top PR if above threshold
 wshm health                      PR health: duplicates, stale/zombie PRs
-wshm run                         Full cycle: sync + triage + analyze + queue + conflicts
+wshm run                         Full cycle: sync + triage + analyze + queue + conflict detection
 wshm run --apply                 Full cycle with actions
 ```
 
@@ -40,8 +40,7 @@ wshm review --pr <N>             Inline code review on PR diff
 wshm review --pr <N> --apply     Review + post comments to GitHub
 wshm fix --issue <N>             Auto-generate fix for issue
 wshm fix --issue <N> --apply     Generate fix + open draft PR
-wshm conflicts                   Detect conflicting PRs
-wshm conflicts --apply           Detect + attempt AI resolution
+wshm conflicts                   Detect conflicting PRs (read-only)
 wshm improve                     Analyze codebase, propose improvements
 wshm improve --apply             Propose + create GitHub issues
 ```

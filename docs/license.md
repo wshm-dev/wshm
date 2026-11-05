@@ -4,12 +4,12 @@
 
 | Edition | Features |
 |---------|----------|
-| **Open source** (Apache-2.0, no license key) | Triage, PR analysis, merge queue, PR health, inline code review, auto-fix, conflict resolution, improvement proposals, changelog, reports, metrics dashboard, action plan, notifications (Discord, Slack, Teams, webhooks), PR and issue insights, search, usage dashboard, daemon and web UI, TUI, SQLite storage, SSO via your auth proxy (OIDC) |
-| **Enterprise (self-hosted)** | Everything in open source, plus users & RBAC, audit log, PostgreSQL multi-pod, vault/secrets storage, exports (S3, GCS, Azure Blob, MySQL, MongoDB, Elasticsearch, OpenSearch), support |
+| **Open source** (`wshm`, Apache-2.0, no license key) | Triage, PR analysis, merge queue, PR health, inline code review, auto-fix, conflict detection, improvement proposals, changelog, reports, metrics dashboard, action plan, `wshm notify` (Discord, Slack, Teams), webhook export, PR and issue insights, search, usage dashboard, daemon and web UI, TUI, SQLite storage, local users and roles, encrypted SQLite secret store, SSO via your auth proxy (OIDC) |
+| **Enterprise (self-hosted)** (`wshm-pro`) | Everything in open source, plus the user management page, PostgreSQL multi-pod (storage, user store, secret store), `vault()` placeholders (HashiCorp Vault, AWS, GCP), exports (S3, GCS, Azure Blob, Elasticsearch, OpenSearch, MongoDB, MySQL), hosted PR diagram pages, support |
 
 Enterprise: contact us at [contact@wshm.dev](mailto:contact@wshm.dev).
 
-A license key is only needed for Enterprise features. Every open-source feature runs without one, in both the `wshm` and `wshm-pro` binaries.
+The license is checked at runtime for three features only: `vault()` placeholders (`vault`), exports (`exports`) and hosted PR diagram pages (`diagram_hosting`). Every other feature runs without a license key, in both the `wshm` and `wshm-pro` binaries.
 
 ## Activation
 

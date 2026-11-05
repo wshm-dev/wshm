@@ -32,10 +32,12 @@ The backend enforces the roles. The web UI hides pages and buttons the current r
 
 ## Enterprise (self-hosted)
 
-The Enterprise edition (`wshm-pro`) adds, on top of the above:
+The open-source edition ships the user store (SQLite), the `/api/v1/users` API and the roles above, enforced server-side.
 
-- **Users & RBAC** — a user management page (create users, change roles, delete users) and a PostgreSQL-backed user store shared by every daemon replica
-- **Audit log**
-- **Support**
+The Enterprise edition (`wshm-pro`) adds:
+
+- the **user management page** (`/users`: create users, change roles, delete users);
+- a **PostgreSQL user store** shared by every daemon replica (`DATABASE_URL`);
+- **support**.
 
 Contact us at [contact@wshm.dev](mailto:contact@wshm.dev).

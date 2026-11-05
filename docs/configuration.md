@@ -92,13 +92,14 @@ merge_threshold = 15              # minimum score to auto-merge
 strategy = "rebase"               # merge, rebase, squash
 
 [conflicts]
-enabled = true
-auto_resolve = false              # AI conflict resolution
-auto_resolve_confidence = 0.85
+enabled = true                    # conflict detection (read-only)
+# auto_resolve / auto_resolve_confidence: not implemented, ignored
 
 [fix]
-# auto_fix_confidence = 0.85
-# trusted_authors_only = false
+# tool = "claude-code"            # or "codex"
+# model = "..."                   # override the agent model
+# docker_image = "wshm-sandbox:latest"  # used with `wshm fix --docker`
+# trusted_authors_only = true     # default; WARNING: false lets any issue author steer the agent
 # test_command = "cargo test"
 # test_retries = 2
 
@@ -126,7 +127,7 @@ full_sync_interval_hours = 24
 # uri = "postgres://user:pass@localhost/wshm"
 
 [notify]
-# on_run = true
+# on_run = true                  # `wshm run` sends the summary (the daemon does not)
 #
 # [[notify.discord]]
 # url = "https://discord.com/api/webhooks/ID/TOKEN"

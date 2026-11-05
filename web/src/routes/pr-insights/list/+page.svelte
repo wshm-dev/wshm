@@ -21,7 +21,6 @@
 
 	let data = $state<PrInsights | null>(null);
 	let error: string | null = $state(null);
-	let proLocked = $state(false);
 	let loading = $state(true);
 
 	let loadToken = 0;
@@ -29,7 +28,6 @@
 		const myToken = ++loadToken;
 		loading = true;
 		error = null;
-		proLocked = false;
 		try {
 			const res = await fetchPrInsights();
 			if (myToken !== loadToken) return;
@@ -37,8 +35,7 @@
 		} catch (e) {
 			if (myToken !== loadToken) return;
 			const msg = e instanceof Error ? e.message : 'Failed to load';
-			if (msg.includes('403')) proLocked = true;
-			else error = msg;
+			error = msg;
 		}
 		loading = false;
 	}
@@ -198,15 +195,6 @@
 
 {#if loading}
 	<p class="text-sm text-muted-foreground">{translate('prInsights.loading')}</p>
-{:else if proLocked}
-	<Card.Root class="border-primary/40 max-w-xl">
-		<Card.Content>
-			<h3 class="text-lg font-semibold text-foreground mb-2">
-				{translate('prInsights.proOnly.title')}
-			</h3>
-			<p class="text-sm text-muted-foreground">{translate('prInsights.proOnly.body')}</p>
-		</Card.Content>
-	</Card.Root>
 {:else if error}
 	<Card.Root class="border-destructive">
 		<Card.Content>

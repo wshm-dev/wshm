@@ -54,4 +54,4 @@ When both happen, the `deploy/` tree gets extracted into a dedicated public repo
 
 ## Open source vs. Enterprise
 
-`wshm` (OSS) ships the CLI, TUI, daemon, and embedded web dashboard. Use `Job`/`CronJob` for periodic triage runs, or `Deployment` + `Service` + `Ingress` to expose the daemon's web UI long-running. Review, auto-fix, conflicts, changelog, reports and notifications are part of it. The Enterprise edition (`wshm-pro`) adds users & RBAC, audit log, PostgreSQL multi-pod, vault/secrets storage, exports and support on top of the same daemon.
+`wshm` (OSS) ships the CLI, TUI, daemon, and embedded web dashboard. Use `Job`/`CronJob` for periodic triage runs, or `Deployment` + `Service` + `Ingress` to expose the daemon's web UI long-running. Review, auto-fix, conflict detection, changelog and reports are part of it. The Enterprise edition (`wshm-pro`) adds the user management page, PostgreSQL multi-pod (storage, users, secrets), vault placeholders, exports, hosted diagram pages and support on top of the same daemon.

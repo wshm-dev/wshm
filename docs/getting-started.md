@@ -95,7 +95,7 @@ wshm pr analyze --apply
 wshm run --apply
 ```
 
-`run` does: **sync → triage → PR analysis → merge queue → conflict resolution**, then sends the notification summary when `[notify] on_run = true`.
+`run` does: **sync → triage → PR analysis → merge queue → conflict detection**, then sends the notification summary when `[notify] on_run = true`.
 
 ## What's Next
 

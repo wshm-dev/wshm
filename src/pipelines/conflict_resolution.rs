@@ -28,7 +28,7 @@ pub async fn run(
     _config: &Config,
     db: &dyn DatabaseBackend,
     _gh: &GhClient,
-    _args: &ConflictArgs,
+    args: &ConflictArgs,
     json: bool,
     _exporter: Option<&ExportManager>,
 ) -> Result<()> {
@@ -102,9 +102,9 @@ pub async fn run(
         }
     }
 
-    // TODO: auto-resolve with AI in M3
-    if !conflict_prs.is_empty() {
-        info!("Auto-resolve not yet implemented. Coming in M3.");
+    // Detection only: wshm does not rebase or resolve conflicts.
+    if args.apply && !conflict_prs.is_empty() {
+        info!("Automatic conflict resolution is not implemented; resolve the conflicts above manually.");
     }
 
     Ok(())

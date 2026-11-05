@@ -4,7 +4,7 @@
 
 ### "configured but requires wshm Pro" (exports, vault)
 
-Only Enterprise features (exports, vault, PostgreSQL multi-pod, users & RBAC) need a license. Review, auto-fix, conflicts, improve, reports and the other core features never do.
+Only three features check the license: exports, `vault()` placeholders and hosted diagram pages. Everything else, in `wshm` and in `wshm-pro`, runs without one.
 
 ```bash
 # Check your license status

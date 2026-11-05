@@ -25,15 +25,15 @@ pub trait VaultResolver: Send + Sync {
 /// feature not enabled, or Pro license missing.
 ///
 /// Vault integration (HashiCorp, AWS Secrets Manager, GCP Secret Manager)
-/// is a wshm Pro feature. Without a license, vault() placeholders
+/// is a wshm Enterprise feature (license feature `vault`). Without a license, vault() placeholders
 /// in config files are left unresolved and an error is logged.
 pub fn build_resolver(
     config: &crate::config::VaultConfig,
 ) -> Result<Option<Box<dyn VaultResolver>>> {
     if !crate::pro_hooks::has_feature("vault") {
         tracing::warn!(
-            "Vault integration ({}) configured but requires wshm Pro. \
-             Run `wshm login --license` to activate.",
+            "Vault integration ({}) configured but requires a wshm Enterprise license \
+             (feature `vault`). Contact contact@wshm.dev, then run `wshm-pro login --license`.",
             config.provider
         );
         return Ok(None);

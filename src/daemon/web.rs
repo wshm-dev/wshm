@@ -2342,9 +2342,9 @@ async fn api_license() -> impl IntoResponse {
         "plan": if is_pro { "pro" } else { "free" },
         "features": features,
         "oss_features": [
-            "triage", "pr_analysis", "merge_queue", "notify",
+            "triage", "pr_analysis", "merge_queue",
             "web_ui", "daemon_polling", "sqlite",
-            "review", "auto-fix", "improve", "conflicts", "reports",
+            "review", "auto-fix", "improve", "conflict-detection", "reports",
             "changelog", "dashboard", "plan", "search", "pr-insights",
             "issue-insights", "usage-dashboard", "daemon-webhook"
         ],

@@ -53,7 +53,7 @@ pub enum Command {
     /// Auto-generate a PR fix from an issue (Claude Code / Codex / container)
     Fix(FixArgs),
 
-    /// Detect and resolve conflicts
+    /// Detect conflicting PRs (mergeable = false)
     Conflicts(ConflictArgs),
 
     /// Analyze codebase and propose improvement issues
@@ -114,7 +114,7 @@ pub enum Command {
 
 #[derive(clap::Args)]
 pub struct ConflictArgs {
-    /// Attempt conflict resolution
+    /// Accepted for compatibility; automatic resolution is not implemented
     #[arg(long)]
     pub apply: bool,
 }
@@ -178,7 +178,7 @@ pub struct ImproveArgs {
     #[arg(long)]
     pub limit: Option<u32>,
 
-    /// Automatically trigger auto-fix on created issues
+    /// Mark created issues as auto-fix candidates (does not run auto-fix)
     #[arg(long)]
     pub auto_fix: bool,
 }

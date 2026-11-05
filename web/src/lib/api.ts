@@ -397,7 +397,7 @@ export function fetchLicense(): Promise<LicenseInfo> {
 }
 
 // ---------------------------------------------------------------------------
-// Search (Pro feature, gated by license.features `search`)
+// Search
 // ---------------------------------------------------------------------------
 
 export interface SearchHit {
@@ -726,7 +726,7 @@ export interface RepoDiagramsResponse {
 	/** The per-repo DB override, null when the TOML applies as is. */
 	override: Partial<DiagramSettings> | null;
 	toml: DiagramSettings;
-	/** Pro feature `diagram_hosting` (publish target "wshm"). */
+	/** Enterprise license feature `diagram_hosting` (publish target "wshm"). */
 	hosting_available: boolean;
 }
 
