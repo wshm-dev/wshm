@@ -1003,7 +1003,10 @@ fn resolve_repo_root(wshm_dir: &Path) -> Result<PathBuf> {
     if top.is_empty() {
         anyhow::bail!("git rev-parse returned no top-level for {}", dir.display());
     }
-    Ok(PathBuf::from(top))
+    // git prints `C:/...` on Windows: canonicalize so the path has the
+    // platform form (`\\?\C:\...`), like `dir` above.
+    let top = PathBuf::from(top);
+    Ok(top.canonicalize().unwrap_or(top))
 }
 
 /// Stage every change (new files included), then unstage sensitive paths.
