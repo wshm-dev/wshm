@@ -15,7 +15,7 @@ Docker Hub is the only registry — GHCR is not used.
 
 ## Layout
 
-All deployment artifacts live under `deploy/` in this repo, one subdirectory per method. The Pro equivalents live in `wshm-pro/deploy/`.
+All deployment artifacts live under `deploy/` in this repo, one subdirectory per method. The Enterprise equivalents live in `wshm-pro/deploy/`.
 
 ```
 deploy/
@@ -52,6 +52,6 @@ Deployment artifacts stay co-located with the code they deploy until two conditi
 
 When both happen, the `deploy/` tree gets extracted into a dedicated public repo (`wshm-deploy` or `wshm-charts`) and a Helm chart is published to a registry. Until then, a single source of truth keeps versions of the binary and the manifests in lockstep — every release tag rebuilds both.
 
-## Pro vs. OSS
+## Open source vs. Enterprise
 
-`wshm` (OSS) ships the CLI, TUI, daemon, and embedded web dashboard. Use `Job`/`CronJob` for periodic triage runs, or `Deployment` + `Service` + `Ingress` to expose the daemon's web UI long-running. Pro adds AI features (review, auto-fix, conflicts, changelog, reports), rich notifications, vault integrations, and SAML SSO/RBAC on top of the same daemon.
+`wshm` (OSS) ships the CLI, TUI, daemon, and embedded web dashboard. Use `Job`/`CronJob` for periodic triage runs, or `Deployment` + `Service` + `Ingress` to expose the daemon's web UI long-running. Review, auto-fix, conflicts, changelog, reports and notifications are part of it. The Enterprise edition (`wshm-pro`) adds users & RBAC, audit log, PostgreSQL multi-pod, vault/secrets storage, exports and support on top of the same daemon.

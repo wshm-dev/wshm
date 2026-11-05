@@ -968,3 +968,303 @@ export async function deleteSecret(id: number): Promise<{ status: string }> {
 	if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
 	return json;
 }
+
+// ---------------------------------------------------------------------------
+// PR Insights
+// ---------------------------------------------------------------------------
+
+/** A single open PR as returned by the PR insights endpoint. */
+export interface PrInsightItem {
+	repo: string;
+	number: number;
+	title: string;
+	author: string | null;
+	head_ref: string | null;
+	base_ref: string | null;
+	/** GitHub mergeability: true = mergeable, false = conflict, null = pending. */
+	mergeable: boolean | null;
+	/** Derived bucket: 'mergeable' | 'conflict' | 'unknown'. */
+	status: 'mergeable' | 'conflict' | 'unknown';
+	ci_status: string | null;
+	risk_level: string | null;
+	summary: string | null;
+	created_at: string;
+	updated_at: string;
+	url?: string | null;
+}
+
+export interface PrInsights {
+	items: PrInsightItem[];
+	/** Per-repo `[fix].base_branch` values — the branches the UI highlights
+	 *  as "default" in the target-branch breakdown. */
+	default_branches: string[];
+}
+
+export function fetchPrInsights(): Promise<PrInsights> {
+	return apiGet<PrInsights>('/pr-insights');
+}
+
+/** One daily snapshot of aggregate open-PR counts across all repos. */
+export interface PrTrendPoint {
+	day: string;
+	open: number;
+	conflict: number;
+	mergeable: number;
+	unknown: number;
+}
+
+export interface PrTrend {
+	points: PrTrendPoint[];
+}
+
+export function fetchPrTrend(): Promise<PrTrend> {
+	return apiGet<PrTrend>('/pr-insights/trend');
+}
+
+// ---------------------------------------------------------------------------
+// Issue Insights
+// ---------------------------------------------------------------------------
+
+/** A single open issue as returned by the issue insights endpoint. */
+export interface IssueInsightItem {
+	repo: string;
+	number: number;
+	title: string;
+	author: string | null;
+	labels: string[];
+	/** Triage category (bug / feature / ...); null when not triaged. */
+	category: string | null;
+	/** Triage priority (high / medium / low); null when none or not triaged. */
+	priority: string | null;
+	/** Triage confidence 0..1; null when not triaged. */
+	confidence: number | null;
+	summary: string | null;
+	/** True when the issue has a triage result. */
+	triaged: boolean;
+	created_at: string;
+	updated_at: string;
+	url?: string | null;
+}
+
+export interface IssueInsights {
+	items: IssueInsightItem[];
+}
+
+export function fetchIssueInsights(): Promise<IssueInsights> {
+	return apiGet<IssueInsights>('/issue-insights');
+}
+
+/** One daily snapshot of aggregate open-issue counts across all repos. */
+export interface IssueTrendPoint {
+	day: string;
+	total: number;
+	triaged: number;
+	untriaged: number;
+}
+
+export interface IssueTrend {
+	points: IssueTrendPoint[];
+}
+
+export function fetchIssueTrend(): Promise<IssueTrend> {
+	return apiGet<IssueTrend>('/issue-insights/trend');
+}
+
+// ---------------------------------------------------------------------------
+// Inline review, conflicts, improvements
+// ---------------------------------------------------------------------------
+
+export interface ReviewComment {
+	path: string;
+	line: number;
+	body: string;
+	severity: string;
+	category: string;
+	suggestion: string | null;
+}
+
+export interface ReviewStats {
+	errors: number;
+	warnings: number;
+	infos: number;
+}
+
+export interface ReviewEntry {
+	repo: string;
+	pr_number: number;
+	title: string;
+	author: string | null;
+	head_ref: string | null;
+	base_ref: string | null;
+	summary: string;
+	stats: ReviewStats;
+	comments: ReviewComment[];
+	posted_to_github: boolean;
+	reviewed_at: string;
+	ci_status: string | null;
+	mergeable: boolean | null;
+}
+
+export interface ConflictPr {
+	repo: string;
+	number: number;
+	title: string;
+	author: string | null;
+	base_ref: string | null;
+	head_ref: string | null;
+	ci_status: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface ConflictScan {
+	total: number;
+	clean: number;
+	conflicts: ConflictPr[];
+	unknown: number;
+}
+
+export interface Suggestion {
+	repo: string;
+	title: string;
+	body: string | null;
+	category: string;
+	effort: string;
+	issue_number: number | null;
+	priority: string | null;
+	created_at: string;
+}
+
+export interface ImprovementsResult {
+	suggestions: Suggestion[];
+}
+
+export function fetchReviews(): Promise<ReviewEntry[]> {
+	return apiGet<ReviewEntry[]>('/reviews');
+}
+
+export function fetchConflicts(): Promise<ConflictScan> {
+	return apiGet<ConflictScan>('/conflicts');
+}
+
+export function fetchImprovements(): Promise<ImprovementsResult> {
+	return apiGet<ImprovementsResult>('/improvements');
+}
+
+// ---------------------------------------------------------------------------
+// Reports
+// ---------------------------------------------------------------------------
+
+export interface SlaMetrics {
+	avg_pr_age_days: number;
+	avg_issue_age_days: number;
+	prs_over_7d: number;
+	prs_over_30d: number;
+	issues_over_7d: number;
+	issues_over_30d: number;
+}
+
+export interface RepoReport {
+	slug: string;
+	open_issues: number;
+	untriaged: number;
+	open_prs: number;
+	unanalyzed: number;
+	conflicts: number;
+	sla: SlaMetrics;
+	categories: Record<string, number>;
+	risks: Record<string, number>;
+}
+
+export interface ReportsResult {
+	repos: RepoReport[];
+}
+
+export function fetchReports(): Promise<ReportsResult> {
+	return apiGet<ReportsResult>('/reports');
+}
+
+// ---------------------------------------------------------------------------
+// Auto-fix
+// ---------------------------------------------------------------------------
+
+export interface AutofixCandidate {
+	repo: string;
+	number: number;
+	title: string;
+	category: string;
+	confidence: number;
+	priority: string | null;
+	summary: string | null;
+	created_at: string;
+}
+
+export interface AutofixResult {
+	candidates: AutofixCandidate[];
+}
+
+export function fetchAutofixCandidates(): Promise<AutofixResult> {
+	return apiGet<AutofixResult>('/autofix/candidates');
+}
+
+
+// ---------------------------------------------------------------------------
+// Usage dashboard
+// ---------------------------------------------------------------------------
+
+export interface UsageByKind {
+	kind: string;
+	total: number;
+	last_24h: number;
+	last_7d: number;
+	last_30d: number;
+}
+
+export interface UsageByRepo {
+	repo: string;
+	total: number;
+	last_24h: number;
+	last_7d: number;
+	last_30d: number;
+}
+
+export interface UsageLlmResponse {
+	total: number;
+	last_24h: number;
+	last_7d: number;
+	last_30d: number;
+	by_kind: UsageByKind[];
+	by_repo: UsageByRepo[];
+}
+
+export function fetchUsageLlm(): Promise<UsageLlmResponse> {
+	return apiGet<UsageLlmResponse>('/usage/llm');
+}
+
+export interface UsageGithubResource {
+	limit: number;
+	remaining: number;
+	reset: number;
+	used: number;
+}
+
+export interface UsageGithubRateLimit {
+	resources?: Record<string, UsageGithubResource>;
+	rate?: UsageGithubResource;
+	error?: string;
+}
+
+export interface UsageGithubRepo {
+	repo: string;
+	last_issue_sync: string | null;
+	last_pull_sync: string | null;
+}
+
+export interface UsageGithubResponse {
+	rate_limit: UsageGithubRateLimit;
+	by_repo: UsageGithubRepo[];
+}
+
+export function fetchUsageGithub(): Promise<UsageGithubResponse> {
+	return apiGet<UsageGithubResponse>('/usage/github');
+}

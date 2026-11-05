@@ -1,6 +1,6 @@
 # Vault Integration
 
-wshm Pro supports 4 secret management providers to keep sensitive values (license keys, webhook secrets, database URIs, API keys) out of config files.
+wshm Enterprise (self-hosted) supports 3 secret management providers (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager) to keep sensitive values (license keys, webhook secrets, database URIs, API keys) out of config files.
 
 ## How It Works
 
@@ -82,37 +82,6 @@ aws secretsmanager create-secret \
 ```
 
 **Compile flag:** `--features vault-aws`
-
----
-
-### Azure Key Vault
-
-```toml
-[vault]
-provider = "azure"
-address = "https://wshm-vault.vault.azure.net"
-```
-
-**Authentication:**
-
-| Method | Variables |
-|--------|-----------|
-| Service Principal | `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET` + `AZURE_TENANT_ID` |
-| Managed Identity | Automatic on Azure VM, AKS, App Service |
-| CLI | `az login` (local dev) |
-
-**Path format:** `vault(vault-name/secret-name)` or just `vault(secret-name)` when address is set.
-
-**Setup:**
-```bash
-# Store a secret
-az keyvault secret set \
-  --vault-name wshm-vault \
-  --name license-key \
-  --value "WSHM-XXXX-XXXX-XXXX"
-```
-
-**Compile flag:** `--features vault-azure`
 
 ---
 

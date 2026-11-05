@@ -29,6 +29,7 @@
   "type": "module",
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
+    "chart.js": "^4.5.1",
     "dompurify": "^3.4.11",
     "marked": "^18.0.5",
     "tailwindcss": "^4.2.2"

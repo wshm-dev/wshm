@@ -247,7 +247,7 @@ fn expand_tilde(path: &str) -> PathBuf {
 /// Interactive login flow: ask for license key, activate, cache JWT.
 pub fn login() -> Result<()> {
     println!("\n── License ──");
-    println!("Enter your license key (get one at https://wshm.dev):\n");
+    println!("Enter your license key (Enterprise: contact@wshm.dev):\n");
 
     print!("License key: ");
     std::io::Write::flush(&mut std::io::stdout())?;

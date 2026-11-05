@@ -2195,7 +2195,7 @@ pub struct RepoFeatures {
     /// `[ai.rag] enabled` / `WSHM_RAG_ENABLED`; both must be on.
     #[serde(default = "default_true")]
     pub related_history: bool,
-    /// Pro-only inline code review.
+    /// Inline code review.
     #[serde(default)]
     pub review_prs: bool,
     /// Whether a computed review is also posted to GitHub as inline PR

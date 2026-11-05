@@ -33,7 +33,7 @@ max_chars = 3000                  # size cap of the block
 
 [triage]
 enabled = true
-auto_fix = false                  # attempt auto-fix for simple bugs (Pro)
+auto_fix = false                  # attempt auto-fix for simple bugs
 auto_fix_confidence = 0.85        # minimum confidence for auto-fix
 triage_confidence = 0.5           # minimum confidence to apply triage
 labels_bug = "bug"
@@ -69,7 +69,7 @@ max_summary_calls = 3             # per-file summary calls for diffs > 40 KB
 # container, public_url) and allow_private are TOML-only: the per-repo
 # override from the dashboard can only choose `target` and the caps.
 [pr.review_diagrams.publish]
-target = "off"                    # off | local | github-pages | wshm (Pro) | s3 | gcs | azure
+target = "off"                    # off | local | github-pages | wshm (Enterprise) | s3 | gcs | azure
 # s3/gcs/azure: bucket / region / endpoint (S3, GCS) or account / container
 # (Azure), objects uploaded as text/html; needs a build with the matching
 # storage-s3 / storage-gcs / storage-azure feature. Credentials come from the
@@ -93,7 +93,7 @@ strategy = "rebase"               # merge, rebase, squash
 
 [conflicts]
 enabled = true
-auto_resolve = false              # AI conflict resolution (Pro)
+auto_resolve = false              # AI conflict resolution
 auto_resolve_confidence = 0.85
 
 [fix]
@@ -139,7 +139,7 @@ full_sync_interval_hours = 24
 
 [export]
 # [export.storage]                # one JSON object per event: <prefix>/YYYY/MM/DD/<Kind>-<ms>.json
-# provider = "s3"                 # s3, gcs, azure, local (Pro)
+# provider = "s3"                 # s3, gcs, azure, local (Enterprise)
 # bucket = "wshm-events"          # s3 / gcs
 # prefix = "wshm/events"
 # region = "eu-west-1"             # s3
@@ -156,7 +156,7 @@ full_sync_interval_hours = 24
 # wshm still starts.
 #
 # [export.database]
-# provider = "elastic"            # elastic, opensearch, postgres, mongodb, mysql (Pro)
+# provider = "elastic"            # elastic, opensearch, mongodb, mysql (Enterprise)
 # uri = "http://localhost:9200"
 #
 # [[export.webhooks]]

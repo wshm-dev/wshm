@@ -37,7 +37,7 @@ sudo dpkg -i wshm_*_amd64.deb
 docker run --rm -v $(pwd):/repo -w /repo innovtech/wshm:latest triage
 ```
 
-Multi-arch image (`linux/amd64` + `linux/arm64`). Pro image: `innovtech/wshm-pro:latest`.
+Multi-arch image (`linux/amd64` + `linux/arm64`). Enterprise image: `innovtech/wshm-pro:latest`.
 
 > A GitHub Action is planned but not yet released — track [#22](https://github.com/wshm-dev/wshm/issues/22).
 
@@ -95,11 +95,11 @@ wshm pr analyze --apply
 wshm run --apply
 ```
 
-OSS `run` does: **sync → triage → PR analysis → merge queue**. AI conflict resolution is a Pro-only stage and only runs in the Pro binary.
+`run` does: **sync → triage → PR analysis → merge queue → conflict resolution**, then sends the notification summary when `[notify] on_run = true`.
 
 ## What's Next
 
 - [Configuration](configuration.md) — customize behavior
-- [Pro Features](pro-features.md) — unlock code review, auto-fix, and more
+- [Features](pro-features.md) — code review, auto-fix, conflicts, reports, and the Enterprise additions
 - [Daemon](daemon.md) — run as a background service
 - [CLI Reference](cli-reference.md) — all commands

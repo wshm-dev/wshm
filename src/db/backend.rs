@@ -107,7 +107,7 @@ pub trait DatabaseBackend: Send + Sync {
     /// against any backend that implements this trait.
     fn upsert_pr_analysis(&self, row: &PrAnalysisRow) -> Result<()>;
 
-    // ── PR inline review (Pro) ──────────────────────────────────
+    // ── PR inline review ────────────────────────────────────────
     //
     // Distinct from PR analysis above: `pr_reviews` stores the actual
     // line-anchored inline-comment findings from `pipelines::review`

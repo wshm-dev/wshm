@@ -1,6 +1,44 @@
-# Pro Features
+# Open source vs Enterprise
 
-All Pro features require a valid license. See [License & Activation](license.md).
+wshm follows an open-core model:
+
+- **Open source** (`wshm`, Apache-2.0): every feature on this page except the Enterprise section. No license key needed.
+- **Enterprise (self-hosted)** (`wshm-pro`): everything in open source, plus users & RBAC, audit log, PostgreSQL multi-pod, vault/secrets storage, exports and support. Contact us at [contact@wshm.dev](mailto:contact@wshm.dev).
+
+The commands below use the `wshm` binary name. The Enterprise binary is `wshm-pro` and accepts the same commands (the Docker image installs it as `wshm`).
+
+# Open-source features
+
+## Action Plan
+
+AI-ranked to-do list of open issues across all monitored repos, ordered by triage priority.
+
+```bash
+# Show action plan (uses triage results from last sync)
+wshm plan
+
+# JSON output
+wshm plan --json
+
+# CSV for spreadsheets
+wshm plan --csv
+
+# Limit items per repo
+wshm plan --limit 20
+```
+
+**What it does:**
+- Queries all open issues with their triage results
+- Ranks by priority: critical → high → medium → low
+- Shows: priority, repo, issue #, category, age, simple-fix indicator, title + AI summary
+- ⚡ marks issues eligible for `wshm fix` auto-fix
+
+**Web UI:** `/improve` tab — same data in card format.
+
+**TUI:** `Action` tab — same data in interactive table.
+
+---
+
 
 ## Code Review
 
@@ -26,21 +64,6 @@ wshm review --pr 42 --apply
 **TUI:** `Review` tab (press Tab to navigate).
 
 ---
-
-## Hosted PR Diagrams
-
-With `[pr.review_diagrams.publish] target = "wshm"` (license feature
-`diagram_hosting`), the daemon serves the interactive architecture page of
-each PR at `<public_url>/diagrams/<owner>/<repo>/<pr>?k=<token>`. Only the
-graph is kept in the database: the page is rendered on request, with the
-diff fetched from the forge (small in-memory cache) and embedded up to
-`max_diff_kb`. Responses carry an ETag and a short `Cache-Control`, and a strict CSP: the viewer's JS/CSS are vendored in the binary and served from `/diagrams/_assets/` (no CDN, no inline script, no web font). Files published to other targets inline the same assets. The
-token is random per PR and is the only credential on `/diagrams/` (the
-path can be exposed without the SSO proxy; proxy identity headers are
-ignored there). Pages of private repos are linked under
-`/api/v1/diagrams/...`, behind the dashboard authentication. Pages are
-removed when the PR is closed or merged, after `retention_days` without
-update, or beyond `max_pages`. See `docs/configuration.md`.
 
 ## Auto-Fix
 
@@ -83,10 +106,10 @@ Detect and resolve merge conflicts across open PRs.
 
 ```bash
 # Scan for conflicts (dry run)
-wshm conflicts scan
+wshm conflicts
 
 # Attempt AI resolution
-wshm conflicts scan --apply
+wshm conflicts --apply
 ```
 
 **What it does:**
@@ -186,27 +209,24 @@ Each run stores a metric snapshot in the database for historical trending.
 
 ---
 
-## Export Sinks
+## Notifications
 
-Send pipeline events to external systems.
+Priority summary sent to Discord, Slack, Teams or generic webhooks.
 
-**Cloud storage:** S3, Azure Blob, GCS
-**Databases:** Elasticsearch, OpenSearch, PostgreSQL, MongoDB, MySQL
-**Webhooks:** Any HTTP endpoint with HMAC signing
+```bash
+wshm notify
+```
 
-See [Configuration](configuration.md) for `[export]` options.
-
----
-
-## Vault Integration
-
-Resolve secrets from enterprise secret managers. See [Vault](vault.md).
+With `[notify] on_run = true`, `wshm run` sends it at the end of each cycle.
 
 ---
 
-## SSO & RBAC
+## Insights, Search and Usage (Web UI)
 
-Single Sign-On, organizations, and role-based access control. See [SSO & RBAC](sso-rbac.md).
+- `/pr-insights` and `/issue-insights` — open PR / issue breakdowns and trends
+- `/search` — full-text search across issues and PRs of every repo
+- `/usage` — AI call counts and GitHub API rate limit
+- `/review/radar` — PRs waiting on you (approved, or changed since you asked for changes)
 
 ---
 
@@ -228,3 +248,55 @@ wshm revert --apply
 - All triage results and PR analyses from the local database
 
 **Web UI:** `/revert` tab — preview with counts before executing.
+
+---
+
+# Enterprise (self-hosted) features
+
+These need a license. Contact us at [contact@wshm.dev](mailto:contact@wshm.dev).
+
+## Users & RBAC
+
+User management page in the web UI and a PostgreSQL-backed user store shared by every daemon replica. SSO via your auth proxy (OIDC) and the role model are open source. See [SSO & RBAC](sso-rbac.md).
+
+## Audit Log
+
+Trail of actions taken in wshm.
+
+## PostgreSQL Multi-Pod
+
+Set `DATABASE_URL` to run several stateless daemon replicas on one PostgreSQL database (repositories, settings, users, secrets and license are stored there). The open-source edition uses SQLite.
+
+## Vault / Secrets Storage
+
+Encrypted secret store in PostgreSQL (AES-256-GCM, master key from `WSHM_MASTER_KEY`) and `vault()` placeholders resolved from HashiCorp Vault, AWS Secrets Manager or GCP Secret Manager. See [Vault](vault.md).
+
+## Export Sinks
+
+Send pipeline events to external systems.
+
+**Object storage:** S3 (and S3-compatible), GCS, Azure Blob
+**Databases:** Elasticsearch, OpenSearch, MongoDB, MySQL
+
+Generic HTTP webhooks with HMAC signing are open source. See [Configuration](configuration.md) for `[export]` options.
+
+---
+
+## Hosted PR Diagrams
+
+With `[pr.review_diagrams.publish] target = "wshm"` (license feature
+`diagram_hosting`), the daemon serves the interactive architecture page of
+each PR at `<public_url>/diagrams/<owner>/<repo>/<pr>?k=<token>`. Only the
+graph is kept in the database: the page is rendered on request, with the
+diff fetched from the forge (small in-memory cache) and embedded up to
+`max_diff_kb`. Responses carry an ETag and a short `Cache-Control`, and a strict CSP: the viewer's JS/CSS are vendored in the binary and served from `/diagrams/_assets/` (no CDN, no inline script, no web font). Files published to other targets inline the same assets. The
+token is random per PR and is the only credential on `/diagrams/` (the
+path can be exposed without the SSO proxy; proxy identity headers are
+ignored there). Pages of private repos are linked under
+`/api/v1/diagrams/...`, behind the dashboard authentication. Pages are
+removed when the PR is closed or merged, after `retention_days` without
+update, or beyond `max_pages`. See `docs/configuration.md`.
+
+## Support
+
+Contact us at [contact@wshm.dev](mailto:contact@wshm.dev).

@@ -41,11 +41,38 @@ pub enum Command {
     /// Show ranked merge queue
     Queue(QueueArgs),
 
-    /// Full cycle: sync + triage + analyze + queue
+    /// Full cycle: sync + triage + analyze + queue + conflicts
     Run(RunArgs),
 
     /// PR health: detect duplicates, stale/zombie PRs
     Health(HealthArgs),
+
+    /// Inline code review on PR diffs (AI-powered)
+    Review(ReviewArgs),
+
+    /// Auto-generate a PR fix from an issue (Claude Code / Codex / container)
+    Fix(FixArgs),
+
+    /// Detect and resolve conflicts
+    Conflicts(ConflictArgs),
+
+    /// Analyze codebase and propose improvement issues
+    Improve(ImproveArgs),
+
+    /// Generate a report (triage + PR analysis + queue)
+    Report(ReportArgs),
+
+    /// Generate changelog from merged PRs
+    Changelog(ChangelogArgs),
+
+    /// Generate metrics dashboard (HTML with charts)
+    Dashboard(DashboardArgs),
+
+    /// Show prioritized action plan (issues ranked by triage priority)
+    Plan(PlanCliArgs),
+
+    /// Send a priority summary notification
+    Notify,
 
     /// Configuration management
     #[command(subcommand)]
@@ -83,6 +110,103 @@ pub enum Command {
 
     /// Start persistent daemon with webhook server and web UI
     Daemon(DaemonArgs),
+}
+
+#[derive(clap::Args)]
+pub struct ConflictArgs {
+    /// Attempt conflict resolution
+    #[arg(long)]
+    pub apply: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ReviewArgs {
+    /// Review single PR by number
+    #[arg(long)]
+    pub pr: Option<u64>,
+
+    /// Actually post review comments on GitHub (dry-run by default)
+    #[arg(long)]
+    pub apply: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ReportArgs {
+    /// Output format: md, html, pdf
+    #[arg(long, default_value = "md")]
+    pub format: String,
+
+    /// Output file path (defaults to wshm-report.<format>)
+    #[arg(short, long)]
+    pub output: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct FixArgs {
+    /// Issue number to fix
+    #[arg(long)]
+    pub issue: u64,
+
+    /// AI tool to use: claude-code, codex
+    #[arg(long)]
+    pub tool: Option<String>,
+
+    /// Model override (e.g. claude-sonnet-4-20250514)
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Run inside a rootless Podman container (sandboxed)
+    #[arg(long, alias = "docker")]
+    pub docker: bool,
+
+    /// Container image to use (default: wshm-sandbox:latest)
+    #[arg(long)]
+    pub image: Option<String>,
+
+    /// Actually create the branch and PR (dry-run by default)
+    #[arg(long)]
+    pub apply: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ImproveArgs {
+    /// Actually create issues on GitHub (dry-run by default)
+    #[arg(long)]
+    pub apply: bool,
+
+    /// Maximum number of suggestions (default: 5)
+    #[arg(long)]
+    pub limit: Option<u32>,
+
+    /// Automatically trigger auto-fix on created issues
+    #[arg(long)]
+    pub auto_fix: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ChangelogArgs {
+    /// Number of days to look back (default: 30)
+    #[arg(long, default_value = "30")]
+    pub days: u64,
+
+    /// Output format: md, json
+    #[arg(long, default_value = "md")]
+    pub format: String,
+}
+
+#[derive(clap::Args)]
+pub struct DashboardArgs {
+    /// Output file path (default: wshm-dashboard.html)
+    #[arg(short, long)]
+    pub output: Option<String>,
+}
+
+/// `plan` takes `--json` / `--csv` from the global flags.
+#[derive(clap::Args)]
+pub struct PlanCliArgs {
+    /// Maximum number of items per repo (default: 50)
+    #[arg(long, default_value = "50")]
+    pub limit: usize,
 }
 
 #[derive(clap::Args)]

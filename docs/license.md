@@ -1,13 +1,15 @@
 # License & Activation
 
-## Plans
+## Editions
 
-| Plan | Price | Features |
-|------|-------|----------|
-| **Free (OSS)** | $0 forever | Triage, PR analysis, merge queue, notifications, dashboard, TUI |
-| **Pro** | $49/mo ($39/mo annual) | Everything in Free + code review, auto-fix, conflicts, improve, changelog, reports, exports, vault, SSO/RBAC, audit log |
+| Edition | Features |
+|---------|----------|
+| **Open source** (Apache-2.0, no license key) | Triage, PR analysis, merge queue, PR health, inline code review, auto-fix, conflict resolution, improvement proposals, changelog, reports, metrics dashboard, action plan, notifications (Discord, Slack, Teams, webhooks), PR and issue insights, search, usage dashboard, daemon and web UI, TUI, SQLite storage, SSO via your auth proxy (OIDC) |
+| **Enterprise (self-hosted)** | Everything in open source, plus users & RBAC, audit log, PostgreSQL multi-pod, vault/secrets storage, exports (S3, GCS, Azure Blob, MySQL, MongoDB, Elasticsearch, OpenSearch), support |
 
-Free during private beta. No credit card required.
+Enterprise: contact us at [contact@wshm.dev](mailto:contact@wshm.dev).
+
+A license key is only needed for Enterprise features. Every open-source feature runs without one, in both the `wshm` and `wshm-pro` binaries.
 
 ## Activation
 
@@ -89,25 +91,6 @@ export AWS_ACCESS_KEY_ID=AKIA...
 export AWS_SECRET_ACCESS_KEY=xxxxx
 export AWS_REGION=eu-west-1
 # Or: IAM role on EC2/ECS (automatic)
-```
-
-### Azure Key Vault
-
-```toml
-[vault]
-provider = "azure"
-address = "https://wshm-keyvault.vault.azure.net"
-
-[license]
-key = "vault(wshm-keyvault/license-key)"
-```
-
-Auth via environment or Managed Identity:
-```bash
-export AZURE_CLIENT_ID=xxxxx
-export AZURE_CLIENT_SECRET=xxxxx
-export AZURE_TENANT_ID=xxxxx
-# Or: Managed Identity on Azure VM/AKS (automatic)
 ```
 
 ### GCP Secret Manager
