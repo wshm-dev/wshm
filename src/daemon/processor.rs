@@ -420,7 +420,7 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
         }
     }
 
-    // Inline code review (Pro) — independent of analyze_prs below, so it
+    // Inline code review — independent of analyze_prs below, so it
     // still runs even for a repo that only wants review, not the coarse
     // risk/type classification. `should_post` combines the repo's general
     // apply mode with the review-specific post-to-GitHub toggle: both must

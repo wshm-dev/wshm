@@ -33,7 +33,7 @@ max_chars = 3000                  # size cap of the block
 
 [triage]
 enabled = true
-auto_fix = false                  # attempt auto-fix for simple bugs (Pro)
+auto_fix = false                  # attempt auto-fix for simple bugs
 auto_fix_confidence = 0.85        # minimum confidence for auto-fix
 triage_confidence = 0.5           # minimum confidence to apply triage
 labels_bug = "bug"
@@ -69,7 +69,7 @@ max_summary_calls = 3             # per-file summary calls for diffs > 40 KB
 # container, public_url) and allow_private are TOML-only: the per-repo
 # override from the dashboard can only choose `target` and the caps.
 [pr.review_diagrams.publish]
-target = "off"                    # off | local | github-pages | wshm (Pro) | s3 | gcs | azure
+target = "off"                    # off | local | github-pages | wshm (Enterprise) | s3 | gcs | azure
 # s3/gcs/azure: bucket / region / endpoint (S3, GCS) or account / container
 # (Azure), objects uploaded as text/html; needs a build with the matching
 # storage-s3 / storage-gcs / storage-azure feature. Credentials come from the
@@ -92,13 +92,16 @@ merge_threshold = 15              # minimum score to auto-merge
 strategy = "rebase"               # merge, rebase, squash
 
 [conflicts]
-enabled = true
-auto_resolve = false              # AI conflict resolution (Pro)
-auto_resolve_confidence = 0.85
+enabled = true                    # conflict detection (read-only)
+# auto_resolve / auto_resolve_confidence: not implemented, ignored
 
 [fix]
-# auto_fix_confidence = 0.85
-# trusted_authors_only = false
+# tool = "claude-code"            # or "codex"
+# model = "..."                   # override the agent model
+# docker_image = "wshm-sandbox:latest"  # used with `wshm fix --docker`
+# container_network = "none"     # network for `--docker` (default none: no egress, so the model API is unreachable;
+#                                 # set a network with a controlled egress). WSHM_FIX_CONTAINER_NETWORK is a fallback when empty.
+# trusted_authors_only = true     # default; WARNING: false lets any issue author steer the agent
 # test_command = "cargo test"
 # test_retries = 2
 
@@ -126,7 +129,7 @@ full_sync_interval_hours = 24
 # uri = "postgres://user:pass@localhost/wshm"
 
 [notify]
-# on_run = true
+# on_run = true                  # `wshm run` sends the summary (the daemon does not)
 #
 # [[notify.discord]]
 # url = "https://discord.com/api/webhooks/ID/TOKEN"
@@ -139,7 +142,7 @@ full_sync_interval_hours = 24
 
 [export]
 # [export.storage]                # one JSON object per event: <prefix>/YYYY/MM/DD/<Kind>-<ms>.json
-# provider = "s3"                 # s3, gcs, azure, local (Pro)
+# provider = "s3"                 # s3, gcs, azure, local (Enterprise)
 # bucket = "wshm-events"          # s3 / gcs
 # prefix = "wshm/events"
 # region = "eu-west-1"             # s3
@@ -156,7 +159,7 @@ full_sync_interval_hours = 24
 # wshm still starts.
 #
 # [export.database]
-# provider = "elastic"            # elastic, opensearch, postgres, mongodb, mysql (Pro)
+# provider = "elastic"            # elastic, opensearch, mongodb, mysql (Enterprise)
 # uri = "http://localhost:9200"
 #
 # [[export.webhooks]]
@@ -177,6 +180,10 @@ full_sync_interval_hours = 24
 [prs_blacklist]
 # PR numbers to never touch
 ```
+
+## Auto-fix and code execution
+
+The claude agent used by auto-fix may only read and edit files, plus run Bash for the configured `[fix] test_command`. That command still executes repository code (build scripts, test code, package hooks), and the agent can edit that code before running it. This is why `trusted_authors_only = true` (the default) and `wshm fix --docker` (with `container_network = "none"` by default) matter: keep both unless every issue author is trusted.
 
 ## Environment Variables
 

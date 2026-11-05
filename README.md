@@ -42,7 +42,7 @@ wshm does the boring parts so you can stay in flow.
 |-----------------------|-------------------|
 | AI code review        | included          |
 | Merge queue           | included          |
-| Issue auto-fix        | included (Pro)    |
+| Issue auto-fix        | included          |
 | Workflow automation   | included          |
 | Issue triage          | automated         |
 
@@ -56,8 +56,8 @@ One binary, self-hosted, your AI keys. Your data stays yours.
 | "Is this PR safe to merge?" review paralysis | **PR risk analysis** surfaces low/medium/high risk + a review checklist |
 | Merge queue is a shared Notion doc | **Scored merge queue** auto-promotes green PRs above your threshold |
 | Duplicates and zombie PRs pile up | **PR health** flags duplicates, stale, and zombie PRs automatically |
-| Secrets leak into `.env` and config | **Key vault** integration (Vault, AWS, **Azure Key Vault**, GCP) |
-| SaaS tools hold your data hostage | **Self-hosted**, single Rust binary, SQLite or Postgres — your data stays yours |
+| Secrets leak into `.env` and config | **Key vault** integration (HashiCorp Vault, AWS, GCP) in Enterprise |
+| SaaS tools hold your data hostage | **Self-hosted**, single Rust binary, SQLite (PostgreSQL multi-pod in Enterprise) — your data stays yours |
 | OpenAI subscription fatigue | **Claude Max / Pro / Team** OAuth login — reuse your existing plan |
 
 ## How it works
@@ -75,8 +75,8 @@ flowchart LR
     subgraph daemon[" wshm daemon — single Rust binary  "]
         direction TB
         sync["Sync engine<br/>(webhooks + polling)"]
-        pipes["Pipelines<br/>• Triage<br/>• PR analysis<br/>• Merge queue<br/>• PR health<br/>• Auto-fix · Review (Pro)"]
-        store["Storage<br/>SQLite (OSS) / Postgres (Pro)<br/>+ FTS5 search index<br/>+ AES-256-GCM secret vault"]
+        pipes["Pipelines<br/>• Triage<br/>• PR analysis<br/>• Merge queue<br/>• PR health<br/>• Auto-fix · Review"]
+        store["Storage<br/>SQLite (OSS) / Postgres (Enterprise)<br/>+ FTS5 search index<br/>+ AES-256-GCM secret vault"]
     end
 
     subgraph ai[" AI providers — your keys  "]
@@ -199,45 +199,61 @@ wshm was born out of a real need: triaging the growing backlog of issues and pul
 
 ## Features
 
-### Free (this repo)
+### Open source (this repo, Apache-2.0)
+
+Everything a team needs to run wshm on its repositories is in this repo, with no license key:
 
 - **Issue triage** — AI classification (bug/feature/question/etc.), priority, confidence scoring, auto-labeling
 - **PR analysis** — risk level (low/medium/high), type (feature/fix/docs), summary, review checklist
+- **Inline code review** — line-by-line AI review on PR diffs, optionally posted as PR comments
+- **Auto-fix** — generate fix PRs from issue descriptions (Claude Code / Codex / rootless container)
+- **Conflict detection** — list PRs that conflict with their base branch
+- **Improvement proposals** — analyze the codebase and open refactor/testing/performance issues
 - **Merge queue** — scoring, auto-merge above threshold, conflict detection
 - **PR health** — duplicate detection, stale/zombie PR flagging
+- **Reports** — repo health reports with SLA metrics (Markdown, HTML, PDF)
+- **Changelog** — AI-generated changelog from merged PRs (Markdown, JSON)
+- **Metrics dashboard** — static HTML dashboard with charts
+- **Action plan** — prioritized plan of issues across repos
+- **Notifications** — `wshm notify` / `wshm run` summary to Discord, Slack, Teams; generic HTTP webhook export sink (HMAC-signed)
 - **Sync** — full / incremental fetch of issues and PRs from your forge
-- **Run** — one-command cycle: sync + triage + analyze + queue
+- **Run** — one-command cycle: sync + triage + analyze + queue + conflict detection
 - **Backup / Restore** — snapshot your `.wshm/` data for safe migration
 - **Revert** — undo all wshm actions (remove comments, labels, clear analyses)
-- **Webhook notifications** — generic HTTP webhooks with HMAC signing
 - **TUI** — rich interactive terminal UI (issues, PRs, queue, stats)
-- **Daemon + Web dashboard** — persistent multi-repo background service with embedded Svelte web UI (issues, PRs, queue, triage, settings)
+- **Daemon + Web dashboard** — persistent multi-repo background service with an embedded Svelte web UI: issues, PRs, code review, auto-fix candidates, conflicts, improvements, PR and issue insights, usage, reports, search, settings
 - **Context export** — dump repo context as LLM-ready markdown
-- **Migrate** — move data between SQLite and PostgreSQL
 - **14 AI providers** — Anthropic, OpenAI, Google, Mistral, Groq, DeepSeek, xAI, Ollama (local), llama.cpp, and more
 - **Claude Max / Pro / Team subscription** — OAuth login via your existing Claude plan (no separate API key billing needed)
 - **4 Git providers** — GitHub, GitLab, Gitea, Azure DevOps (self-hosted friendly)
-- **Storage** — **SQLite** by default (zero setup, bundled), or **PostgreSQL** as an alternative primary backend
-- **OIDC SSO** — login via Google, GitHub, GitLab, Azure AD
+- **Storage** — **SQLite** (zero setup, bundled)
+- **Users & roles** — local users, four roles (viewer, member, operator, admin) enforced server-side, `/api/v1/users` API
+- **Encrypted secret store** — tokens stored encrypted in SQLite (`WSHM_MASTER_KEY`)
+- **SSO via your auth proxy (OIDC)** — put wshm behind oauth2-proxy, Cloudflare Access or a similar proxy (`WSHM_TRUST_PROXY_AUTH`)
 
-### Pro ([wshm.dev/pro](https://wshm.dev/pro))
+### Enterprise (self-hosted)
 
-Token-heavy AI features and enterprise integrations layered on top of the OSS daemon:
+The `wshm-pro` binary, for companies that self-host wshm at scale. Contact us at [contact@wshm.dev](mailto:contact@wshm.dev).
 
-- **Rich notifications** — Discord, Slack, Teams (in addition to the Free webhook sink)
-- **Changelog** — AI-generated changelog from merged PRs (markdown, JSON)
-- **HTML/PDF reports** — full repo health reports with SLA metrics
-- **Inline code review** — line-by-line AI review on PR diffs
-- **Auto-fix** — generate PRs from issue descriptions (Claude Code / Codex / containerized)
-- **AI conflict resolution** — automatic rebase with AI assistance
-- **Improvement proposals** — analyze codebase, create refactor/testing/perf issues
-- **Cloud exports** — ship issues/PRs/analyses to external sinks:
-  - Object storage: **S3**, **Azure Blob**, **GCS**
-  - Databases: **PostgreSQL**, **MySQL**, **MongoDB**, **Elasticsearch**, **OpenSearch**
-  - (distinct from the primary SQLite/PostgreSQL backend above — these are *additional* destinations)
-- **Secret management / Key vaults** — HashiCorp Vault, AWS Secrets Manager, **Azure Key Vault**, GCP Secret Manager (keep license keys, webhook secrets, DB URIs, API keys out of config)
-- **SAML SSO** — Okta, Azure AD, custom IdP
-- **RBAC + Audit log** — organizations, roles, action audit trail
+- **User management page** (`/users`) and a **PostgreSQL user store** shared by every replica
+- **PostgreSQL multi-pod** — PostgreSQL primary backend for several stateless daemon replicas
+- **Secrets** — encrypted secret store in PostgreSQL; `vault()` placeholders from HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager (license feature `vault`)
+- **Exports** — object storage (**S3**, **GCS**, **Azure Blob**) and databases (**Elasticsearch**, **OpenSearch**, **MongoDB**, **MySQL**) (license feature `exports`)
+- **Hosted PR diagram pages** (license feature `diagram_hosting`)
+- **Support**
+
+Only `vault()`, exports and hosted diagram pages check the license at runtime.
+
+## Upgrading from an open-source release before the open-core split
+
+Some settings had no effect in the open-source `wshm` binary and now run. Check them before upgrading:
+
+- `review_prs = true` (repo features): inline review runs on PR events. With the daemon in apply mode and `review_post_comments = true` (the default), review comments are posted on the PR.
+- `[triage] auto_fix = true`: `wshm triage --apply` (and the daemon in apply mode) now starts auto-fix and opens draft PRs.
+- `[notify] on_run = true`: `wshm run` now sends the notification summary.
+- `wshm run` now also runs conflict detection (read-only).
+
+`wshm-pro` installs are not affected: these settings already ran there.
 
 ---
 
@@ -271,7 +287,7 @@ wshm tui
 
 ### Daemon + Web dashboard (Free)
 
-The daemon is a long-running multi-repo service: webhook server, scheduled triage, generic webhook notifications, and an embedded Svelte web dashboard served on `https://127.0.0.1:3000`. Pro plans add rich notifications (Discord/Slack/Teams) and the AI features (review, auto-fix, changelog, reports) on top of this same daemon.
+The daemon is a long-running multi-repo service: webhook server, scheduled triage, inline review and auto-fix, and an embedded Svelte web dashboard served on `https://127.0.0.1:3000`.
 
 ```bash
 wshm daemon --config /etc/wshm/global.toml --poll
@@ -389,10 +405,9 @@ Open PRs → Score (CI, reviews, age, risk, conflicts) → Ranked list
                                                          └── Auto-merge if above threshold
 ```
 
-### Pipeline 4 — Conflict Resolution
+### Pipeline 4 — Conflict Detection
 ```
-Open PRs → Check mergeable → Conflicting? → Rebase from main
-                                              └── AI resolution (new commit, never force-push)
+Open PRs → Check mergeable → Conflicting? → Listed (no automatic rebase or resolution)
 ```
 
 ## Daemon Mode (H24)
@@ -593,7 +608,7 @@ wshm fix --issue 42 --docker --tool codex --apply
 
 ```bash
 wshm notify          # send summary now
-wshm run --apply     # full cycle + auto-notify (if on_run = true)
+wshm run --apply     # full cycle + notify (if on_run = true); the daemon does not notify
 ```
 
 The summary includes: open issues, untriaged count, high-priority issues, open PRs, high-risk PRs, and merge conflicts. Formatted natively for each platform (Discord embeds, Slack blocks, Teams adaptive cards).
@@ -705,7 +720,7 @@ wshm restore ~/.wshm/backups/state-20260422T143000.db
 
 - **Dry-run by default** — `--apply` required to perform actions
 - **Confidence gates** — never acts autonomously below threshold (default 0.85)
-- **Never force-pushes** — conflict resolution uses new commits
+- **Never force-pushes** — auto-fix pushes a new `wshm/fix-<N>` branch and opens a draft PR
 - **Idempotent** — re-running = same result, no duplicate comments
 - **Token security** — always from env vars, never in config files
 - **Transparent** — every action posts a comment explaining what and why
@@ -723,7 +738,7 @@ wshm is open source under the **[Apache License 2.0](LICENSE)**.
 - Contributions are accepted under the same license (Apache 2.0, section 5) — no CLA required
 - The **wshm** name and logo are trademarks of wshm-dev and are not covered by the license (section 6): forks are welcome, but please don't pass them off as wshm
 
-**Pro features** (PostgreSQL backend, RBAC, AI review, insights, hosted service at [wshm.cloud](https://wshm.cloud)) live in the separate, proprietary `wshm-pro` crate. Commercial questions: [contact@wshm.dev](mailto:contact@wshm.dev)
+**Enterprise (self-hosted) features** (user management page and PostgreSQL user store, PostgreSQL multi-pod, vault placeholders and PostgreSQL secret store, exports, hosted diagram pages, support) live in the separate, proprietary `wshm-pro` crate. Contact us at [contact@wshm.dev](mailto:contact@wshm.dev).
 
 ## Disclaimer
 
@@ -748,7 +763,7 @@ for any actions taken by the AI on your repositories.
 
 ---
 
-## Secret management / Key vaults (Pro)
+## Secret management / Key vaults (Enterprise)
 
 Any config value can be sourced from a secret vault using a `vault()` placeholder — license keys, webhook secrets, database URIs, API keys stay out of config files.
 
@@ -763,7 +778,7 @@ secret = "vault(secret/wshm/webhook-hmac)"
 uri = "vault(secret/wshm/elastic-uri)"
 ```
 
-Supported providers: **HashiCorp Vault**, **AWS Secrets Manager**, **Azure Key Vault**, **GCP Secret Manager**.
+Supported providers: **HashiCorp Vault**, **AWS Secrets Manager**, **GCP Secret Manager**.
 Full guide: [docs/vault.md](docs/vault.md).
 
 ---
@@ -778,9 +793,9 @@ Full guides in [`docs/`](./docs):
 - [Deployment](docs/deployment.md) — Helm, Kustomize, Docker, install script
 - [Daemon & Web UI](docs/daemon.md)
 - [License & Activation](docs/license.md)
-- [Vault / Key Vault Integration](docs/vault.md) (Pro)
-- [Pro Features](docs/pro-features.md)
-- [SSO & RBAC](docs/sso-rbac.md) (Pro)
+- [Vault / Key Vault Integration](docs/vault.md) (Enterprise)
+- [Open source vs Enterprise](docs/pro-features.md)
+- [SSO & RBAC](docs/sso-rbac.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
 ## Architecture
@@ -793,18 +808,19 @@ Full guides in [`docs/`](./docs):
 │    │        │        │       │              │
 │    └────────┴────────┴───────┘              │
 │              │                               │
-│     10 OSS pipelines                         │
+│     OSS pipelines                            │
 │     (triage, pr_analysis, merge_queue,       │
-│      pr_health, status, context,             │
-│      revert, backup, migrate)                │
+│      review, autogen, conflict detection,    │
+│      improve, report, changelog, dashboard,  │
+│      plan, notify, pr_health, backup)        │
 │              │                               │
 │    ┌─────────┴─────────┐                     │
 │    ▼                   ▼                     │
-│  SQLite           PostgreSQL                 │
+│  SQLite      PostgreSQL (Enterprise)         │
 └─────────────────────────────────────────────┘
 ```
 
-**Pro features** live in a separate crate (`wshm-pro`, not open source) and attach via runtime hooks.
+**Enterprise features** live in a separate crate (`wshm-pro`, not open source) and attach via runtime hooks.
 
 ## Contributing
 

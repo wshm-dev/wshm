@@ -107,7 +107,7 @@ pub async fn run(state: Arc<DaemonState>) {
 
                 // Reset sync failure counter
                 if sync_alert_sent {
-                    // OSS: alert via log only (Pro has notify pipeline)
+                    // Alert via log only (the daemon sends no notifications).
                     warn!("Sync recovered after {} failures", sync_failures);
                     sync_alert_sent = false;
                 }
@@ -241,11 +241,11 @@ pub async fn run(state: Arc<DaemonState>) {
             crate::pro_hooks::run_auto_update().await;
         }
 
-        // Daily notification recap (OSS: log only — Pro has full notify pipeline)
+        // Daily recap: log only. The daemon sends no notifications; use
+        // `wshm notify` (e.g. from cron) for a Discord/Slack/Teams digest.
         if last_daily_notify.elapsed() >= daily_notify_interval {
             last_daily_notify = Instant::now();
             info!("Daily recap: {} repos active", 1);
-            // TODO(pro): Pro notify pipeline sends full digest to Discord/Slack/email
         }
     }
 }

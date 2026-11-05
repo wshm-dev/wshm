@@ -583,13 +583,7 @@ async fn triage_issue(
                 classification.confidence * 100.0
             );
             match pro_hooks::run_auto_fix(config, db, gh, issue.number).await {
-                Ok(true) => info!("Auto-fix completed for issue #{}", issue.number),
-                Ok(false) => {
-                    tracing::warn!(
-                        "Auto-fix skipped for issue #{}: requires wshm Pro",
-                        issue.number
-                    );
-                }
+                Ok(_) => info!("Auto-fix completed for issue #{}", issue.number),
                 Err(e) => tracing::error!("Auto-fix failed for issue #{}: {e:#}", issue.number),
             }
         }
