@@ -116,18 +116,23 @@ pub struct Config {
 
     /// `[[pipelines]]` — pipeline templates (ordered steps with conditions).
     /// The built-in `standard` template (today's behaviour) is the default.
-    /// The DB override (`app_settings` key `pipelines`) replaces this list
-    /// when set; see `pipelines::engine::template::load`.
-    #[serde(default)]
-    pub pipelines: Vec<crate::pipelines::engine::template::PipelineTemplate>,
+    ///
+    /// Kept raw here and parsed by `pipelines::engine::template::toml_config`:
+    /// an invalid pipeline section must never fail the config load (one
+    /// repo's typo, or a key renamed by an upgrade, would otherwise stop the
+    /// multi-repo daemon from booting). An invalid section is logged, shown
+    /// in `GET /api/v1/repos/{slug}/pipelines`, and the repo runs `standard`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipelines: Option<serde_json::Value>,
 
-    /// `[[pipeline_routes]]` — rules picking the template of a run.
-    #[serde(default)]
-    pub pipeline_routes: Vec<crate::pipelines::engine::template::PipelineRoute>,
+    /// `[[pipeline_routes]]` — rules picking the template of a run (raw, see
+    /// `pipelines`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_routes: Option<serde_json::Value>,
 
-    /// `[pipeline_runs]` — retention of the run history.
-    #[serde(default)]
-    pub pipeline_runs: crate::pipelines::engine::template::PipelineRunsConfig,
+    /// `[pipeline_runs]` — retention of the run history (raw, see `pipelines`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_runs: Option<serde_json::Value>,
 
     /// Resolved at runtime, not from config file
     #[serde(skip)]
@@ -2485,9 +2490,6 @@ impl Config {
         } else {
             Config::default()
         };
-        config
-            .validate_pipelines()
-            .with_context(|| format!("Invalid pipeline config in {}", config_path.display()))?;
 
         config.wshm_dir = wshm_dir;
 
@@ -2500,16 +2502,6 @@ impl Config {
 
         config.ai.rag.apply_env_overrides();
         Ok(config)
-    }
-
-    /// Structural check of `[[pipelines]]` / `[[pipeline_routes]]` (names,
-    /// step ids, `needs`, conditions, limits). Step kinds are checked when a
-    /// run starts, against the edition's step catalog.
-    pub fn validate_pipelines(&self) -> Result<()> {
-        crate::pipelines::engine::template::validate(
-            &crate::pipelines::engine::template::from_config(self),
-        )
-        .map_err(|e| anyhow::anyhow!(e))
     }
 
     pub fn fix_secret_env_vars(&self) -> Vec<String> {
@@ -2565,9 +2557,6 @@ impl Config {
         } else {
             Config::default()
         };
-        config
-            .validate_pipelines()
-            .context("Invalid pipeline config in .wshm/config.toml")?;
 
         config.wshm_dir = wshm_dir;
 
@@ -2842,7 +2831,8 @@ full_sync_interval_hours = 24
 
 # Pipelines: how an issue / PR event is processed. Without any of this, the
 # built-in "standard" pipeline runs: exactly the repo toggles
-# (collect_*, triage_issues, review_prs, analyze_prs, filters). Every run is
+# (collect_*, triage_issues, review_prs, analyze_prs, filters). A custom
+# pipeline only honours a toggle listed in its `when.features`. Every run is
 # recorded per step (GET /api/v1/repos/{slug}/runs?item=N). Never read from
 # an issue or PR. Override per repo in the DB: PUT /api/v1/repos/{slug}/pipelines.
 # [[pipelines]]
@@ -3107,9 +3097,9 @@ impl Default for Config {
             prs_blacklist: Vec::new(),
             labels: Vec::new(),
             skills: Vec::new(),
-            pipelines: Vec::new(),
-            pipeline_routes: Vec::new(),
-            pipeline_runs: Default::default(),
+            pipelines: None,
+            pipeline_routes: None,
+            pipeline_runs: None,
             repo_owner: String::new(),
             repo_name: String::new(),
             wshm_dir: PathBuf::from(".wshm"),

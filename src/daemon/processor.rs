@@ -304,6 +304,11 @@ fn run_context(
         format!("{}.{}", event.event_type, event.action),
     )
     .with_event_id(event.id)
+    .with_payload_info(
+        serde_json::from_str::<serde_json::Value>(&event.payload)
+            .ok()
+            .and_then(|v| pipelines::engine::ItemInfo::from_payload(kind, &v)),
+    )
 }
 
 async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Result<()> {
@@ -364,18 +369,18 @@ async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Re
         .and_then(|i| i.get("pull_request"))
         .is_some();
 
-    // Execute the command
-    let response = commands::execute(
-        &cmd,
-        number,
-        is_pr,
-        &state.config,
-        state.db.as_ref(),
-        &*state.gh(),
-        state.apply(),
-        Some(triggered_by),
-    )
-    .await?;
+    // Execute the command. triage / analyze / review go through the
+    // repo's pipeline (template + step conditions, recorded as a run with
+    // trigger "command").
+    let kind = if is_pr {
+        pipelines::engine::ItemKind::Pr
+    } else {
+        pipelines::engine::ItemKind::Issue
+    };
+    let ctx = run_context(state, event, kind)
+        .with_source(pipelines::engine::RunSource::Command)
+        .with_trigger("command");
+    let response = commands::execute(&cmd, is_pr, &ctx, Some(triggered_by)).await?;
 
     // Post response as a comment
     if state.apply() {

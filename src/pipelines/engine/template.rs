@@ -410,18 +410,57 @@ pub fn plan<'a>(
 
 // ── Config sources: TOML + DB override ──────────────────────────────
 
-/// The TOML part of the config, as a [`PipelinesConfig`].
-pub fn from_config(config: &crate::config::Config) -> PipelinesConfig {
-    PipelinesConfig {
-        pipelines: config.pipelines.clone(),
-        pipeline_routes: config.pipeline_routes.clone(),
-        pipeline_runs: config.pipeline_runs.clone(),
+const SECTIONS: [&str; 3] = ["pipelines", "pipeline_routes", "pipeline_runs"];
+
+fn parse_valid(v: serde_json::Value) -> Result<PipelinesConfig, String> {
+    let cfg: PipelinesConfig =
+        serde_json::from_value(v).map_err(|e| format!("invalid pipeline settings: {e}"))?;
+    validate(&cfg)?;
+    Ok(cfg)
+}
+
+/// The TOML part of the config, parsed and validated. When it is invalid
+/// the repo falls back to `standard` (no template, no route; a valid
+/// `[pipeline_runs]` is kept) and the error is returned for the logs and
+/// `GET /api/v1/repos/{slug}/pipelines`. Never fails the config load.
+pub fn toml_config(config: &crate::config::Config) -> (PipelinesConfig, Option<String>) {
+    let mut obj = serde_json::Map::new();
+    for (k, v) in [
+        ("pipelines", &config.pipelines),
+        ("pipeline_routes", &config.pipeline_routes),
+        ("pipeline_runs", &config.pipeline_runs),
+    ] {
+        if let Some(v) = v {
+            obj.insert(k.to_string(), v.clone());
+        }
     }
+    let runs_only = obj.get("pipeline_runs").cloned();
+    match parse_valid(serde_json::Value::Object(obj)) {
+        Ok(c) => (c, None),
+        Err(e) => {
+            let fallback = runs_only
+                .and_then(|r| parse_valid(serde_json::json!({ "pipeline_runs": r })).ok())
+                .unwrap_or_default();
+            (fallback, Some(e))
+        }
+    }
+}
+
+/// The TOML part of the config ([`toml_config`] without the error).
+pub fn from_config(config: &crate::config::Config) -> PipelinesConfig {
+    toml_config(config).0
+}
+
+fn merged(base: &PipelinesConfig, over: &serde_json::Value) -> Result<PipelinesConfig, String> {
+    let mut v = serde_json::to_value(base).map_err(|e| e.to_string())?;
+    crate::config::merge_json(&mut v, over);
+    parse_valid(v)
 }
 
 /// Apply a DB override (JSON object with any of `pipelines`,
 /// `pipeline_routes`, `pipeline_runs`) over the TOML value: the two lists
-/// are replaced as a whole, `pipeline_runs` is merged key by key.
+/// are replaced as a whole, `pipeline_runs` is merged key by key. Strict:
+/// any invalid part is an error (used by the API before storing).
 pub fn apply_override(
     toml: &PipelinesConfig,
     over: &serde_json::Value,
@@ -434,12 +473,65 @@ pub fn apply_override(
     if !unknown.is_empty() {
         return Err(format!("unknown setting(s): {}", unknown.join(", ")));
     }
-    let mut base = serde_json::to_value(toml).map_err(|e| e.to_string())?;
-    crate::config::merge_json(&mut base, over);
-    let merged: PipelinesConfig =
-        serde_json::from_value(base).map_err(|e| format!("invalid pipeline settings: {e}"))?;
-    validate(&merged)?;
-    Ok(merged)
+    merged(toml, over)
+}
+
+/// Lenient variant used when running: keep the valid sections of the
+/// override and drop only the invalid ones (`pipelines` and
+/// `pipeline_routes` are also tried together, since routes may name
+/// templates of the override). Returns the errors of the dropped parts.
+pub fn apply_override_lenient(
+    toml: &PipelinesConfig,
+    over: &serde_json::Value,
+) -> (PipelinesConfig, Vec<String>) {
+    let Some(obj) = over.as_object() else {
+        return (
+            toml.clone(),
+            vec!["override ignored: expected a JSON object".into()],
+        );
+    };
+    let mut errors: Vec<String> = obj
+        .keys()
+        .filter(|k| !SECTIONS.contains(&k.as_str()))
+        .map(|k| format!("unknown setting '{k}' ignored"))
+        .collect();
+    let known: serde_json::Map<String, serde_json::Value> = obj
+        .iter()
+        .filter(|(k, _)| SECTIONS.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if let Ok(c) = merged(toml, &serde_json::Value::Object(known.clone())) {
+        return (c, errors);
+    }
+    let pick = |keys: &[&str]| {
+        let m: serde_json::Map<String, serde_json::Value> = keys
+            .iter()
+            .filter_map(|k| known.get(*k).map(|v| (k.to_string(), v.clone())))
+            .collect();
+        (!m.is_empty()).then_some(serde_json::Value::Object(m))
+    };
+    let mut current = toml.clone();
+    if let Some(runs) = pick(&["pipeline_runs"]) {
+        match merged(&current, &runs) {
+            Ok(c) => current = c,
+            Err(e) => errors.push(format!("pipeline_runs ignored: {e}")),
+        }
+    }
+    let both = pick(&["pipelines", "pipeline_routes"]);
+    let both_ok = both.as_ref().and_then(|b| merged(&current, b).ok());
+    if let Some(c) = both_ok {
+        current = c;
+    } else {
+        for key in ["pipelines", "pipeline_routes"] {
+            if let Some(part) = pick(&[key]) {
+                match merged(&current, &part) {
+                    Ok(c) => current = c,
+                    Err(e) => errors.push(format!("{key} ignored: {e}")),
+                }
+            }
+        }
+    }
+    (current, errors)
 }
 
 /// Validate an override as the API receives it: valid on its own and once
@@ -454,39 +546,96 @@ pub fn validate_override(
     Ok(merged)
 }
 
-/// The raw DB override, if one is set.
-pub fn read_override(db: &dyn crate::db::backend::DatabaseBackend) -> Option<serde_json::Value> {
-    db.get_app_setting(crate::db::settings::PIPELINES_KEY)
+/// The raw DB override, if one is set. `Err` when it is not JSON.
+pub fn read_override_raw(
+    db: &dyn crate::db::backend::DatabaseBackend,
+) -> Result<Option<serde_json::Value>, String> {
+    match db
+        .get_app_setting(crate::db::settings::PIPELINES_KEY)
         .ok()
         .flatten()
         .filter(|s| !s.trim().is_empty() && s.trim() != "null")
-        .and_then(|s| match serde_json::from_str::<serde_json::Value>(&s) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::warn!("Ignoring unparsable pipelines override in the DB: {e}");
-                None
-            }
-        })
+    {
+        None => Ok(None),
+        Some(s) => serde_json::from_str::<serde_json::Value>(&s)
+            .map(Some)
+            .map_err(|e| format!("override ignored: not JSON: {e}")),
+    }
 }
 
-/// The repo's effective pipeline config: the DB override (shared by every
-/// pod, read on each run) applied over the TOML. An invalid override is
-/// logged and ignored.
+/// The raw DB override, if one is set and parses.
+pub fn read_override(db: &dyn crate::db::backend::DatabaseBackend) -> Option<serde_json::Value> {
+    read_override_raw(db).ok().flatten()
+}
+
+/// Effective config plus what was wrong with its sources.
+#[derive(Debug, Clone, Default)]
+pub struct Loaded {
+    pub config: PipelinesConfig,
+    /// The TOML pipeline sections are invalid (the repo runs `standard`).
+    pub toml_error: Option<String>,
+    /// Parts of the DB override that were dropped, and why.
+    pub override_errors: Vec<String>,
+}
+
+/// The repo's effective pipeline config and the errors of its sources:
+/// the DB override (shared by every pod, read on each run) applied over
+/// the TOML, each invalid part dropped and reported.
+pub fn load_full(
+    config: &crate::config::Config,
+    db: &dyn crate::db::backend::DatabaseBackend,
+) -> Loaded {
+    let (toml, toml_error) = toml_config(config);
+    let (config, override_errors) = match read_override_raw(db) {
+        Ok(None) => (toml, Vec::new()),
+        Err(e) => (toml, vec![e]),
+        Ok(Some(over)) => apply_override_lenient(&toml, &over),
+    };
+    Loaded {
+        config,
+        toml_error,
+        override_errors,
+    }
+}
+
+/// The repo's effective pipeline config (see [`load_full`]). Dropped
+/// override parts are logged.
 pub fn load(
     config: &crate::config::Config,
     db: &dyn crate::db::backend::DatabaseBackend,
 ) -> PipelinesConfig {
-    let toml = from_config(config);
-    match read_override(db) {
-        None => toml,
-        Some(over) => match apply_override(&toml, &over) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("Ignoring invalid pipelines override in the DB: {e}");
-                toml
-            }
-        },
+    let l = load_full(config, db);
+    for e in &l.override_errors {
+        tracing::warn!("[{}] pipelines DB override: {e}", config.repo_slug());
     }
+    l.config
+}
+
+/// Non-fatal problems of a config: unknown toggles in `when.features`
+/// (they evaluate to false) and `timeout_secs` on steps with side effects
+/// (a timeout stops the step mid-way and can leave partial effects).
+pub fn warnings(cfg: &PipelinesConfig, registry: &StepRegistry) -> Vec<String> {
+    let mut out = Vec::new();
+    for t in &cfg.pipelines {
+        for s in &t.steps {
+            for w in condition::warnings(&s.when) {
+                out.push(format!("pipeline '{}': step '{}': {w}", t.name, s.id));
+            }
+            if s.timeout_secs.is_some() && registry.get(&s.uses).is_none_or(|k| k.mutating()) {
+                out.push(format!(
+                    "pipeline '{}': step '{}': timeout_secs on a step with side effects ('{}'): \
+                     a timeout stops it mid-way and can leave partial effects (labels, comments)",
+                    t.name, s.id, s.uses
+                ));
+            }
+        }
+    }
+    for (i, r) in cfg.pipeline_routes.iter().enumerate() {
+        for w in condition::warnings(&r.when) {
+            out.push(format!("pipeline route #{}: {w}", i + 1));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -631,9 +780,9 @@ retention_days = 7
         assert!(one(&s("a", "with = { x = 1 }")).is_err());
         // Limits.
         assert!(one(&s("a", "timeout_secs = 0")).is_err());
-        assert!(one(&s("a", "when = { features = [\"nope\"] }"))
-            .unwrap_err()
-            .contains("unknown feature"));
+        // An unknown toggle is a warning, not an error (an upgrade may
+        // rename one); it evaluates to false.
+        assert!(one(&s("a", "when = { features = [\"nope\"] }")).is_ok());
         assert!(one(&s("a", "when = { paths = [\"\"] }")).is_err());
         // No steps.
         assert!(one("steps = []").unwrap_err().contains("no steps"));
@@ -717,6 +866,76 @@ when = {{ labels_any = [\"x\"] }}
         assert_eq!(load(&config, &db).pipeline_runs.retention_days, 2);
         db.set_app_setting(crate::db::settings::PIPELINES_KEY, r#"{"bad":1}"#)
             .unwrap();
-        assert_eq!(load(&config, &db), PipelinesConfig::default());
+        let l = load_full(&config, &db);
+        assert_eq!(l.config, PipelinesConfig::default());
+        assert!(l.override_errors[0].contains("bad"));
+        db.set_app_setting(crate::db::settings::PIPELINES_KEY, "{not json")
+            .unwrap();
+        assert!(load_full(&config, &db).override_errors[0].contains("not JSON"));
+    }
+
+    fn config_from(src: &str) -> crate::config::Config {
+        toml::from_str(src).unwrap()
+    }
+
+    #[test]
+    fn invalid_toml_falls_back_to_standard_without_failing_the_load() {
+        // Structurally invalid (unknown key) and semantically invalid
+        // (needs a later step): the config still loads.
+        for src in [
+            "[[pipelines]]\nname = \"x\"\n[[pipelines.steps]]\nid = \"a\"\nuses = \"sync\"\nrenamed_key = 1\n[pipeline_runs]\nretention_days = 3\n",
+            "[[pipelines]]\nname = \"x\"\n[[pipelines.steps]]\nid = \"a\"\nuses = \"sync\"\nneeds = [\"b\"]\n[pipeline_runs]\nretention_days = 3\n",
+        ] {
+            let config = config_from(src);
+            let (cfg, err) = toml_config(&config);
+            assert!(err.is_some(), "{src}");
+            assert!(cfg.pipelines.is_empty() && cfg.pipeline_routes.is_empty());
+            assert_eq!(cfg.pipeline_runs.retention_days, 3, "valid runs kept");
+        }
+        let (cfg, err) = toml_config(&config_from(
+            "[[pipelines]]\nname = \"x\"\n[[pipelines.steps]]\nid = \"a\"\nuses = \"sync\"\n",
+        ));
+        assert!(err.is_none());
+        assert_eq!(cfg.pipelines[0].name, "x");
+    }
+
+    #[test]
+    fn lenient_override_drops_only_invalid_parts() {
+        let toml = PipelinesConfig::default();
+        let over = serde_json::json!({
+            "pipelines": [{"name": "x", "steps": []}],
+            "pipeline_runs": {"retention_days": 4},
+            "nope": 1
+        });
+        let (cfg, errors) = apply_override_lenient(&toml, &over);
+        assert_eq!(cfg.pipeline_runs.retention_days, 4);
+        assert!(cfg.pipelines.is_empty());
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        // Routes naming a template of the same override are applied together.
+        let over = serde_json::json!({
+            "pipelines": [{"name": "x", "steps": [{"id": "a", "uses": "sync"}]}],
+            "pipeline_routes": [{"template": "x"}],
+            "pipeline_runs": {"retention_days": "many"}
+        });
+        let (cfg, errors) = apply_override_lenient(&toml, &over);
+        assert_eq!(cfg.pipelines.len(), 1);
+        assert_eq!(cfg.pipeline_routes.len(), 1);
+        assert_eq!(cfg.pipeline_runs, PipelineRunsConfig::default());
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].starts_with("pipeline_runs ignored"));
+    }
+
+    #[test]
+    fn warnings_for_unknown_toggles_and_risky_timeouts() {
+        let cfg: PipelinesConfig = toml::from_str(
+            "[[pipelines]]\nname = \"x\"\n[[pipelines.steps]]\nid = \"a\"\nuses = \"triage\"\ntimeout_secs = 5\nwhen = { features = [\"gone\"] }\n[[pipelines.steps]]\nid = \"b\"\nuses = \"sync\"\ntimeout_secs = 5\n",
+        )
+        .unwrap();
+        let w = warnings(&cfg, &StepRegistry::builtin());
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w.iter().any(|x| x.contains("unknown feature 'gone'")));
+        assert!(w
+            .iter()
+            .any(|x| x.contains("step 'a'") && x.contains("partial effects")));
     }
 }

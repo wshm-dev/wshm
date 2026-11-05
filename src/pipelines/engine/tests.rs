@@ -26,6 +26,10 @@ struct World {
     ai_calls: u32,
     /// Sleep of every step, in ms.
     sleep_ms: u64,
+    /// Background AI-call sink captured by `analyze`.
+    sink: Mutex<Option<AiCallSink>>,
+    /// Budget seen by `analyze`.
+    budget_seen: Mutex<Option<Option<u32>>>,
 }
 
 struct Fake {
@@ -56,6 +60,10 @@ impl Step for Fake {
         }
         if self.world.fail.contains(self.kind) {
             anyhow::bail!("{} exploded", self.kind);
+        }
+        if self.kind == "analyze" {
+            *self.world.sink.lock().unwrap() = ctx.ai_call_sink();
+            *self.world.budget_seen.lock().unwrap() = Some(ctx.budget_left());
         }
         if self.kind == "sync" {
             if !self.world.found {
@@ -501,4 +509,217 @@ async fn routes_pick_the_template_and_invalid_falls_back() {
 #[tokio::test]
 async fn ai_calls_outside_a_step_are_ignored() {
     note_ai_call(); // no task-local: must not panic
+}
+
+#[tokio::test]
+async fn partial_run_follows_template_conditions() {
+    // A custom template whose triage skips `skip-ai` issues: the scheduler
+    // (partial run of the triage steps) must not triage them, and records
+    // nothing when nothing ran.
+    let t = custom(
+        r#"
+name = "careful"
+[[steps]]
+id = "sync"
+uses = "sync"
+[[steps]]
+id = "triage"
+uses = "triage"
+needs = ["sync"]
+when = { labels_none = ["skip-ai"], features = ["triage_issues"] }
+"#,
+    );
+    let world = Arc::new(World::default());
+    let opts = ExecOptions {
+        only_kinds: Some(vec!["triage".into()]),
+        record_only_if_active: true,
+        ..Default::default()
+    };
+    let feats = features(true, true, false, false, false);
+    let ctx = ctx_with(ItemKind::Issue, Some(8), feats.clone());
+    seed_issue(&ctx, 8, &["skip-ai"], "a");
+    let report = execute_with(&t, &fake_registry(&world), &ctx, &opts).await;
+    assert!(
+        world.log.lock().unwrap().is_empty(),
+        "sync left out, triage skipped"
+    );
+    assert_eq!(report.steps.len(), 1);
+    assert_eq!(
+        report.steps[0].reason.as_deref(),
+        Some("label 'skip-ai' on issue #8")
+    );
+    assert!(
+        report.run_id.is_none(),
+        "all-skipped partial run not recorded"
+    );
+
+    // Without the label, the triage runs; `needs = [sync]` counts as met.
+    let ctx = ctx_with(ItemKind::Issue, Some(9), feats);
+    seed_issue(&ctx, 9, &[], "a");
+    let report = execute_with(&t, &fake_registry(&world), &ctx, &opts).await;
+    assert_eq!(*world.log.lock().unwrap(), ["triage"]);
+    let run = &ctx
+        .db
+        .list_pipeline_runs(&PipelineRunFilter::default(), 1)
+        .unwrap()[0];
+    assert_eq!(run.id, report.run_id.unwrap());
+    assert_eq!(run.plan.len(), 1);
+    assert_eq!(run.steps[0].status, "done");
+}
+
+#[tokio::test]
+async fn command_runs_ignore_the_toggles_only() {
+    let t = custom(
+        r#"
+name = "c"
+[[steps]]
+id = "triage"
+uses = "triage"
+when = { features = ["triage_issues"], repo_filters = true, labels_none = ["frozen"] }
+"#,
+    );
+    let world = Arc::new(World::default());
+    let mut feats = features(true, false, false, false, true);
+    feats.filters.skip_authors = vec!["bot".into()];
+    let opts = ExecOptions {
+        only_kinds: Some(vec!["triage".into()]),
+        ignore_toggles: true,
+        ..Default::default()
+    };
+    let ctx = ctx_with(ItemKind::Issue, Some(1), feats.clone());
+    seed_issue(&ctx, 1, &[], "bot");
+    let report = execute_with(&t, &fake_registry(&world), &ctx, &opts).await;
+    assert_eq!(
+        report.status("triage"),
+        Some(StepStatus::Done),
+        "toggle + filter ignored"
+    );
+    let ctx = ctx_with(ItemKind::Issue, Some(2), feats);
+    seed_issue(&ctx, 2, &["frozen"], "bot");
+    let report = execute_with(&t, &fake_registry(&world), &ctx, &opts).await;
+    assert_eq!(
+        report.status("triage"),
+        Some(StepStatus::Skipped),
+        "labels still apply"
+    );
+    assert!(report.run_id.is_some(), "command runs are always recorded");
+}
+
+#[tokio::test]
+async fn background_ai_calls_are_added_to_the_run() {
+    let world = Arc::new(World {
+        found: true,
+        ai_calls: 1,
+        ..Default::default()
+    });
+    let t = custom(
+        r#"
+name = "bg"
+max_ai_calls = 5
+[[steps]]
+id = "analyze"
+uses = "analyze"
+"#,
+    );
+    let ctx = ctx_with(ItemKind::Pr, Some(3), RepoFeatures::default());
+    let report = execute(&t, &fake_registry(&world), &ctx).await;
+    assert_eq!(
+        *world.budget_seen.lock().unwrap(),
+        Some(Some(4)),
+        "budget left counts the running step"
+    );
+    // The diagram job finishes after the run.
+    let sink = world
+        .sink
+        .lock()
+        .unwrap()
+        .take()
+        .expect("recorded run gives a sink");
+    let (_, n) = count_ai_calls(async {
+        note_ai_call();
+        note_ai_call();
+    })
+    .await;
+    sink(n);
+    let run = &ctx
+        .db
+        .list_pipeline_runs(&PipelineRunFilter::default(), 1)
+        .unwrap()[0];
+    assert_eq!(run.id, report.run_id.unwrap());
+    assert_eq!(run.ai_calls, 3);
+    assert_eq!(run.steps[0].ai_calls, 3);
+}
+
+#[tokio::test]
+async fn routes_use_the_payload_labels_before_sync() {
+    let ctx = ctx_with(ItemKind::Pr, Some(4), RepoFeatures::default());
+    seed_pull(&ctx, 4, "a", "main"); // cached without the new label
+    let payload = serde_json::json!({
+        "action": "labeled",
+        "pull_request": {"number": 4, "labels": [{"name": "docs"}], "user": {"login": "a"}, "head": {"sha": "h1"}}
+    });
+    let info = ItemInfo::from_payload(ItemKind::Pr, &payload).unwrap();
+    assert_eq!(info.labels, ["docs"]);
+    assert_eq!(info.head_sha.as_deref(), Some("h1"));
+    let ctx = ctx.with_payload_info(Some(info));
+    let over = serde_json::json!({
+        "pipelines": [{"name": "light", "steps": [{"id": "s", "uses": "sync"}]}],
+        "pipeline_routes": [{"template": "light", "when": {"labels_any": ["docs"]}}]
+    });
+    ctx.db
+        .set_app_setting(crate::db::settings::PIPELINES_KEY, &over.to_string())
+        .unwrap();
+    assert_eq!(
+        select_template(&ctx, &StepRegistry::builtin()).await.name,
+        "light"
+    );
+    // Poller payloads carry no labels: no payload info.
+    assert!(ItemInfo::from_payload(
+        ItemKind::Pr,
+        &serde_json::json!({"pull_request": {"number": 4}})
+    )
+    .is_none());
+    // Comment payloads carry the issue object.
+    let c = serde_json::json!({"issue": {"labels": [{"name": "x"}], "pull_request": {}}});
+    assert_eq!(
+        ItemInfo::from_payload(ItemKind::Pr, &c).unwrap().labels,
+        ["x"]
+    );
+}
+
+#[tokio::test]
+async fn soft_failure_is_recorded_without_abort() {
+    struct Soft;
+    #[async_trait]
+    impl Step for Soft {
+        fn kind(&self) -> &'static str {
+            "triage"
+        }
+        fn items(&self) -> &'static [ItemKind] {
+            &[ItemKind::Issue]
+        }
+        async fn run(&self, _ctx: &RunContext, _def: &StepDef) -> anyhow::Result<StepOutput> {
+            Ok(StepOutput::soft_failed("AI said no"))
+        }
+    }
+    let world = Arc::new(World {
+        found: true,
+        ..Default::default()
+    });
+    let mut reg = fake_registry(&world);
+    reg.register(Arc::new(Soft));
+    let ctx = ctx_with(
+        ItemKind::Issue,
+        Some(5),
+        features(true, true, false, false, false),
+    );
+    let report = execute(template::standard(), &reg, &ctx).await;
+    assert_eq!(report.status("triage"), Some(StepStatus::Failed));
+    assert_eq!(report.steps[1].reason.as_deref(), Some("AI said no"));
+    assert_eq!(
+        report.status("triage-memory"),
+        Some(StepStatus::Skipped),
+        "needs a done triage"
+    );
+    assert!(report.into_result().is_ok(), "event not failed, as before");
 }

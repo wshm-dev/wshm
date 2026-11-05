@@ -3043,15 +3043,35 @@ async fn api_repo_diagrams_put(
 }
 
 /// Body of the pipeline settings endpoints: the effective config, the raw
-/// per-repo override (null when none), the TOML value, the built-in
-/// templates and the step catalog.
+/// per-repo override (null when none), the TOML value, what is wrong with
+/// them (`toml_error`: invalid TOML, the repo runs `standard`;
+/// `override_error(s)`: dropped parts of the override; `template_errors`:
+/// unknown step kinds; `warnings`), the built-in templates and the step
+/// catalog.
 fn pipelines_settings_json(ds: &crate::daemon::DaemonState) -> serde_json::Value {
     use crate::pipelines::engine::{steps::StepRegistry, template};
     let registry = StepRegistry::global();
+    let loaded = template::load_full(&ds.config, ds.db.as_ref());
+    // Templates whose step kinds are unknown run `standard` instead.
+    let invalid: Vec<String> = loaded
+        .config
+        .pipelines
+        .iter()
+        .filter_map(|t| template::validate_template_steps(t, &registry).err())
+        .collect();
     json!({
-        "effective": template::load(&ds.config, ds.db.as_ref()),
+        "effective": loaded.config,
         "override": template::read_override(ds.db.as_ref()).filter(|v| v.is_object()),
         "toml": template::from_config(&ds.config),
+        "toml_error": loaded.toml_error,
+        "override_error": if loaded.override_errors.is_empty() {
+            serde_json::Value::Null
+        } else {
+            json!(loaded.override_errors.join("; "))
+        },
+        "override_errors": loaded.override_errors,
+        "template_errors": invalid,
+        "warnings": template::warnings(&loaded.config, &registry),
         "builtin": [template::standard()],
         "step_kinds": registry.kinds(),
     })

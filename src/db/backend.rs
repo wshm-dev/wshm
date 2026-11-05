@@ -220,6 +220,13 @@ pub trait DatabaseBackend: Send + Sync {
         Ok(())
     }
 
+    /// Add AI calls made after the step returned (background diagram
+    /// jobs) to a step and its run.
+    fn add_pipeline_ai_calls(&self, run_id: i64, seq: u32, n: u32) -> Result<()> {
+        let _ = (run_id, seq, n);
+        Ok(())
+    }
+
     /// Runs (newest first, with their steps), at most `limit` (capped at
     /// [`crate::db::runs::MAX_LIST`]).
     fn list_pipeline_runs(
@@ -659,6 +666,10 @@ impl DatabaseBackend for super::Database {
 
     fn finish_pipeline_run(&self, finish: &PipelineRunFinish) -> Result<()> {
         self.with_conn(|conn| crate::db::runs::finish_pipeline_run(conn, finish))
+    }
+
+    fn add_pipeline_ai_calls(&self, run_id: i64, seq: u32, n: u32) -> Result<()> {
+        self.with_conn(|conn| crate::db::runs::add_pipeline_ai_calls(conn, run_id, seq, n))
     }
 
     fn list_pipeline_runs(

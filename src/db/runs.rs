@@ -46,6 +46,8 @@ pub struct PipelineRunFinish {
     pub status: String,
     pub error: Option<String>,
     pub head_sha: Option<String>,
+    /// AI calls of the run's steps, added to the stored count (background
+    /// calls may have been added already).
     pub ai_calls: u32,
     pub finished_at: String,
     pub duration_ms: u64,
@@ -184,7 +186,8 @@ pub fn record_pipeline_step(conn: &Connection, s: &PipelineStepRunRow) -> Result
 pub fn finish_pipeline_run(conn: &Connection, f: &PipelineRunFinish) -> Result<()> {
     conn.execute(
         "UPDATE pipeline_runs SET status = ?2, error = ?3,
-            head_sha = COALESCE(?4, head_sha), ai_calls = ?5, finished_at = ?6, duration_ms = ?7
+            head_sha = COALESCE(?4, head_sha), ai_calls = ai_calls + ?5, finished_at = ?6,
+            duration_ms = ?7
          WHERE id = ?1",
         params![
             f.id,
@@ -195,6 +198,22 @@ pub fn finish_pipeline_run(conn: &Connection, f: &PipelineRunFinish) -> Result<(
             f.finished_at,
             f.duration_ms as i64
         ],
+    )?;
+    Ok(())
+}
+
+/// Add AI calls made in the background after a step returned. Additive on
+/// both rows (as is [`finish_pipeline_run`] on the run), so the order of
+/// the two writes does not matter; a job finishing before its step row is
+/// written only counts on the run.
+pub fn add_pipeline_ai_calls(conn: &Connection, run_id: i64, seq: u32, n: u32) -> Result<()> {
+    conn.execute(
+        "UPDATE pipeline_runs SET ai_calls = ai_calls + ?2 WHERE id = ?1",
+        params![run_id, n],
+    )?;
+    conn.execute(
+        "UPDATE pipeline_step_runs SET ai_calls = ai_calls + ?3 WHERE run_id = ?1 AND seq = ?2",
+        params![run_id, seq, n],
     )?;
     Ok(())
 }

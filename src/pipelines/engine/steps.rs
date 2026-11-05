@@ -11,14 +11,19 @@ use async_trait::async_trait;
 use tracing::{info, warn};
 
 use super::template::StepDef;
-use super::{ItemKind, RunContext};
+use super::{ItemKind, RunContext, RunSource};
 use crate::github::sync as gh_sync;
 
-/// What a step reports when it did not fail. A failure is an `Err`.
+/// What a step reports. A failure that should apply the step's
+/// `on_failure` policy is an `Err`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StepOutput {
     /// `Some(reason)` when the step decided not to act (recorded as skipped).
     pub skipped: Option<String>,
+    /// `Some(error)` for a failure the wrapped pipeline already handled by
+    /// logging and going on (its historical behaviour): recorded as failed,
+    /// but never aborts the run.
+    pub failed: Option<String>,
     /// Short human summary of what the step did.
     pub summary: Option<String>,
     /// Number of findings (review comments, ...).
@@ -36,6 +41,13 @@ impl StepOutput {
     pub fn skipped(reason: impl Into<String>) -> Self {
         Self {
             skipped: Some(reason.into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn soft_failed(error: impl Into<String>) -> Self {
+        Self {
+            failed: Some(error.into()),
             ..Default::default()
         }
     }
@@ -64,6 +76,12 @@ pub trait Step: Send + Sync {
         } else {
             Err(format!("step kind '{}' takes no parameters", self.kind()))
         }
+    }
+    /// Whether the step has side effects outside wshm's cache (labels,
+    /// comments, reviews, ...). A `timeout_secs` on such a step is warned
+    /// about: the timeout drops the step mid-way. Default: true.
+    fn mutating(&self) -> bool {
+        true
     }
     /// Run the step. AI calls made through `AiBackend` while this future
     /// runs are counted by the engine.
@@ -124,6 +142,10 @@ pub struct SyncStep;
 impl Step for SyncStep {
     fn kind(&self) -> &'static str {
         "sync"
+    }
+
+    fn mutating(&self) -> bool {
+        false
     }
 
     fn items(&self) -> &'static [ItemKind] {
@@ -198,7 +220,9 @@ impl Step for SyncStep {
 }
 
 /// `triage`: the issue triage pipeline (classification, labels, comment,
-/// and the auto-fix of `[triage] auto_fix`). Posts only in apply mode.
+/// and the auto-fix of `[triage] auto_fix`). Posts only in apply mode. A
+/// scheduler run also applies the repo filters' relabel-marker cleanup, as
+/// the scheduled batch did.
 pub struct TriageStep;
 
 #[async_trait]
@@ -217,15 +241,20 @@ impl Step for TriageStep {
             apply: ctx.apply,
             retriage: false,
         };
-        crate::pipelines::triage::run(
+        let filters = (ctx.source == RunSource::Scheduler).then_some(&ctx.features.filters);
+        let report = crate::pipelines::triage::run_with_report(
             &ctx.config,
             ctx.db.as_ref(),
             &*ctx.gh,
             &args,
             crate::pipelines::triage::OutputFormat::Text,
             None,
+            filters,
         )
         .await?;
+        if let Some((_, e)) = report.failures.into_iter().next() {
+            return Ok(StepOutput::soft_failed(e));
+        }
         let summary = ctx
             .item
             .number
@@ -237,7 +266,8 @@ impl Step for TriageStep {
 }
 
 /// `review`: the inline code review (Pro hook). Computed and stored always;
-/// posted only when apply mode and `review_post_comments` are both on.
+/// posted only when apply mode and `review_post_comments` are both on (a
+/// slash command posts in apply mode, as before).
 pub struct ReviewStep;
 
 #[async_trait]
@@ -251,42 +281,39 @@ impl Step for ReviewStep {
     }
 
     async fn run(&self, ctx: &RunContext, _def: &StepDef) -> anyhow::Result<StepOutput> {
+        use crate::pro_hooks::ReviewOutcome;
         let Some(n) = ctx.item.number else {
             return Ok(StepOutput::skipped("no PR number"));
         };
-        let before = ctx
-            .db
-            .get_pr_review(n)
-            .ok()
-            .flatten()
-            .map(|r| r.reviewed_at);
-        let should_post = ctx.apply && ctx.features.review_post_comments;
-        let ran =
+        let should_post = match ctx.source {
+            RunSource::Command => ctx.apply,
+            _ => ctx.apply && ctx.features.review_post_comments,
+        };
+        let outcome =
             crate::pro_hooks::run_review(&ctx.config, ctx.db.as_ref(), &*ctx.gh, n, should_post)
                 .await
                 .inspect_err(|e| warn!("Review failed for PR #{n}: {e:#}"))?;
-        if !ran {
-            return Ok(StepOutput::skipped("inline review requires wshm Pro"));
-        }
-        match ctx.db.get_pr_review(n).ok().flatten() {
-            Some(r) if Some(&r.reviewed_at) != before.as_ref() => {
-                let count = r.result.comments.len() as u32;
-                let posted = if r.posted_to_github {
-                    "posted"
-                } else {
-                    "not posted"
-                };
-                Ok(StepOutput::done(format!("{count} comment(s), {posted}")).with_findings(count))
+        match outcome {
+            None => Ok(StepOutput::skipped("inline review requires wshm Pro")),
+            Some(ReviewOutcome::Skipped(reason)) => Ok(StepOutput::skipped(reason)),
+            Some(ReviewOutcome::Failed(e)) => {
+                warn!("Review failed for PR #{n}: {e}");
+                anyhow::bail!("review failed: {e}")
             }
-            Some(r) => Ok(StepOutput::done("unchanged since the last review")
-                .with_findings(r.result.comments.len() as u32)),
-            None => Ok(StepOutput::done("no review stored")),
+            Some(ReviewOutcome::Reviewed { comments, posted }) => {
+                let posted = if posted { "posted" } else { "not posted" };
+                Ok(StepOutput::done(format!("{comments} comment(s), {posted}"))
+                    .with_findings(comments))
+            }
         }
     }
 }
 
 /// `analyze`: the PR analysis (type, risk, labels, comment). Diagram jobs
-/// it returns run in the background, outside the run.
+/// it returns run in the background after the step; their AI calls are
+/// added to the run (and to this step) when they finish. They are not
+/// started once the run's AI budget is used up, but a started job is not
+/// cut short by the budget. A slash command never generates diagrams.
 pub struct AnalyzeStep;
 
 #[async_trait]
@@ -305,6 +332,11 @@ impl Step for AnalyzeStep {
             pr: ctx.item.number,
             apply: ctx.apply,
         };
+        let diagrams = if ctx.source == RunSource::Command {
+            pr_analysis::DiagramMode::Skip
+        } else {
+            pr_analysis::DiagramMode::Deferred
+        };
         let jobs = pr_analysis::run_with(
             &ctx.config,
             ctx.db.as_ref(),
@@ -314,27 +346,31 @@ impl Step for AnalyzeStep {
             None,
             pr_analysis::RunOptions {
                 preview: false,
-                diagrams: pr_analysis::DiagramMode::Deferred,
+                diagrams,
             },
         )
         .await?;
-        let n_jobs = jobs.len();
-        for job in jobs {
-            pr_analysis::spawn_diagram_job(
-                Arc::clone(&ctx.config),
-                Arc::clone(&ctx.db),
-                Arc::clone(&ctx.gh),
-                job,
-            );
-        }
         let mut summary = ctx
             .item
             .number
             .and_then(|n| ctx.db.get_pr_analysis(n).ok().flatten())
             .map(|a| format!("{}, risk {}", a.pr_type, a.risk_level))
             .unwrap_or_else(|| "no analysis result".into());
-        if n_jobs > 0 {
-            summary.push_str("; diagram queued");
+        if !jobs.is_empty() {
+            if ctx.budget_left() == Some(0) {
+                summary.push_str("; diagram not started (AI call budget reached)");
+            } else {
+                summary.push_str("; diagram queued");
+                for job in jobs {
+                    pr_analysis::spawn_diagram_job(
+                        Arc::clone(&ctx.config),
+                        Arc::clone(&ctx.db),
+                        Arc::clone(&ctx.gh),
+                        job,
+                        ctx.ai_call_sink(),
+                    );
+                }
+            }
         }
         Ok(StepOutput::done(summary))
     }
@@ -348,6 +384,10 @@ pub struct MemoryStep;
 impl Step for MemoryStep {
     fn kind(&self) -> &'static str {
         "memory"
+    }
+
+    fn mutating(&self) -> bool {
+        false
     }
 
     fn items(&self) -> &'static [ItemKind] {

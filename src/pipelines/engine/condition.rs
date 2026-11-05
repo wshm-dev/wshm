@@ -122,17 +122,26 @@ fn glob_any(globs: &[String], text: &str) -> bool {
         .any(|re| re.is_match(text))
 }
 
-/// Static validation of a condition (feature names, forge ids, globs).
-pub fn validate(c: &Condition) -> Result<(), String> {
+/// Non-fatal problems: unknown toggles in `features`. They evaluate to
+/// false (the step is skipped) instead of failing the config, so a toggle
+/// renamed by an upgrade cannot stop a repo from booting.
+pub fn warnings(c: &Condition) -> Vec<String> {
     let known = known_features();
-    for f in &c.features {
-        if !known.contains(f) {
-            return Err(format!(
-                "unknown feature '{f}' in when.features (known: {})",
+    c.features
+        .iter()
+        .filter(|f| !known.contains(f))
+        .map(|f| {
+            format!(
+                "unknown feature '{f}' in when.features, evaluates to false (known: {})",
                 known.join(", ")
-            ));
-        }
-    }
+            )
+        })
+        .collect()
+}
+
+/// Static validation of a condition (forge ids, globs, empty values).
+/// Unknown feature names are only [`warnings`].
+pub fn validate(c: &Condition) -> Result<(), String> {
     for f in &c.forges {
         if !FORGES.contains(&f.as_str()) {
             return Err(format!(
@@ -180,9 +189,15 @@ pub async fn evaluate(c: &Condition, ctx: &RunContext) -> Result<(), String> {
             return Err(format!("forge {forge} not in when.forges"));
         }
     }
-    for f in &c.features {
-        if !feature_on(&ctx.features, f) {
-            return Err(format!("{f} disabled"));
+    if !c.features.is_empty() {
+        let known = known_features();
+        for f in &c.features {
+            if !known.contains(f) {
+                return Err(format!("unknown feature '{f}' (treated as off)"));
+            }
+            if !feature_on(&ctx.features, f) {
+                return Err(format!("{f} disabled"));
+            }
         }
     }
     if c.repo_filters {

@@ -19,8 +19,8 @@ pub mod condition;
 pub mod steps;
 pub mod template;
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -84,11 +84,74 @@ impl std::fmt::Display for ItemRef {
 }
 
 /// Item fields the conditions look at.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ItemInfo {
     pub labels: Vec<String>,
     pub author: Option<String>,
     pub head_sha: Option<String>,
+}
+
+impl ItemInfo {
+    /// Labels / author / head of the item as the webhook payload carries
+    /// them (`pull_request` or `issue` object). `None` when the payload has
+    /// no label list (the poller's synthesized events).
+    pub fn from_payload(kind: ItemKind, payload: &serde_json::Value) -> Option<Self> {
+        let obj = match kind {
+            ItemKind::Pr => payload
+                .get("pull_request")
+                .filter(|v| v.get("labels").is_some())
+                .or_else(|| payload.get("issue")),
+            ItemKind::Issue => payload.get("issue"),
+        }?;
+        let labels = obj
+            .get("labels")?
+            .as_array()?
+            .iter()
+            .filter_map(|l| {
+                l.get("name")
+                    .and_then(|n| n.as_str())
+                    .or_else(|| l.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        Some(Self {
+            labels,
+            author: obj
+                .get("user")
+                .and_then(|u| u.get("login"))
+                .and_then(|l| l.as_str())
+                .map(str::to_string),
+            head_sha: obj
+                .get("head")
+                .and_then(|h| h.get("sha"))
+                .and_then(|s| s.as_str())
+                .map(str::to_string),
+        })
+    }
+}
+
+/// What started a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RunSource {
+    /// A webhook (or polled) issue / PR event: a full run.
+    #[default]
+    Event,
+    /// The scheduler's periodic triage: a partial run of the `triage` steps.
+    Scheduler,
+    /// A slash command: a partial run of the steps of the command's kind.
+    Command,
+}
+
+/// Receives the AI calls made by work a step left running in the
+/// background (diagram jobs), to add them to the run.
+pub type AiCallSink = Box<dyn FnOnce(u32) + Send + 'static>;
+
+#[derive(Debug, Default)]
+struct Progress {
+    run_id: Option<i64>,
+    seq: u32,
+    ai_used: u32,
+    budget: Option<u32>,
 }
 
 /// Everything a step can use. Built once per run; `apply` and `features`
@@ -100,12 +163,22 @@ pub struct RunContext {
     pub apply: bool,
     pub features: RepoFeatures,
     pub item: ItemRef,
-    /// What started the run, e.g. `pull_request.synchronize`.
+    /// What started the run, e.g. `pull_request.synchronize`, `scheduler`,
+    /// `command`.
     pub trigger: String,
+    pub source: RunSource,
     /// Webhook event id, when the run comes from one.
     pub event_id: Option<i64>,
-    item_cache: tokio::sync::Mutex<Option<ItemInfo>>,
+    /// Item fields of the webhook payload. Used to pick the template
+    /// (routes run before any sync, when the cache can be stale, e.g. a
+    /// label just added by `pull_request.labeled`); steps then read the DB.
+    payload_info: Option<ItemInfo>,
+    steps_started: AtomicBool,
+    /// Forge fetch of the item, done at most once per run (even when it
+    /// fails or finds nothing).
+    item_cache: tokio::sync::Mutex<Option<Option<ItemInfo>>>,
     paths_cache: tokio::sync::Mutex<Option<Vec<String>>>,
+    progress: std::sync::Mutex<Progress>,
 }
 
 impl RunContext {
@@ -126,15 +199,38 @@ impl RunContext {
             features,
             item,
             trigger: trigger.into(),
+            source: RunSource::Event,
             event_id: None,
+            payload_info: None,
+            steps_started: AtomicBool::new(false),
             item_cache: tokio::sync::Mutex::new(None),
             paths_cache: tokio::sync::Mutex::new(None),
+            progress: std::sync::Mutex::new(Progress::default()),
         }
     }
 
     pub fn with_event_id(mut self, id: i64) -> Self {
         self.event_id = Some(id);
         self
+    }
+
+    pub fn with_trigger(mut self, trigger: impl Into<String>) -> Self {
+        self.trigger = trigger.into();
+        self
+    }
+
+    pub fn with_source(mut self, source: RunSource) -> Self {
+        self.source = source;
+        self
+    }
+
+    pub fn with_payload_info(mut self, info: Option<ItemInfo>) -> Self {
+        self.payload_info = info;
+        self
+    }
+
+    fn progress(&self) -> std::sync::MutexGuard<'_, Progress> {
+        self.progress.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     fn info_from_db(&self) -> Option<ItemInfo> {
@@ -153,43 +249,55 @@ impl RunContext {
         }
     }
 
-    /// Labels / author of the item: the DB copy (fresh once a sync step
-    /// ran), else one direct forge fetch, cached for the run. Never written
-    /// to the DB here.
+    /// Labels / author of the item. Before the first step (template
+    /// selection): the webhook payload when it has them. Then: the DB copy
+    /// (fresh once a sync step ran), else one direct forge fetch per run,
+    /// whose result is cached even when it fails. Never written to the DB.
     pub async fn item_info(&self) -> Option<ItemInfo> {
+        if !self.steps_started.load(Ordering::Relaxed) {
+            if let Some(p) = &self.payload_info {
+                return Some(p.clone());
+            }
+        }
         if let Some(i) = self.info_from_db() {
             return Some(i);
         }
+        let n = self.item.number?;
         let mut cache = self.item_cache.lock().await;
         if cache.is_none() {
-            let n = self.item.number?;
             let fetched = match self.item.kind {
-                ItemKind::Issue => self
-                    .gh
-                    .fetch_issue(n)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|i| ItemInfo {
+                ItemKind::Issue => match self.gh.fetch_issue(n).await {
+                    Ok(i) => i.map(|i| ItemInfo {
                         labels: i.labels,
                         author: i.author,
                         head_sha: None,
                     }),
-                ItemKind::Pr => self
-                    .gh
-                    .fetch_pull(n)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|p| ItemInfo {
+                    Err(e) => {
+                        warn!(
+                            "Could not fetch {} for the pipeline conditions: {e:#}",
+                            self.item
+                        );
+                        None
+                    }
+                },
+                ItemKind::Pr => match self.gh.fetch_pull(n).await {
+                    Ok(p) => p.map(|p| ItemInfo {
                         labels: p.labels,
                         author: p.author,
                         head_sha: p.head_sha,
                     }),
+                    Err(e) => {
+                        warn!(
+                            "Could not fetch {} for the pipeline conditions: {e:#}",
+                            self.item
+                        );
+                        None
+                    }
+                },
             };
-            *cache = fetched;
+            *cache = Some(fetched);
         }
-        cache.clone()
+        cache.clone().flatten()
     }
 
     /// Changed paths of the PR (from its diff), fetched once per run.
@@ -208,6 +316,34 @@ impl RunContext {
         *cache = Some(paths.clone());
         Ok(paths)
     }
+
+    /// AI calls left in the run's budget, counting the calls of the
+    /// running step so far. `None` = no budget.
+    pub fn budget_left(&self) -> Option<u32> {
+        let current = AI_CALLS
+            .try_with(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0);
+        let p = self.progress();
+        p.budget
+            .map(|b| b.saturating_sub(p.ai_used.saturating_add(current)))
+    }
+
+    /// A sink adding background AI calls to the running step and its run.
+    /// `None` when the run is not recorded.
+    pub fn ai_call_sink(&self) -> Option<AiCallSink> {
+        let (run_id, seq) = {
+            let p = self.progress();
+            (p.run_id?, p.seq)
+        };
+        let db = Arc::clone(&self.db);
+        Some(Box::new(move |n: u32| {
+            if n > 0 {
+                if let Err(e) = db.add_pipeline_ai_calls(run_id, seq, n) {
+                    warn!("Could not add {n} background AI call(s) to run {run_id}: {e:#}");
+                }
+            }
+        }))
+    }
 }
 
 // ── AI call accounting ──────────────────────────────────────────────
@@ -217,10 +353,18 @@ tokio::task_local! {
 }
 
 /// Count one AI call against the step running in the current task, if any.
-/// Called by `AiBackend::complete`; a no-op outside a pipeline step (CLI,
-/// scheduler, background diagram jobs).
+/// Called by `AiBackend::complete`; a no-op outside a pipeline step (CLI)
+/// or a [`count_ai_calls`] scope.
 pub fn note_ai_call() {
     let _ = AI_CALLS.try_with(|c| c.fetch_add(1, Ordering::Relaxed));
+}
+
+/// Run `fut` counting the AI calls it makes (for work spawned outside the
+/// step's task, e.g. diagram jobs).
+pub async fn count_ai_calls<F: std::future::Future>(fut: F) -> (F::Output, u32) {
+    let counter = Arc::new(AtomicU32::new(0));
+    let out = AI_CALLS.scope(Arc::clone(&counter), fut).await;
+    (out, counter.load(Ordering::Relaxed))
 }
 
 // ── Execution ───────────────────────────────────────────────────────
@@ -288,57 +432,96 @@ impl RunReport {
     }
 }
 
+/// How [`execute_with`] runs a template.
+#[derive(Debug, Clone, Default)]
+pub struct ExecOptions {
+    /// Partial run: only the steps of these kinds. Their `needs` on steps
+    /// left out are treated as met (the caller did that work, e.g. the
+    /// scheduler synced already).
+    pub only_kinds: Option<Vec<String>>,
+    /// Ignore the repo-toggle conditions (`features`, `repo_filters`): the
+    /// toggles govern automatic processing, not explicit slash commands.
+    pub ignore_toggles: bool,
+    /// Record the run only once a step passes its gate (the scheduler
+    /// would otherwise record an all-skipped run per issue and cycle).
+    pub record_only_if_active: bool,
+}
+
 fn clip(s: &str) -> String {
     crate::pipelines::truncate(&crate::pro_hooks::apply_output_hook(s), MAX_TEXT)
 }
 
-/// Writes the run to the DB. Recording errors are logged and never fail
-/// the run.
+/// Writes the run to the DB, at once or lazily (see
+/// [`ExecOptions::record_only_if_active`]). Recording errors are logged and
+/// never fail the run.
 struct Recorder<'a> {
-    db: &'a dyn DatabaseBackend,
+    ctx: &'a RunContext,
+    new_run: Option<NewPipelineRun>,
     run_id: Option<i64>,
+    pending: Vec<(usize, StepRecord)>,
 }
 
 impl<'a> Recorder<'a> {
-    fn start(ctx: &'a RunContext, template: &PipelineTemplate, plan: &[&StepDef]) -> Self {
-        let Some(number) = ctx.item.number else {
-            return Self {
-                db: ctx.db.as_ref(),
-                run_id: None,
-            };
-        };
-        let planned: Vec<PlannedStep> = plan
-            .iter()
-            .map(|s| PlannedStep {
-                id: s.id.clone(),
-                uses: s.uses.clone(),
-                needs: s.needs.clone(),
-            })
-            .collect();
-        let run = NewPipelineRun {
-            item_kind: ctx.item.kind.as_str().to_string(),
-            item_number: number,
-            template: template.name.clone(),
-            trigger: ctx.trigger.clone(),
-            event_id: ctx.event_id,
-            head_sha: ctx.info_from_db().and_then(|i| i.head_sha),
-            plan_json: serde_json::to_string(&planned).unwrap_or_else(|_| "[]".into()),
-            started_at: chrono::Utc::now().to_rfc3339(),
-        };
-        let run_id = match ctx.db.start_pipeline_run(&run) {
-            Ok(id) => id,
-            Err(e) => {
-                warn!("Could not record pipeline run for {}: {e:#}", ctx.item);
-                None
+    fn new(ctx: &'a RunContext, template: &PipelineTemplate, plan: &[&StepDef]) -> Self {
+        let new_run = ctx.item.number.map(|number| {
+            let planned: Vec<PlannedStep> = plan
+                .iter()
+                .map(|s| PlannedStep {
+                    id: s.id.clone(),
+                    uses: s.uses.clone(),
+                    needs: s.needs.clone(),
+                })
+                .collect();
+            NewPipelineRun {
+                item_kind: ctx.item.kind.as_str().to_string(),
+                item_number: number,
+                template: template.name.clone(),
+                trigger: ctx.trigger.clone(),
+                event_id: ctx.event_id,
+                head_sha: ctx.info_from_db().and_then(|i| i.head_sha),
+                plan_json: serde_json::to_string(&planned).unwrap_or_else(|_| "[]".into()),
+                started_at: chrono::Utc::now().to_rfc3339(),
             }
-        };
+        });
         Self {
-            db: ctx.db.as_ref(),
-            run_id,
+            ctx,
+            new_run,
+            run_id: None,
+            pending: Vec::new(),
         }
     }
 
-    fn step(&self, seq: usize, r: &StepRecord) {
+    /// Insert the run (once) and flush the steps recorded so far.
+    fn start(&mut self) {
+        let Some(run) = self.new_run.take() else {
+            return;
+        };
+        self.run_id = match self.ctx.db.start_pipeline_run(&run) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Could not record pipeline run for {}: {e:#}", self.ctx.item);
+                None
+            }
+        };
+        self.ctx.progress().run_id = self.run_id;
+        for (seq, r) in std::mem::take(&mut self.pending) {
+            self.write_step(seq, &r);
+        }
+    }
+
+    fn started(&self) -> bool {
+        self.new_run.is_none()
+    }
+
+    fn step(&mut self, seq: usize, r: &StepRecord) {
+        if self.started() {
+            self.write_step(seq, r);
+        } else {
+            self.pending.push((seq, r.clone()));
+        }
+    }
+
+    fn write_step(&self, seq: usize, r: &StepRecord) {
         let Some(run_id) = self.run_id else { return };
         let finished = r.started_at + chrono::Duration::milliseconds(r.duration_ms as i64);
         let row = PipelineStepRunRow {
@@ -355,12 +538,12 @@ impl<'a> Recorder<'a> {
             finished_at: finished.to_rfc3339(),
             duration_ms: r.duration_ms,
         };
-        if let Err(e) = self.db.record_pipeline_step(&row) {
+        if let Err(e) = self.ctx.db.record_pipeline_step(&row) {
             warn!("Could not record pipeline step '{}': {e:#}", r.step_id);
         }
     }
 
-    fn finish(&self, ctx: &RunContext, report: &RunReport, started: Instant) {
+    fn finish(&self, report: &RunReport, started: Instant) {
         let Some(id) = self.run_id else { return };
         let fin = PipelineRunFinish {
             id,
@@ -374,37 +557,55 @@ impl<'a> Recorder<'a> {
                 .failure
                 .as_ref()
                 .map(|(s, e)| clip(&format!("{s}: {e:#}"))),
-            head_sha: ctx.info_from_db().and_then(|i| i.head_sha),
+            head_sha: self.ctx.info_from_db().and_then(|i| i.head_sha),
             ai_calls: report.ai_calls(),
             finished_at: chrono::Utc::now().to_rfc3339(),
             duration_ms: started.elapsed().as_millis() as u64,
         };
-        if let Err(e) = self.db.finish_pipeline_run(&fin) {
+        if let Err(e) = self.ctx.db.finish_pipeline_run(&fin) {
             warn!("Could not finish pipeline run {id}: {e:#}");
         }
     }
 }
 
-/// Run `template` for the context's item and record it. Steps of the other
-/// item kind are left out; the others are each done, skipped (with the
-/// reason) or failed.
+/// Run `template` for the context's item and record it (full run).
 pub async fn execute(
     template: &PipelineTemplate,
     registry: &StepRegistry,
     ctx: &RunContext,
 ) -> RunReport {
-    let plan = template::plan(template, ctx.item.kind, registry);
-    let in_plan: std::collections::HashSet<&str> = plan.iter().map(|s| s.id.as_str()).collect();
-    let recorder = Recorder::start(ctx, template, &plan);
+    execute_with(template, registry, ctx, &ExecOptions::default()).await
+}
+
+/// Run `template` for the context's item and record it. Steps of the other
+/// item kind (and, for a partial run, of other kinds) are left out; the
+/// others are each done, skipped (with the reason) or failed.
+pub async fn execute_with(
+    template: &PipelineTemplate,
+    registry: &StepRegistry,
+    ctx: &RunContext,
+    opts: &ExecOptions,
+) -> RunReport {
+    let mut plan = template::plan(template, ctx.item.kind, registry);
+    let in_template: HashSet<&str> = plan.iter().map(|s| s.id.as_str()).collect();
+    if let Some(kinds) = &opts.only_kinds {
+        plan.retain(|s| kinds.contains(&s.uses));
+    }
+    let in_plan: HashSet<&str> = plan.iter().map(|s| s.id.as_str()).collect();
+    let mut recorder = Recorder::new(ctx, template, &plan);
+    if !opts.record_only_if_active {
+        recorder.start();
+    }
+    ctx.steps_started.store(true, Ordering::Relaxed);
+    ctx.progress().budget = template.max_ai_calls;
     let started = Instant::now();
     let mut report = RunReport {
         template: template.name.clone(),
-        run_id: recorder.run_id,
+        run_id: None,
         steps: Vec::with_capacity(plan.len()),
         failure: None,
     };
     let mut statuses: HashMap<&str, StepStatus> = HashMap::new();
-    let mut ai_used: u32 = 0;
 
     for (seq, def) in plan.iter().enumerate() {
         let step_started = chrono::Utc::now();
@@ -421,30 +622,38 @@ pub async fn execute(
             duration_ms: 0,
         };
 
-        let gate = gate(def, ctx, &report, &statuses, &in_plan, template, ai_used).await;
-        match gate {
+        let scope = Scope {
+            in_plan: &in_plan,
+            in_template: &in_template,
+            partial: opts.only_kinds.is_some(),
+            ignore_toggles: opts.ignore_toggles,
+        };
+        match gate(def, ctx, &report, &statuses, &scope, template).await {
             Err(reason) => {
                 rec.reason = Some(clip(&reason));
             }
             Ok(()) => {
+                recorder.start();
+                ctx.progress().seq = seq as u32;
                 let counter = Arc::new(AtomicU32::new(0));
                 let outcome = run_step(def, registry, ctx, Arc::clone(&counter)).await;
                 rec.ai_calls = counter.load(Ordering::Relaxed);
-                ai_used = ai_used.saturating_add(rec.ai_calls);
+                {
+                    let mut p = ctx.progress();
+                    p.ai_used = p.ai_used.saturating_add(rec.ai_calls);
+                }
                 match outcome {
-                    Ok(StepOutput {
-                        skipped: Some(reason),
-                        summary,
-                        findings,
-                    }) => {
-                        rec.reason = Some(clip(&reason));
-                        rec.summary = summary.as_deref().map(clip);
-                        rec.findings = findings;
-                    }
                     Ok(out) => {
-                        rec.status = StepStatus::Done;
                         rec.summary = out.summary.as_deref().map(clip);
                         rec.findings = out.findings;
+                        if let Some(e) = out.failed {
+                            rec.status = StepStatus::Failed;
+                            rec.reason = Some(clip(&e));
+                        } else if let Some(reason) = out.skipped {
+                            rec.reason = Some(clip(&reason));
+                        } else {
+                            rec.status = StepStatus::Done;
+                        }
                     }
                     Err(e) => {
                         rec.status = StepStatus::Failed;
@@ -479,8 +688,16 @@ pub async fn execute(
         report.steps.push(rec);
     }
 
-    recorder.finish(ctx, &report, started);
+    report.run_id = recorder.run_id;
+    recorder.finish(&report, started);
     report
+}
+
+struct Scope<'a> {
+    in_plan: &'a HashSet<&'a str>,
+    in_template: &'a HashSet<&'a str>,
+    partial: bool,
+    ignore_toggles: bool,
 }
 
 /// Why a step must not run, if it must not: an earlier abort, unmet
@@ -490,9 +707,8 @@ async fn gate(
     ctx: &RunContext,
     report: &RunReport,
     statuses: &HashMap<&str, StepStatus>,
-    in_plan: &std::collections::HashSet<&str>,
+    scope: &Scope<'_>,
     template: &PipelineTemplate,
-    ai_used: u32,
 ) -> Result<(), String> {
     if let Some((failed, _)) = &report.failure {
         return Err(format!("run aborted: step '{failed}' failed"));
@@ -501,18 +717,28 @@ async fn gate(
         match statuses.get(n.as_str()) {
             Some(StepStatus::Done) => {}
             Some(s) => return Err(format!("needs '{n}', which was {}", s.as_str())),
-            None if !in_plan.contains(n.as_str()) => {
+            None if scope.partial
+                && !scope.in_plan.contains(n.as_str())
+                && scope.in_template.contains(n.as_str()) => {}
+            None if !scope.in_template.contains(n.as_str()) => {
                 return Err(format!("needs '{n}', which does not run on {}", ctx.item))
             }
             None => return Err(format!("needs '{n}', which did not run")),
         }
     }
     if let Some(budget) = template.max_ai_calls {
-        if ai_used >= budget {
+        if ctx.progress().ai_used >= budget {
             return Err(format!("AI call budget of {budget} reached"));
         }
     }
-    condition::evaluate(&def.when, ctx).await
+    if scope.ignore_toggles {
+        let mut c = def.when.clone();
+        c.features.clear();
+        c.repo_filters = false;
+        condition::evaluate(&c, ctx).await
+    } else {
+        condition::evaluate(&def.when, ctx).await
+    }
 }
 
 async fn run_step(
@@ -526,6 +752,8 @@ async fn run_step(
     };
     let fut = AI_CALLS.scope(counter, step.run(ctx, def));
     match def.timeout_secs {
+        // Dropping the future stops the step wherever it is: what it did
+        // before (labels, comments) stays. See docs/configuration.md.
         Some(secs) => tokio::time::timeout(std::time::Duration::from_secs(secs), fut)
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out after {secs}s"))),
@@ -571,6 +799,46 @@ pub async fn run_item(ctx: &RunContext) -> anyhow::Result<()> {
         ctx.trigger
     );
     execute(&template, &registry, ctx).await.into_result()
+}
+
+/// Partial run of the item's template: only the steps of `kinds` (see
+/// [`ExecOptions`]). Used by the scheduler and the slash commands so they
+/// follow the template (and its step conditions) instead of calling the
+/// pipelines directly.
+pub async fn run_kinds(ctx: &RunContext, kinds: &[&str], mut opts: ExecOptions) -> RunReport {
+    let registry = StepRegistry::global();
+    let template = select_template(ctx, &registry).await;
+    opts.only_kinds = Some(kinds.iter().map(|k| k.to_string()).collect());
+    execute_with(&template, &registry, ctx, &opts).await
+}
+
+/// Log, once per repo at boot, what is wrong with its pipeline config:
+/// invalid TOML (the repo runs `standard`), dropped DB override parts,
+/// templates with unknown step kinds, and warnings.
+pub fn log_config_problems(config: &Config, db: &dyn DatabaseBackend) {
+    let slug = config.repo_slug();
+    let loaded = template::load_full(config, db);
+    if let Some(e) = &loaded.toml_error {
+        error!(
+            "[{slug}] invalid pipeline config in TOML, running '{}': {e}",
+            template::STANDARD
+        );
+    }
+    for e in &loaded.override_errors {
+        warn!("[{slug}] pipelines DB override: {e}");
+    }
+    let registry = StepRegistry::global();
+    for t in &loaded.config.pipelines {
+        if let Err(e) = template::validate_template_steps(t, &registry) {
+            error!(
+                "[{slug}] {e} (runs routed to it use '{}')",
+                template::STANDARD
+            );
+        }
+    }
+    for w in template::warnings(&loaded.config, &registry) {
+        warn!("[{slug}] {w}");
+    }
 }
 
 /// Apply the run retention of the repo's effective config.

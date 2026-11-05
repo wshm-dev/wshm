@@ -107,13 +107,24 @@ pub type AutoFixHook = for<'a> fn(
     u64,
 ) -> BoxFuture<'a, anyhow::Result<()>>;
 
+/// What the Pro review did for one PR. A failure inside the review (diff
+/// fetch, AI call) is reported here rather than as an `Err`, so callers
+/// keep the historical "warn and continue" behaviour while still knowing
+/// it failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewOutcome {
+    Reviewed { comments: u32, posted: bool },
+    Skipped(String),
+    Failed(String),
+}
+
 pub type ReviewHook = for<'a> fn(
     &'a Config,
     &'a dyn DatabaseBackend,
     &'a GhClient,
     u64,
     bool,
-) -> BoxFuture<'a, anyhow::Result<()>>;
+) -> BoxFuture<'a, anyhow::Result<ReviewOutcome>>;
 
 static AUTO_FIX_HOOK: OnceLock<AutoFixHook> = OnceLock::new();
 static REVIEW_HOOK: OnceLock<ReviewHook> = OnceLock::new();
@@ -144,20 +155,17 @@ pub async fn run_auto_fix(
 }
 
 /// Invoke the Pro review pipeline for a given PR number.
-/// Returns `Ok(false)` if no Pro hook is registered (OSS build).
+/// Returns `Ok(None)` if no Pro hook is registered (OSS build).
 pub async fn run_review(
     config: &Config,
     db: &dyn DatabaseBackend,
     gh: &GhClient,
     pr_number: u64,
     apply: bool,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<ReviewOutcome>> {
     match REVIEW_HOOK.get() {
-        Some(f) => {
-            f(config, db, gh, pr_number, apply).await?;
-            Ok(true)
-        }
-        None => Ok(false),
+        Some(f) => f(config, db, gh, pr_number, apply).await.map(Some),
+        None => Ok(None),
     }
 }
 
