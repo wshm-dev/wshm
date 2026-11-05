@@ -166,6 +166,10 @@ pub struct FixArgs {
     /// Actually create the branch and PR (dry-run by default)
     #[arg(long)]
     pub apply: bool,
+
+    /// Run even if the issue is flagged as possible prompt injection
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(clap::Args)]

@@ -400,6 +400,16 @@ impl Step for MemoryStep {
         let Some(n) = ctx.item.number else {
             return Ok(StepOutput::skipped("no item number"));
         };
+        // Never a flagged item (#235): memory feeds later prompts.
+        let flag_kind = match ctx.item.kind {
+            ItemKind::Issue => "issue",
+            ItemKind::Pr => "pull",
+        };
+        if crate::ai::guard::is_flagged(ctx.db.as_ref(), flag_kind, n) {
+            return Ok(StepOutput::skipped(
+                "flagged as possible prompt injection: not stored in memory",
+            ));
+        }
         match ctx.item.kind {
             ItemKind::Issue => match ctx.db.get_triage_result(n) {
                 Ok(Some(t)) => {
