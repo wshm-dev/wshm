@@ -97,12 +97,13 @@ impl ExportManager {
             sinks.push(Box::new(webhook::WebhookSink::new(wh)));
         }
 
-        // Cloud storage (Pro: exports feature)
+        // Cloud storage (Enterprise: `exports` license feature)
         if let Some(ref storage) = config.storage {
             if !crate::pro_hooks::has_feature("exports") {
                 warn!(
-                    "Cloud storage export ({}) configured but requires wshm Pro. \
-                     Skipping. Run `wshm login --license` to activate.",
+                    "Cloud storage export ({}) configured but requires a wshm Enterprise license \
+                     (feature `exports`). Skipping. Contact contact@wshm.dev, then run \
+                     `wshm-pro login --license`.",
                     storage.provider
                 );
             } else {
@@ -115,12 +116,13 @@ impl ExportManager {
             }
         }
 
-        // Database sinks (Pro: exports feature)
+        // Database sinks (Enterprise: `exports` license feature)
         if let Some(ref db) = config.database {
             if !crate::pro_hooks::has_feature("exports") {
                 warn!(
-                    "Database export ({}) configured but requires wshm Pro. \
-                     Skipping. Run `wshm login --license` to activate.",
+                    "Database export ({}) configured but requires a wshm Enterprise license \
+                     (feature `exports`). Skipping. Contact contact@wshm.dev, then run \
+                     `wshm-pro login --license`.",
                     db.provider
                 );
             } else {

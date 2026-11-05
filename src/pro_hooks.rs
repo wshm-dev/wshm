@@ -85,66 +85,34 @@ pub fn apply_output_hook(text: &str) -> String {
     }
 }
 
-// --- Async Pro pipeline hooks ---
-// These allow wshm-core code paths (triage auto-fix, daemon slash commands)
-// to invoke Pro-only pipelines (autogen, review) without depending on Pro
-// source code at compile time.
-//
-// Each hook takes a borrowed context (Config, Database, Client, plus a
-// minimal set of primitive args) and returns a boxed future resolving to
-// `anyhow::Result<()>`. In the OSS build the hook is `None` and calls are
-// skipped with a warning.
-//
-// Note: we use `OnceLock` + `&'static dyn` rather than `thread_local!` to
-// ensure the hook survives tokio task migrations across worker threads.
+// --- Review / auto-fix entry points ---
+// Inline review and auto-fix are part of wshm-core. These thin wrappers are
+// kept so existing call sites (triage auto-fix, daemon slash commands, the
+// PR event processor) keep a stable entry point. They always run the
+// pipeline and return `Ok(true)`.
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-pub type AutoFixHook = for<'a> fn(
-    &'a Config,
-    &'a dyn DatabaseBackend,
-    &'a GhClient,
-    u64,
-) -> BoxFuture<'a, anyhow::Result<()>>;
-
-pub type ReviewHook = for<'a> fn(
-    &'a Config,
-    &'a dyn DatabaseBackend,
-    &'a GhClient,
-    u64,
-    bool,
-) -> BoxFuture<'a, anyhow::Result<()>>;
-
-static AUTO_FIX_HOOK: OnceLock<AutoFixHook> = OnceLock::new();
-static REVIEW_HOOK: OnceLock<ReviewHook> = OnceLock::new();
-
-pub fn set_auto_fix_hook(f: AutoFixHook) {
-    let _ = AUTO_FIX_HOOK.set(f);
-}
-
-pub fn set_review_hook(f: ReviewHook) {
-    let _ = REVIEW_HOOK.set(f);
-}
-
-/// Invoke the Pro auto-fix pipeline for a given issue number.
-/// Returns `Ok(false)` if no Pro hook is registered (OSS build).
+/// Run the auto-fix pipeline for a given issue number (opens a fix PR).
 pub async fn run_auto_fix(
     config: &Config,
     db: &dyn DatabaseBackend,
     gh: &GhClient,
     issue_number: u64,
 ) -> anyhow::Result<bool> {
-    match AUTO_FIX_HOOK.get() {
-        Some(f) => {
-            f(config, db, gh, issue_number).await?;
-            Ok(true)
-        }
-        None => Ok(false),
-    }
+    let fix_args = crate::cli::FixArgs {
+        issue: issue_number,
+        tool: None,
+        model: None,
+        docker: false,
+        image: None,
+        apply: true,
+    };
+    crate::pipelines::autogen::run(config, db, gh, &fix_args, None).await?;
+    Ok(true)
 }
 
-/// Invoke the Pro review pipeline for a given PR number.
-/// Returns `Ok(false)` if no Pro hook is registered (OSS build).
+/// Run the inline review pipeline for a given PR number.
 pub async fn run_review(
     config: &Config,
     db: &dyn DatabaseBackend,
@@ -152,13 +120,12 @@ pub async fn run_review(
     pr_number: u64,
     apply: bool,
 ) -> anyhow::Result<bool> {
-    match REVIEW_HOOK.get() {
-        Some(f) => {
-            f(config, db, gh, pr_number, apply).await?;
-            Ok(true)
-        }
-        None => Ok(false),
-    }
+    let args = crate::cli::ReviewArgs {
+        pr: Some(pr_number),
+        apply,
+    };
+    crate::pipelines::review::run(config, db, gh, &args, false).await?;
+    Ok(true)
 }
 
 // --- Update hooks ---

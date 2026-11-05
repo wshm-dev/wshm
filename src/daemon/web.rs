@@ -2323,62 +2323,14 @@ async fn api_restore_backup(
 async fn api_license() -> impl IntoResponse {
     let is_pro = crate::pro_hooks::is_pro();
 
-    let pro_features = [
-        (
-            "review",
-            "Inline code review",
-            is_pro && crate::pro_hooks::has_feature("review"),
-        ),
-        (
-            "auto-fix",
-            "Auto-generate fix PRs",
-            is_pro && crate::pro_hooks::has_feature("auto-fix"),
-        ),
-        (
-            "improve",
-            "Propose improvements",
-            is_pro && crate::pro_hooks::has_feature("improve"),
-        ),
-        (
-            "conflicts",
-            "Conflict resolution",
-            is_pro && crate::pro_hooks::has_feature("conflicts"),
-        ),
-        (
-            "reports",
-            "HTML/PDF reports",
-            is_pro && crate::pro_hooks::has_feature("reports"),
-        ),
-        (
-            "diagram_hosting",
-            "Hosted PR diagram pages",
-            is_pro && crate::pro_hooks::has_feature("diagram_hosting"),
-        ),
-        (
-            "daemon-webhook",
-            "Daemon webhook mode",
-            is_pro && crate::pro_hooks::has_feature("daemon"),
-        ),
-        // Search ships in every Pro Docker image; the route file
-        // doesn't exist in OSS builds, so route-presence is itself the
-        // gate. We only check `is_pro` here so legacy JWTs (issued
-        // before "search" was added to the wshm-api features list) get
-        // the feature too — re-activation just adds the explicit
-        // entry, no behavior change.
-        ("search", "Global full-text search", is_pro),
-        // PR Insights is a Pro-only feature: its route and page live
-        // in wshm-pro, not here. Declared in this list so the SPA can
-        // gate the sidebar entry; `is_pro` is the enabled flag.
-        ("pr-insights", "PR insights dashboard", is_pro),
-        // Issue Insights — like pr-insights, the route and page live in
-        // wshm-pro. Declared here only so the SPA can gate the sidebar
-        // entry; `is_pro` is the enabled flag.
-        ("issue-insights", "Issue insights dashboard", is_pro),
-        // Usage dashboard (Pro). Tracks LLM invocations from the Pro
-        // Postgres backend + live GitHub rate limit. Sidebar entry is
-        // gated; the page itself ships only in the Pro web bundle.
-        ("usage-dashboard", "LLM + API usage dashboard", is_pro),
-    ];
+    // Only features that still need a license are listed here. Review,
+    // auto-fix, improve, conflicts, reports, search, insights, usage and
+    // daemon webhook mode are part of wshm-core (see `oss_features`).
+    let pro_features = [(
+        "diagram_hosting",
+        "Hosted PR diagram pages",
+        is_pro && crate::pro_hooks::has_feature("diagram_hosting"),
+    )];
 
     let features: Vec<serde_json::Value> = pro_features
         .iter()
@@ -2390,8 +2342,11 @@ async fn api_license() -> impl IntoResponse {
         "plan": if is_pro { "pro" } else { "free" },
         "features": features,
         "oss_features": [
-            "triage", "pr_analysis", "merge_queue", "notify",
-            "web_ui", "daemon_polling", "sqlite", "postgresql"
+            "triage", "pr_analysis", "merge_queue",
+            "web_ui", "daemon_polling", "sqlite",
+            "review", "auto-fix", "improve", "conflict-detection", "reports",
+            "changelog", "dashboard", "plan", "search", "pr-insights",
+            "issue-insights", "usage-dashboard", "daemon-webhook"
         ],
         // Version of the running binary. Pro registers its own
         // CARGO_PKG_VERSION via `pro_hooks::set_pro_version` at startup
@@ -4366,6 +4321,7 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
         )
         .route("/api/v1/secrets/{id}/reveal", post(api_secrets_reveal))
         .route("/api/v1/summary", get(api_summary))
+        .merge(crate::daemon::feature_routes::feature_api_routes())
 }
 
 /// Default SPA sub-router serving the embedded wshm-core web-dist.

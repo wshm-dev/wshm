@@ -107,7 +107,7 @@ pub trait DatabaseBackend: Send + Sync {
     /// against any backend that implements this trait.
     fn upsert_pr_analysis(&self, row: &PrAnalysisRow) -> Result<()>;
 
-    // ── PR inline review (Pro) ──────────────────────────────────
+    // ── PR inline review ────────────────────────────────────────
     //
     // Distinct from PR analysis above: `pr_reviews` stores the actual
     // line-anchored inline-comment findings from `pipelines::review`
@@ -297,15 +297,13 @@ pub trait DatabaseBackend: Send + Sync {
 
     // ── LLM accounting ──────────────────────────────────────────
 
-    /// Record one successful LLM invocation so the Pro usage dashboard
+    /// Record one successful LLM invocation so the usage dashboard
     /// can show real call counts (vs cache-hit "triages" that touch no
     /// LLM). `kind` is a short label like `"triage"` or `"pr_analysis"`;
     /// `model` is the model identifier if known.
     ///
-    /// Default impl is a no-op: OSS SQLite installs don't need the
-    /// accounting and we don't want to slow the hot path with an extra
-    /// write per LLM call. The Pro Postgres backend overrides this to
-    /// insert into the `llm_invocations` table.
+    /// The SQLite and Postgres backends insert into `llm_invocations`;
+    /// the default impl is a no-op for other backends.
     fn record_llm_invocation(&self, kind: &str, model: Option<&str>) -> Result<()> {
         let _ = (kind, model);
         Ok(())
@@ -313,9 +311,7 @@ pub trait DatabaseBackend: Send + Sync {
 
     /// Roll-up of LLM invocation counts over the last 24h / 7d / 30d
     /// (plus all-time total and a per-kind breakdown) for this repo's
-    /// backend. Default impl returns zeroes so OSS SQLite installs
-    /// render an empty Pro usage dashboard rather than failing the
-    /// route; only the Pro Postgres backend queries `llm_invocations`.
+    /// backend. Default impl returns zeroes.
     fn usage_counts(&self) -> Result<UsageCounts> {
         Ok(UsageCounts::default())
     }
@@ -517,6 +513,14 @@ impl DatabaseBackend for super::Database {
 
     fn get_pending_events(&self) -> Result<Vec<WebhookEventRow>> {
         self.get_pending_events()
+    }
+
+    fn record_llm_invocation(&self, kind: &str, model: Option<&str>) -> Result<()> {
+        self.with_conn(|conn| super::usage::record(conn, kind, model))
+    }
+
+    fn usage_counts(&self) -> Result<UsageCounts> {
+        self.with_conn(super::usage::counts)
     }
 
     fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {

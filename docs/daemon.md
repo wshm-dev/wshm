@@ -27,7 +27,7 @@ apply = false         # dry-run by default
 
 No public IP needed. Works behind firewalls.
 
-### Webhook Mode (Pro)
+### Webhook Mode
 
 Reacts to GitHub events in real-time.
 
@@ -83,13 +83,13 @@ The daemon embeds a full SvelteKit web UI:
 | `/prs` | Pull requests with risk/CI status |
 | `/triage` | Recent triage activity |
 | `/queue` | Merge queue with scores |
-| `/review` | Code reviews (Pro) |
-| `/conflicts` | Conflict scan (Pro) |
-| `/autofix` | Auto-fix candidates (Pro) |
-| `/improve` | Improvement suggestions (Pro) |
-| `/changelog` | Auto-generated changelog (Pro) |
-| `/reports` | Repo health metrics (Pro) |
-| `/revert` | Revert preview (Pro) |
+| `/review` | Code reviews |
+| `/conflicts` | Conflict scan |
+| `/autofix` | Auto-fix candidates |
+| `/improve` | Improvement suggestions |
+| `/changelog` | Auto-generated changelog |
+| `/reports` | Repo health metrics |
+| `/revert` | Revert preview |
 | `/activity` | Recent activity feed |
 | `/actions` | Priority action items |
 | `/settings` | License, color scheme, config |
@@ -159,13 +159,13 @@ All endpoints require Basic Auth (when password is configured).
 | GET | `/api/v1/triage` | Recent triage results |
 | GET | `/api/v1/queue` | Merge queue with scores |
 | GET | `/api/v1/activity` | Combined activity feed |
-| GET | `/api/v1/reviews` | Code review data (Pro) |
-| GET | `/api/v1/conflicts` | Conflict scan (Pro) |
-| GET | `/api/v1/improvements` | Improvement suggestions (Pro) |
-| GET | `/api/v1/changelog` | Changelog from closed PRs (Pro) |
-| GET | `/api/v1/reports` | Repo health metrics (Pro) |
-| GET | `/api/v1/revert/preview` | Revert action preview (Pro) |
-| GET | `/api/v1/autofix/candidates` | Auto-fix candidates (Pro) |
+| GET | `/api/v1/reviews` | Code review data |
+| GET | `/api/v1/conflicts` | Conflict scan |
+| GET | `/api/v1/improvements` | Improvement suggestions |
+| GET | `/api/v1/changelog` | Changelog from closed PRs |
+| GET | `/api/v1/reports` | Repo health metrics |
+| GET | `/api/v1/revert/preview` | Revert action preview |
+| GET | `/api/v1/autofix/candidates` | Auto-fix candidates |
 | GET | `/api/v1/license` | License status + features |
 | POST | `/api/v1/license/activate` | Activate a license key |
 | POST | `/webhook` | GitHub webhook receiver |

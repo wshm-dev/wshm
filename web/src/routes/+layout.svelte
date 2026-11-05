@@ -79,14 +79,15 @@
 	const allNavItems: NavItem[] = [
 		{ href: '/', label: 'Dashboard', icon: 'dashboard', section: 'Overview' },
 		{ href: '/summary', label: 'Summary', icon: 'summary', section: 'Overview' },
-		{ href: '/search', label: 'Search', icon: 'search', section: 'Work', feature: 'search' },
+		{ href: '/search', label: 'Search', icon: 'search', section: 'Work' },
 		{ href: '/issues', label: 'Issues', icon: 'issues', section: 'Work' },
 		{ href: '/prs', label: 'Pull Requests', icon: 'prs', section: 'Work' },
 		{ href: '/review', label: 'Code Review', icon: 'review', section: 'Work' },
+		{ href: '/review/radar', label: 'Review Radar', icon: 'review', section: 'Work' },
 		{ href: '/triage', label: 'Triage', icon: 'triage', section: 'Work' },
-		{ href: '/autofix', label: 'Auto-fix', icon: 'actions', section: 'Work', feature: 'auto-fix' },
-		{ href: '/conflicts', label: 'Conflicts', icon: 'queue', section: 'Work', feature: 'conflicts' },
-		{ href: '/improve', label: 'Improvements', icon: 'insights', section: 'Work', feature: 'improve' },
+		{ href: '/autofix', label: 'Auto-fix', icon: 'actions', section: 'Work' },
+		{ href: '/conflicts', label: 'Conflicts', icon: 'queue', section: 'Work' },
+		{ href: '/improve', label: 'Improvements', icon: 'insights', section: 'Work' },
 		{ href: '/queue', label: 'Merge Queue', icon: 'queue', section: 'Work' },
 		{ href: '/actions', label: 'Actions', icon: 'actions', section: 'Work' },
 		{ href: '/graphs', label: 'Graphs', icon: 'prGraph', section: 'Insights' },
@@ -94,18 +95,16 @@
 			href: '/pr-insights',
 			label: 'PR Insights',
 			icon: 'insights',
-			section: 'Insights',
-			feature: 'pr-insights'
+			section: 'Insights'
 		},
 		{
 			href: '/issue-insights',
 			label: 'Issue Insights',
 			icon: 'issueInsights',
-			section: 'Insights',
-			feature: 'issue-insights'
+			section: 'Insights'
 		},
-		{ href: '/usage', label: 'Usage', icon: 'activity', section: 'Insights', feature: 'usage-dashboard' },
-		{ href: '/reports', label: 'Reports', icon: 'changelog', section: 'Insights', feature: 'reports' },
+		{ href: '/usage', label: 'Usage', icon: 'activity', section: 'Insights' },
+		{ href: '/reports', label: 'Reports', icon: 'changelog', section: 'Insights' },
 		{ href: '/changelog', label: 'Changelog', icon: 'changelog', section: 'Insights' },
 		{ href: '/activity', label: 'Activity', icon: 'activity', section: 'Insights' },
 		{ href: '/history', label: 'History', icon: 'activity', section: 'Insights' },
