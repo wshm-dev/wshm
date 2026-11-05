@@ -485,10 +485,21 @@ const AGENT_FORBIDDEN_ENV: &[&str] = &[
     "WSHM_WEBHOOK_SECRET",
 ];
 
-/// Container network for `--docker` mode. `none` by default: the agent then
-/// cannot reach the model API either, so set `WSHM_FIX_CONTAINER_NETWORK` to
-/// a network with a controlled egress (or run without `--docker`).
-const DEFAULT_CONTAINER_NETWORK: &str = "none";
+/// Container network for `--docker` mode: `[fix] container_network`
+/// (default `none`, so the agent cannot reach the model API unless a network
+/// with a controlled egress is configured). `WSHM_FIX_CONTAINER_NETWORK` is
+/// only a fallback when the setting is empty.
+fn container_network(config: &Config) -> String {
+    let configured = config.fix.container_network.trim();
+    if !configured.is_empty() {
+        return configured.to_string();
+    }
+    std::env::var("WSHM_FIX_CONTAINER_NETWORK")
+        .ok()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "none".to_string())
+}
 
 #[derive(Debug)]
 enum AiTool {
@@ -500,6 +511,7 @@ enum AiTool {
     },
     Podman {
         image: String,
+        network: String,
         env_vars: Vec<(String, String)>,
         claude_dir: Option<PathBuf>,
         tool: Box<AiTool>,
@@ -541,21 +553,18 @@ impl AiTool {
             }
             AiTool::Podman {
                 image,
+                network,
                 env_vars,
                 claude_dir,
                 tool,
             } => {
-                let network = std::env::var("WSHM_FIX_CONTAINER_NETWORK")
-                    .ok()
-                    .filter(|n| !n.trim().is_empty())
-                    .unwrap_or_else(|| DEFAULT_CONTAINER_NETWORK.to_string());
                 let mut c = podman_command(
                     image,
                     env_vars,
                     claude_dir.as_deref(),
                     tool,
                     repo_dir,
-                    &network,
+                    network,
                     test_command,
                 )?;
                 c.current_dir(repo_dir);
@@ -814,6 +823,7 @@ fn resolve_tool(config: &Config, args: &FixArgs) -> AiTool {
 
         AiTool::Podman {
             image,
+            network: container_network(config),
             env_vars,
             claude_dir,
             tool: Box::new(base_tool),
@@ -1291,6 +1301,15 @@ mod tests {
             assert!(!args.iter().any(|a| a.contains(marker)));
             assert!(!args.iter().any(|a| a.len() > 200));
         }
+    }
+
+    #[test]
+    fn container_network_defaults_to_none() {
+        let mut config = Config::default();
+        assert_eq!(config.fix.container_network, "none");
+        assert_eq!(container_network(&config), "none");
+        config.fix.container_network = "wshm-egress".to_string();
+        assert_eq!(container_network(&config), "wshm-egress");
     }
 
     #[test]

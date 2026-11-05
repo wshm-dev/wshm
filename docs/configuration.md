@@ -99,6 +99,8 @@ enabled = true                    # conflict detection (read-only)
 # tool = "claude-code"            # or "codex"
 # model = "..."                   # override the agent model
 # docker_image = "wshm-sandbox:latest"  # used with `wshm fix --docker`
+# container_network = "none"     # network for `--docker` (default none: no egress, so the model API is unreachable;
+#                                 # set a network with a controlled egress). WSHM_FIX_CONTAINER_NETWORK is a fallback when empty.
 # trusted_authors_only = true     # default; WARNING: false lets any issue author steer the agent
 # test_command = "cargo test"
 # test_retries = 2
@@ -178,6 +180,10 @@ full_sync_interval_hours = 24
 [prs_blacklist]
 # PR numbers to never touch
 ```
+
+## Auto-fix and code execution
+
+The claude agent used by auto-fix may only read and edit files, plus run Bash for the configured `[fix] test_command`. That command still executes repository code (build scripts, test code, package hooks), and the agent can edit that code before running it. This is why `trusted_authors_only = true` (the default) and `wshm fix --docker` (with `container_network = "none"` by default) matter: keep both unless every issue author is trusted.
 
 ## Environment Variables
 

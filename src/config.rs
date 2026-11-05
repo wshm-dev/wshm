@@ -1487,6 +1487,12 @@ pub struct FixConfig {
     #[serde(default = "default_fix_image")]
     pub docker_image: String,
 
+    /// Container network for `wshm fix --docker` (default "none": no network,
+    /// so the agent cannot reach the model API unless a network with a
+    /// controlled egress is set here).
+    #[serde(default = "default_fix_container_network")]
+    pub container_network: String,
+
     /// Extra env var names to forward into Docker containers
     #[serde(default)]
     pub secret_env: Vec<String>,
@@ -1536,6 +1542,7 @@ impl Default for FixConfig {
         Self {
             tool: default_fix_tool(),
             docker_image: default_fix_image(),
+            container_network: default_fix_container_network(),
             secret_env: Vec::new(),
             trusted_authors_only: true,
             scan_diff: true,
@@ -1559,6 +1566,10 @@ fn default_fix_tool() -> String {
 }
 fn default_fix_image() -> String {
     "wshm-sandbox:latest".to_string()
+}
+
+fn default_fix_container_network() -> String {
+    "none".to_string()
 }
 
 #[derive(Debug, Deserialize, Serialize)]

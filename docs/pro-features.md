@@ -97,7 +97,7 @@ wshm fix --issue 15 --docker --apply
    - claude: `--permission-mode acceptEdits`, only Read / Grep / Glob / Edit / Write tools, Bash only for `[fix] test_command`, no web tools, no MCP servers, no session persistence;
    - codex: `codex exec --sandbox workspace-write` with network access off;
    - the prompt is sent on stdin; the agent gets PATH, HOME and the model API variables only (never the forge token or `DATABASE_URL`);
-   - `--docker`: `[fix] docker_image`, `--network=none`, all capabilities dropped, no-new-privileges, memory and pids limits, only the repository mounted. With `--network=none` the agent cannot reach the model API: set `WSHM_FIX_CONTAINER_NETWORK` to a network with a controlled egress, or run without `--docker`.
+   - `--docker`: `[fix] docker_image`, network `[fix] container_network` (default `none`), all capabilities dropped, no-new-privileges, memory and pids limits, only the repository mounted. With `none` the agent cannot reach the model API: set `container_network` to a network with a controlled egress, or run without `--docker`.
 3. Stages every change (new files included) and rejects the fix if it touches CI or build files (`.github/`, `.gitlab-ci.yml` and other CI configs, `build.rs`, `package.json`, `Makefile`, `Dockerfile`, …).
 4. Scans the staged diff for suspicious patterns (network calls, process execution, secrets) when `[fix] scan_diff = true` (default).
 5. Optionally runs `[fix] test_command` with `[fix] test_retries`.
