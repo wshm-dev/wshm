@@ -2,7 +2,9 @@
 
 ## License Issues
 
-### "Pro feature requires a license"
+### "configured but requires wshm Pro" (exports, vault)
+
+Only three features check the license: exports, `vault()` placeholders and hosted diagram pages. Everything else, in `wshm` and in `wshm-pro`, runs without one.
 
 ```bash
 # Check your license status
@@ -172,10 +174,10 @@ If you forgot the password, check `.wshm/credentials` or remove the `[web]` pass
 |-------|-------|-----|
 | `No .wshm/config.toml found` | Not initialized | `wshm config init` |
 | `GITHUB_TOKEN not set` | Missing token | `export GITHUB_TOKEN=ghp_xxx` |
-| `Pro feature: review` | No license | `wshm login --license` |
+| `... configured but requires wshm Pro` | Enterprise feature (exports, vault) without license | `wshm-pro login --license` |
 | `Sync failed: 401` | Invalid GitHub token | Check/regenerate token |
 | `AI error: 429` | Rate limited | Wait or switch provider |
-| `Database locked` | Concurrent access | Use PostgreSQL |
+| `Database locked` | Concurrent access | Run one process per SQLite file (PostgreSQL multi-pod is Enterprise) |
 
 ## Getting Help
 

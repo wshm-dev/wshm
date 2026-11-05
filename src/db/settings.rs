@@ -30,6 +30,10 @@ pub const REVIEW_DIAGRAMS_KEY: &str = "review_diagrams";
 /// `SKILLS_KEY` (JSON array of strings). Lets a skill deleted in the
 /// dashboard stay deleted instead of being re-seeded on the next start.
 pub const SKILLS_SEEDED_KEY: &str = "skills_toml_seeded";
+/// Setting key: per-repo override of the pipeline config (`[[pipelines]]`,
+/// `[[pipeline_routes]]`, `[pipeline_runs]`), as a JSON object whose keys
+/// replace the TOML ones. See `pipelines::engine::template::load`.
+pub const PIPELINES_KEY: &str = "pipelines";
 /// Setting key: Azure DevOps work item types treated as issues (JSON array
 /// of strings); overrides `[azure_devops] work_item_types`.
 pub const AZURE_WORK_ITEM_TYPES_KEY: &str = "azure_work_item_types";

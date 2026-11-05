@@ -114,6 +114,26 @@ pub struct Config {
     #[serde(default)]
     pub skills: Vec<SkillDef>,
 
+    /// `[[pipelines]]` — pipeline templates (ordered steps with conditions).
+    /// The built-in `standard` template (today's behaviour) is the default.
+    ///
+    /// Kept raw here and parsed by `pipelines::engine::template::toml_config`:
+    /// an invalid pipeline section must never fail the config load (one
+    /// repo's typo, or a key renamed by an upgrade, would otherwise stop the
+    /// multi-repo daemon from booting). An invalid section is logged, shown
+    /// in `GET /api/v1/repos/{slug}/pipelines`, and the repo runs `standard`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipelines: Option<serde_json::Value>,
+
+    /// `[[pipeline_routes]]` — rules picking the template of a run (raw, see
+    /// `pipelines`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_routes: Option<serde_json::Value>,
+
+    /// `[pipeline_runs]` — retention of the run history (raw, see `pipelines`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_runs: Option<serde_json::Value>,
+
     /// Resolved at runtime, not from config file
     #[serde(skip)]
     pub repo_owner: String,
@@ -169,6 +189,11 @@ pub struct AiConfig {
     /// PR-analysis prompts. Lexical only (FTS5 / tsvector), no embeddings.
     #[serde(default)]
     pub rag: RagConfig,
+
+    /// Prompt-injection hardening (`[ai.injection]`), see `ai::guard`.
+    /// Overridable per repo in the DB.
+    #[serde(default)]
+    pub injection: crate::ai::guard::InjectionConfig,
 }
 
 impl Default for AiConfig {
@@ -178,6 +203,7 @@ impl Default for AiConfig {
             model: default_ai_model(),
             base_url: None,
             rag: RagConfig::default(),
+            injection: crate::ai::guard::InjectionConfig::default(),
         }
     }
 }
@@ -548,7 +574,7 @@ pub const DIAGRAM_KINDS: &[&str] = &["architecture", "flow", "changes", "delta",
 
 /// Recursively overlay `over` onto `base` (objects merged key by key, any
 /// other value replaced).
-fn merge_json(base: &mut serde_json::Value, over: &serde_json::Value) {
+pub(crate) fn merge_json(base: &mut serde_json::Value, over: &serde_json::Value) {
     match (base, over) {
         (serde_json::Value::Object(b), serde_json::Value::Object(o)) => {
             for (k, v) in o {
@@ -998,9 +1024,11 @@ pub struct ConflictConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
+    /// Not implemented: accepted so existing configs keep loading, ignored.
     #[serde(default)]
     pub auto_resolve: bool,
 
+    /// Not implemented: accepted so existing configs keep loading, ignored.
     #[serde(default = "default_confidence")]
     pub auto_resolve_confidence: f64,
 }
@@ -1485,6 +1513,12 @@ pub struct FixConfig {
     #[serde(default = "default_fix_image")]
     pub docker_image: String,
 
+    /// Container network for `wshm fix --docker` (default "none": no network,
+    /// so the agent cannot reach the model API unless a network with a
+    /// controlled egress is set here).
+    #[serde(default = "default_fix_container_network")]
+    pub container_network: String,
+
     /// Extra env var names to forward into Docker containers
     #[serde(default)]
     pub secret_env: Vec<String>,
@@ -1534,6 +1568,7 @@ impl Default for FixConfig {
         Self {
             tool: default_fix_tool(),
             docker_image: default_fix_image(),
+            container_network: default_fix_container_network(),
             secret_env: Vec::new(),
             trusted_authors_only: true,
             scan_diff: true,
@@ -1557,6 +1592,10 @@ fn default_fix_tool() -> String {
 }
 fn default_fix_image() -> String {
     "wshm-sandbox:latest".to_string()
+}
+
+fn default_fix_container_network() -> String {
+    "none".to_string()
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2195,7 +2234,7 @@ pub struct RepoFeatures {
     /// `[ai.rag] enabled` / `WSHM_RAG_ENABLED`; both must be on.
     #[serde(default = "default_true")]
     pub related_history: bool,
-    /// Pro-only inline code review.
+    /// Inline code review.
     #[serde(default)]
     pub review_prs: bool,
     /// Whether a computed review is also posted to GitHub as inline PR
@@ -2647,6 +2686,24 @@ model = "claude-sonnet-4-20250514"
 #   azure      → AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT
 #   custom     → WSHM_AI_API_KEY + base_url
 
+# Prompt-injection hardening. Issue/PR text, diffs and files are sent to the
+# model as delimited untrusted data; the model output is validated against
+# allowlists before wshm acts. Per-repo override: PUT
+# /api/v1/repos/{slug}/injection (stored in the DB, shared by pods).
+# [ai.injection]
+# detection = true                  # flag likely injection attempts (no AI call)
+# threshold = 3                     # score at which an item is flagged (1..=20)
+# block_mutations = true            # flagged item: no label change, close, auto-fix or diagram
+# maintainer_note = true            # add a short warning to wshm's comment
+# require_non_ai_condition = true   # AI-chosen duplicate close / auto-fix start needs the
+#                                   # issue author to be a collaborator or trusted, or a
+#                                   # collaborator's approval of the current content.
+#                                   # Auto-fix still applies [fix] trusted_authors_only.
+# approval_label = "wshm:approved"  # added by a collaborator (GitHub webhook `labeled`
+#                                   # event); bound to the content, an edit voids it;
+#                                   # re-runs triage; ignored on Azure DevOps
+# trusted_authors = []              # trusted in addition to collaborators
+
 [triage]
 enabled = true
 auto_fix = false
@@ -2744,8 +2801,6 @@ strategy = "rebase"
 
 [conflicts]
 enabled = true
-auto_resolve = false
-auto_resolve_confidence = 0.85
 
 [sync]
 interval_minutes = 5
@@ -2808,6 +2863,37 @@ full_sync_interval_hours = 24
 # content = "Flag unwrap()/expect() on fallible paths in non-test code."
 # pipelines = ["pr_review", "review"]
 # enabled = true
+
+# Pipelines: how an issue / PR event is processed. Without any of this, the
+# built-in "standard" pipeline runs: exactly the repo toggles
+# (collect_*, triage_issues, review_prs, analyze_prs, filters). A custom
+# pipeline only honours a toggle listed in its `when.features`. Every run is
+# recorded per step (GET /api/v1/repos/{slug}/runs?item=N). Never read from
+# an issue or PR. Override per repo in the DB: PUT /api/v1/repos/{slug}/pipelines.
+# [[pipelines]]
+# name = "light"                        # a-z 0-9 - _ ; "standard" is reserved
+# max_ai_calls = 2                      # AI call budget of a run (optional)
+#
+# [[pipelines.steps]]
+# id = "sync"
+# uses = "sync"                         # sync | triage | review | analyze | memory
+#
+# [[pipelines.steps]]
+# id = "analyze"
+# uses = "analyze"
+# needs = ["sync"]                      # earlier steps that must be done
+# on_failure = "abort"                  # abort (default) | continue
+# timeout_secs = 300
+# when = { item = "pr", features = ["analyze_prs"], labels_none = ["skip-ai"] }
+#
+# [[pipeline_routes]]                   # highest priority first; no match = standard
+# template = "light"
+# priority = 10
+# when = { item = "pr", paths = ["docs/**", "**/*.md"] }
+#
+# [pipeline_runs]
+# retention_days = 30                   # 0 = no age limit
+# max_per_item = 20                     # runs kept per issue/PR (0 = no limit)
 
 # [assign]
 # enabled = true
@@ -3046,6 +3132,9 @@ impl Default for Config {
             prs_blacklist: Vec::new(),
             labels: Vec::new(),
             skills: Vec::new(),
+            pipelines: None,
+            pipeline_routes: None,
+            pipeline_runs: None,
             repo_owner: String::new(),
             repo_name: String::new(),
             wshm_dir: PathBuf::from(".wshm"),

@@ -1159,7 +1159,7 @@
 
 						{#if !license.is_pro}
 							<p class="text-xs text-muted-foreground mt-2">
-								<a href="https://wshm.dev/pro" target="_blank" class="text-primary hover:underline">{$t('settings.license.getLicense')}</a>
+								<a href="mailto:contact@wshm.dev" class="text-primary hover:underline">{$t('settings.license.getLicense')}</a>
 							</p>
 						{/if}
 					</div>
@@ -1635,7 +1635,7 @@
 												checked={s.pipelines.includes('review')}
 												onchange={() => togglePipeline(i, 'review')}
 											/>
-											Code review (Pro)
+											Code review
 										</label>
 										<label class="flex items-center gap-1">
 											<input
@@ -1793,7 +1793,7 @@
 										<option value="off">off</option>
 										<option value="local">local directory</option>
 										<option value="github-pages">GitHub Pages (gh-pages branch)</option>
-										<option value="wshm">hosted by wshm (Pro){diagramsInfo?.hosting_available ? '' : ' — not licensed'}</option>
+										<option value="wshm">hosted by wshm (Enterprise){diagramsInfo?.hosting_available ? '' : ' — not licensed'}</option>
 										<option value="s3">S3 / S3-compatible</option>
 										<option value="gcs">Google Cloud Storage</option>
 										<option value="azure">Azure Blob Storage</option>

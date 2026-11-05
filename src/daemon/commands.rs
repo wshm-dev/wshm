@@ -5,10 +5,10 @@
 //! Supported commands:
 //!   /wshm triage         — (re)triage this issue
 //!   /wshm analyze        — (re)analyze this PR
-//!   /wshm review         — run inline code review on this PR (Pro)
+//!   /wshm review         — run inline code review on this PR
 //!   /wshm label <name>   — add a label
 //!   /wshm unlabel <name> — remove a label
-//!   /wshm fix            — auto-generate a fix PR for this issue (Pro)
+//!   /wshm fix            — auto-generate a fix PR for this issue
 //!   /wshm queue          — show merge queue position for this PR
 //!   /wshm health         — check PR health (duplicates, staleness)
 //!   /wshm help           — show available commands
@@ -16,7 +16,6 @@
 use anyhow::Result;
 use tracing::info;
 
-use crate::cli::{PrArgs, TriageArgs};
 use crate::config::Config;
 use crate::git_provider::Forge as GhClient;
 use crate::github::sync as gh_sync;
@@ -31,7 +30,10 @@ pub enum SlashCommand {
     Review,
     Label(String),
     Unlabel(String),
-    Fix,
+    /// `fix [--force]`: `--force` overrides the injection gate (#235).
+    Fix {
+        force: bool,
+    },
     Queue,
     Health,
     Help,
@@ -76,7 +78,11 @@ pub fn parse(comment_body: &str, prefix: &str) -> Option<SlashCommand> {
                         SlashCommand::Unknown("unlabel requires a name".into())
                     }
                 }
-                Some(ref c) if c == "fix" || c == "autofix" || c == "auto-fix" => SlashCommand::Fix,
+                Some(ref c) if c == "fix" || c == "autofix" || c == "auto-fix" => {
+                    SlashCommand::Fix {
+                        force: parts.iter().skip(1).any(|p| *p == "--force"),
+                    }
+                }
                 Some(ref c) if c == "queue" || c == "merge-queue" => SlashCommand::Queue,
                 Some(ref c) if c == "health" || c == "check" => SlashCommand::Health,
                 Some(ref c) if c == "help" => SlashCommand::Help,
@@ -125,17 +131,26 @@ async fn authorize_command(
 }
 
 /// Execute a slash command and return a response comment body.
-#[allow(clippy::too_many_arguments)]
+///
+/// `triage`, `analyze` and `review` are partial runs of the item's pipeline
+/// (only the steps of that kind, trigger `command`, recorded): the template
+/// and the step conditions apply, except the repo toggles (`features`,
+/// `repo_filters`), which govern automatic processing and never blocked an
+/// explicit command. The other commands do not belong to a pipeline.
 pub async fn execute(
     cmd: &SlashCommand,
-    number: u64,
     is_pr: bool,
-    config: &Config,
-    db: &dyn crate::db::backend::DatabaseBackend,
-    gh: &GhClient,
-    apply: bool,
+    ctx: &pipelines::engine::RunContext,
     triggered_by: Option<&str>,
 ) -> Result<String> {
+    let config: &Config = &ctx.config;
+    let db = ctx.db.as_ref();
+    let gh: &GhClient = ctx.gh.as_ref();
+    let apply = ctx.apply;
+    let Some(number) = ctx.item.number else {
+        return Ok(String::new());
+    };
+
     // Authorize all commands except Help and Unknown
     if !matches!(cmd, SlashCommand::Help | SlashCommand::Unknown(_)) {
         let cmd_name = format!("{:?}", cmd);
@@ -148,28 +163,18 @@ pub async fn execute(
         SlashCommand::Triage => {
             info!("Slash command: triage issue #{number}");
             gh_sync::incremental_sync(gh, db, "issues").await?;
-            let args = TriageArgs {
-                issue: Some(number),
-                apply,
-                retriage: false,
-            };
-            pipelines::triage::run(
-                config,
-                db,
-                gh,
-                &args,
-                pipelines::triage::OutputFormat::Text,
-                None,
-            )
-            .await?;
-            Ok(format!(
-                "Re-triaged issue #{number}. {}",
-                if apply {
-                    "Labels and comments updated."
-                } else {
-                    "(dry-run — use `--apply` on daemon to enable actions)"
-                }
-            ))
+            let report = run_command_steps(ctx, "triage").await?;
+            Ok(match command_outcome(&report, "triage", ctx) {
+                Ok(()) => format!(
+                    "Re-triaged issue #{number}. {}",
+                    if apply {
+                        "Labels and comments updated."
+                    } else {
+                        "(dry-run — use `--apply` on daemon to enable actions)"
+                    }
+                ),
+                Err(msg) => msg,
+            })
         }
         SlashCommand::Analyze => {
             if !is_pr {
@@ -177,55 +182,40 @@ pub async fn execute(
             }
             info!("Slash command: analyze PR #{number}");
             gh_sync::incremental_sync(gh, db, "pulls").await?;
-            let args = PrArgs {
-                pr: Some(number),
-                apply,
-            };
-            // Slash command inside the daemon: no stdout preview, and no
-            // diagram generation in the command's task (a cached diagram is
-            // kept; the next push regenerates it in the background).
-            pipelines::pr_analysis::run_with(
-                config,
-                db,
-                gh,
-                &args,
-                false,
-                None,
-                pipelines::pr_analysis::RunOptions {
-                    preview: false,
-                    diagrams: pipelines::pr_analysis::DiagramMode::Skip,
-                },
-            )
-            .await?;
-            Ok(format!(
-                "Re-analyzed PR #{number}. {}",
-                if apply {
-                    "Labels and comments updated."
-                } else {
-                    "(dry-run)"
-                }
-            ))
+            // The analyze step of a command run generates no diagram in the
+            // command's task (a cached one is kept; the next push
+            // regenerates it in the background).
+            let report = run_command_steps(ctx, "analyze").await?;
+            Ok(match command_outcome(&report, "analyze", ctx) {
+                Ok(()) => format!(
+                    "Re-analyzed PR #{number}. {}",
+                    if apply {
+                        "Labels and comments updated."
+                    } else {
+                        "(dry-run)"
+                    }
+                ),
+                Err(msg) => msg,
+            })
         }
         SlashCommand::Review => {
-            if !pro_hooks::is_pro() {
-                return Ok("Inline review requires wshm Pro. Visit https://wshm.dev/pro".into());
-            }
             if !is_pr {
                 return Ok("This command only works on pull requests.".into());
             }
             info!("Slash command: review PR #{number}");
             gh_sync::incremental_sync(gh, db, "pulls").await?;
-            match pro_hooks::run_review(config, db, gh, number, apply).await? {
-                true => Ok(format!(
+            let report = run_command_steps(ctx, "review").await?;
+            Ok(match command_outcome(&report, "review", ctx) {
+                Ok(()) => format!(
                     "Reviewed PR #{number}. {}",
                     if apply {
                         "Review comments posted."
                     } else {
                         "(dry-run)"
                     }
-                )),
-                false => Ok("Inline review requires wshm Pro. Visit https://wshm.dev/pro".into()),
-            }
+                ),
+                Err(msg) => msg,
+            })
         }
         SlashCommand::Label(label) => {
             info!("Slash command: label #{number} with '{label}'");
@@ -256,10 +246,7 @@ pub async fn execute(
                 ))
             }
         }
-        SlashCommand::Fix => {
-            if !pro_hooks::is_pro() {
-                return Ok("Auto-fix requires wshm Pro. Visit https://wshm.dev/pro".into());
-            }
+        SlashCommand::Fix { force } => {
             if is_pr {
                 return Ok("This command only works on issues.".into());
             }
@@ -270,14 +257,17 @@ pub async fn execute(
                 ));
             }
 
-            // Auth already checked globally above. Proceed to fix.
+            // Auth already checked globally above. The injection gate (#235)
+            // runs in autogen::run: a coding agent with write access would run
+            // on the issue text. A maintainer can override it with --force.
             gh_sync::sync_issues_now(gh, db).await?;
-            match pro_hooks::run_auto_fix(config, db, gh, number).await {
-                Ok(true) => Ok(format!(
+            match pro_hooks::run_auto_fix(config, db, gh, number, *force).await {
+                Ok(_) => Ok(format!(
                     "Auto-fix attempted for issue #{number}. Check for a new draft PR."
                 )),
-                Ok(false) => Ok(format!(
-                    "Auto-fix for issue #{number} requires wshm Pro. Visit https://wshm.dev/pro"
+                Err(e) if e.is::<pipelines::autogen::AutoFixRefused>() => Ok(format!(
+                    "Auto-fix refused for issue #{number}: {e}. Review the issue, then use `{} fix --force` to run it anyway.",
+                    config.branding.command_prefix
                 )),
                 Err(e) => {
                     tracing::warn!("auto-fix #{number} failed: {e:#}");
@@ -396,13 +386,13 @@ pub async fn execute(
 \
                  | `{p} analyze` | (Re)analyze this PR |
 \
-                 | `{p} review` | Inline AI code review (Pro) |
+                 | `{p} review` | Inline AI code review |
 \
                  | `{p} label <name>` | Add a label |
 \
                  | `{p} unlabel <name>` | Remove a label |
 \
-                 | `{p} fix` | Auto-fix this issue (Pro) |
+                 | `{p} fix` | Auto-fix this issue |
 \
                  | `{p} queue` | Show merge queue position |
 \
@@ -420,6 +410,58 @@ Use `{} help` to see available commands.",
     }
 }
 
+/// Run the steps of `kind` of the item's pipeline for a slash command.
+/// `Err` when a step with `on_failure = "abort"` failed (the command
+/// fails, as it did when it called the pipeline directly).
+async fn run_command_steps(
+    ctx: &pipelines::engine::RunContext,
+    kind: &str,
+) -> Result<pipelines::engine::RunReport> {
+    let mut report = pipelines::engine::run_kinds(
+        ctx,
+        &[kind],
+        pipelines::engine::ExecOptions {
+            ignore_toggles: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    if let Some((id, e)) = report.failure.take() {
+        return Err(e.context(format!("pipeline step '{id}' failed")));
+    }
+    Ok(report)
+}
+
+/// `Ok` when a step of `kind` ran; else the reply explaining why not.
+fn command_outcome(
+    report: &pipelines::engine::RunReport,
+    kind: &str,
+    ctx: &pipelines::engine::RunContext,
+) -> std::result::Result<(), String> {
+    use pipelines::engine::StepStatus;
+    let steps: Vec<_> = report.steps.iter().filter(|s| s.uses == kind).collect();
+    if steps.iter().any(|s| s.status == StepStatus::Done) {
+        return Ok(());
+    }
+    match steps.last() {
+        None => Err(format!(
+            "Pipeline `{}` has no `{kind}` step for {}, nothing done.",
+            report.template, ctx.item
+        )),
+        Some(s) if s.status == StepStatus::Failed => Err(format!(
+            "`{kind}` failed on {}: {}",
+            ctx.item,
+            s.reason.as_deref().unwrap_or("see the server logs")
+        )),
+        Some(s) => Err(format!(
+            "`{kind}` skipped on {} by pipeline `{}`: {}",
+            ctx.item,
+            report.template,
+            s.reason.as_deref().unwrap_or("")
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,11 +470,11 @@ mod tests {
     fn test_slash_prefix() {
         assert!(matches!(
             parse("/wshm fix", "/wshm"),
-            Some(SlashCommand::Fix)
+            Some(SlashCommand::Fix { .. })
         ));
         assert!(matches!(
             parse("/wshm autofix", "/wshm"),
-            Some(SlashCommand::Fix)
+            Some(SlashCommand::Fix { .. })
         ));
         assert!(matches!(
             parse("/wshm triage", "/wshm"),
@@ -444,15 +486,15 @@ mod tests {
     fn test_at_prefix() {
         assert!(matches!(
             parse("@wshm fix", "/wshm"),
-            Some(SlashCommand::Fix)
+            Some(SlashCommand::Fix { .. })
         ));
         assert!(matches!(
             parse("@wshm autofix", "/wshm"),
-            Some(SlashCommand::Fix)
+            Some(SlashCommand::Fix { .. })
         ));
         assert!(matches!(
             parse("@wshm auto-fix", "/wshm"),
-            Some(SlashCommand::Fix)
+            Some(SlashCommand::Fix { .. })
         ));
         assert!(matches!(
             parse("@wshm triage", "/wshm"),
@@ -464,7 +506,7 @@ mod tests {
     fn test_at_prefix_with_extra_text() {
         assert!(matches!(
             parse("@wshm fix please", "/wshm"),
-            Some(SlashCommand::Fix)
+            Some(SlashCommand::Fix { .. })
         ));
     }
 
@@ -476,7 +518,10 @@ Can someone look at this?
 @wshm fix
 
 Thanks!";
-        assert!(matches!(parse(comment, "/wshm"), Some(SlashCommand::Fix)));
+        assert!(matches!(
+            parse(comment, "/wshm"),
+            Some(SlashCommand::Fix { .. })
+        ));
     }
 
     #[test]

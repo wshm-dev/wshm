@@ -7,12 +7,8 @@ use tracing::{error, info, warn};
 const MAX_CONCURRENT_TASKS: usize = 5;
 
 use super::commands;
-use super::memory;
 use super::{DaemonState, MultiDaemonState};
-use crate::cli::{PrArgs, TriageArgs};
-use crate::github::sync as gh_sync;
 use crate::pipelines;
-use crate::pro_hooks;
 
 /// Tracks which issue/PR numbers are currently being processed to prevent concurrent duplicates.
 /// Key is (repo_slug, number) for multi-repo isolation, or ("", number) for single-repo.
@@ -196,6 +192,25 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
     let number = event.number;
     info!("Handling issue event: number={number:?}");
 
+    // A collaborator's approval label (#235): recorded bound to the content
+    // of the event, then the triage re-runs once for it.
+    let approved = event.action == "labeled"
+        && match serde_json::from_str::<serde_json::Value>(&event.payload) {
+            Ok(p) => crate::ai::guard::on_issue_labeled(
+                &state.config,
+                state.db.as_ref(),
+                &*state.gh(),
+                &p,
+            )
+            .await
+            .is_some(),
+            Err(_) => false,
+        };
+
+    if event.action == "labeled" && !approved {
+        return Ok(());
+    }
+
     // Skip if already triaged (prevents AI credit exhaustion via issue spam)
     if let Some(n) = number {
         if state.config.issues_blacklist.contains(&n) {
@@ -203,11 +218,11 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
             return Ok(());
         }
         match state.db.is_triaged(n) {
-            Ok(true) => {
+            Ok(true) if !approved => {
                 info!("Issue #{n} already triaged, skipping");
                 return Ok(());
             }
-            Ok(false) => {}
+            Ok(_) => {}
             Err(e) => {
                 // A transient DB/IO error must NOT fall through to a
                 // re-triage: that would burn AI credits on every error.
@@ -218,115 +233,11 @@ async fn handle_issue(state: &DaemonState, event: &WebhookEvent) -> anyhow::Resu
         }
     }
 
-    let features = state.features();
-    if !features.collect_issues {
-        info!(
-            "[{}] collect_issues disabled — skipping sync for issue {number:?}",
-            state.config.repo_slug()
-        );
-        return Ok(());
-    }
-    // Force sync issues (bypass throttle — we know there's a new event)
-    gh_sync::sync_issues_now(&*state.gh(), state.db.as_ref()).await?;
-
-    // The list endpoint lags issue creation by a few seconds (replicated
-    // index), so a sync right after `issues.opened` can miss the brand-new
-    // issue, which then surfaces as "Issue #N not found in cache" at triage.
-    // Fetch it directly from the canonical single-issue endpoint to guarantee
-    // it is cached before we triage.
-    if let Some(n) = number {
-        if matches!(state.db.get_issue(n), Ok(None)) {
-            match state.gh().fetch_issue(n).await {
-                Ok(Some(issue)) => {
-                    if let Err(e) = state.db.upsert_issue(&issue) {
-                        warn!("Failed to cache issue #{n} after direct fetch: {e}");
-                    }
-                }
-                Ok(None) => {
-                    info!(
-                        "[{}] issue #{n} not returned by GitHub (deleted, transferred, or a PR) — skipping",
-                        state.config.repo_slug()
-                    );
-                    return Ok(());
-                }
-                Err(e) => warn!("Direct fetch of issue #{n} failed: {e:#}"),
-            }
-        }
-    }
-
-    if !features.triage_issues {
-        info!(
-            "[{}] triage_issues disabled — issue {number:?} synced but not triaged",
-            state.config.repo_slug()
-        );
-        return Ok(());
-    }
-
-    // Apply per-action filters before consuming AI credits.
-    if let Some(n) = number {
-        if let Ok(Some(issue)) = state.db.get_issue(n) {
-            if features.filters.is_author_skipped(issue.author.as_deref()) {
-                info!(
-                    "[{}] issue #{n} skipped (author '{}' in skip_authors)",
-                    state.config.repo_slug(),
-                    issue.author.as_deref().unwrap_or("?")
-                );
-                return Ok(());
-            }
-            if !features.filters.issue_labels_pass_triage(&issue.labels) {
-                info!(
-                    "[{}] issue #{n} skipped (labels filter)",
-                    state.config.repo_slug()
-                );
-                return Ok(());
-            }
-            if !features.filters.issue_age_ok(&issue.created_at) {
-                info!(
-                    "[{}] issue #{n} skipped (older than {} days)",
-                    state.config.repo_slug(),
-                    features.filters.triage_max_age_days
-                );
-                return Ok(());
-            }
-        }
-    }
-
-    // Run triage pipeline. `apply` controls whether wshm posts a triage
-    // comment on GitHub; we keep the legacy semantic (state.apply()) here
-    // because triage_issues already gated the AI run itself.
-    let args = TriageArgs {
-        issue: number,
-        apply: state.apply(),
-        retriage: false,
-    };
-
-    pipelines::triage::run(
-        &state.config,
-        state.db.as_ref(),
-        &*state.gh(),
-        &args,
-        pipelines::triage::OutputFormat::Text,
-        None,
-    )
-    .await?;
-
-    // Store in ICM if enabled
-    if state.config.daemon.icm_enabled {
-        if let Some(n) = number {
-            if let Ok(Some(triage)) = state.db.get_triage_result(n) {
-                memory::store_triage(
-                    &state.config,
-                    n,
-                    &triage.category,
-                    triage.confidence,
-                    triage.summary.as_deref().unwrap_or(""),
-                )
-                .await;
-            }
-        }
-    }
-
-    Ok(())
+    // Everything after the admission checks above is a pipeline run: the
+    // repo's template (default `standard`, which mirrors the former inline
+    // flow and reads the repo toggles as step conditions), recorded per step.
+    let ctx = run_context(state, event, pipelines::engine::ItemKind::Issue);
+    pipelines::engine::run_item(&ctx).await
 }
 
 async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyhow::Result<()> {
@@ -385,146 +296,38 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
         }
     }
 
-    let features = state.features();
-    if !features.collect_prs {
-        info!(
-            "[{}] collect_prs disabled — skipping sync for PR {number:?}",
-            state.config.repo_slug()
-        );
-        return Ok(());
-    }
-    // Force sync pulls (bypass throttle — we know there's a new event)
-    gh_sync::sync_pulls_now(&*state.gh(), state.db.as_ref()).await?;
+    // Everything after the admission checks above is a pipeline run: the
+    // repo's template (default `standard`, which mirrors the former inline
+    // flow and reads the repo toggles as step conditions), recorded per step.
+    let ctx = run_context(state, event, pipelines::engine::ItemKind::Pr);
+    pipelines::engine::run_item(&ctx).await
+}
 
-    // The list endpoint lags PR creation by a few seconds (replicated index),
-    // so a sync right after `pull_request.opened` can miss the brand-new PR,
-    // which then surfaces as "PR #N not found in cache" at analysis. Fetch it
-    // directly from the canonical single-PR endpoint to guarantee it is cached.
-    if let Some(n) = number {
-        if matches!(state.db.get_pull(n), Ok(None)) {
-            match state.gh().fetch_pull(n).await {
-                Ok(Some(pr)) => {
-                    if let Err(e) = state.db.upsert_pull(&pr) {
-                        warn!("Failed to cache PR #{n} after direct fetch: {e}");
-                    }
-                }
-                Ok(None) => {
-                    info!(
-                        "[{}] PR #{n} not returned by GitHub (deleted or transferred) — skipping",
-                        state.config.repo_slug()
-                    );
-                    return Ok(());
-                }
-                Err(e) => warn!("Direct fetch of PR #{n} failed: {e:#}"),
-            }
-        }
-    }
-
-    // Inline code review (Pro) — independent of analyze_prs below, so it
-    // still runs even for a repo that only wants review, not the coarse
-    // risk/type classification. `should_post` combines the repo's general
-    // apply mode with the review-specific post-to-GitHub toggle: both must
-    // be on for inline comments to actually land on the PR; the review
-    // itself is always computed and stored either way.
-    if features.review_prs {
-        if let Some(n) = number {
-            let should_post = state.apply() && features.review_post_comments;
-            if let Err(e) = pro_hooks::run_review(
-                &state.config,
-                state.db.as_ref(),
-                &*state.gh(),
-                n,
-                should_post,
-            )
-            .await
-            {
-                warn!("Review failed for PR #{n}: {e:#}");
-            }
-        }
-    }
-
-    if !features.analyze_prs {
-        info!(
-            "[{}] analyze_prs disabled — PR {number:?} synced but not analyzed",
-            state.config.repo_slug()
-        );
-        return Ok(());
-    }
-
-    // Apply per-action filters.
-    if let Some(n) = number {
-        if let Ok(Some(pr)) = state.db.get_pull(n) {
-            if features.filters.is_author_skipped(pr.author.as_deref()) {
-                info!(
-                    "[{}] PR #{n} skipped (author '{}' in skip_authors)",
-                    state.config.repo_slug(),
-                    pr.author.as_deref().unwrap_or("?")
-                );
-                return Ok(());
-            }
-            if !features.filters.branch_allowed(pr.base_ref.as_deref()) {
-                info!(
-                    "[{}] PR #{n} skipped (base '{}' not in target_branches)",
-                    state.config.repo_slug(),
-                    pr.base_ref.as_deref().unwrap_or("?")
-                );
-                return Ok(());
-            }
-            // skip_drafts not applied here yet — Issue model in DB doesn't
-            // currently expose draft status; left as TODO once the field
-            // is added to PullRequest.
-        }
-    }
-
-    // Run PR analysis pipeline
-    let args = PrArgs {
-        pr: number,
-        apply: state.apply(),
-    };
-
-    // The diagram step comes back as jobs: they run in the background with
-    // their own concurrency limit, after the analysis comment is posted, so
-    // a slow AI never holds this event's permit. Daemon runs never preview.
-    let gh = state.gh();
-    let jobs = pipelines::pr_analysis::run_with(
-        &state.config,
-        state.db.as_ref(),
-        &*gh,
-        &args,
-        false,
-        None,
-        pipelines::pr_analysis::RunOptions {
-            preview: false,
-            diagrams: pipelines::pr_analysis::DiagramMode::Deferred,
+/// Pipeline context for an issue / PR event, with the repo's live apply
+/// mode and toggles.
+fn run_context(
+    state: &DaemonState,
+    event: &WebhookEvent,
+    kind: pipelines::engine::ItemKind,
+) -> pipelines::engine::RunContext {
+    pipelines::engine::RunContext::new(
+        Arc::clone(&state.config),
+        Arc::clone(&state.db),
+        state.gh(),
+        state.apply(),
+        state.features(),
+        pipelines::engine::ItemRef {
+            kind,
+            number: event.number,
         },
+        format!("{}.{}", event.event_type, event.action),
     )
-    .await?;
-    for job in jobs {
-        pipelines::pr_analysis::spawn_diagram_job(
-            std::sync::Arc::clone(&state.config),
-            std::sync::Arc::clone(&state.db),
-            std::sync::Arc::clone(&gh),
-            job,
-        );
-    }
-
-    // Store in ICM if enabled
-    if state.config.daemon.icm_enabled {
-        if let Some(n) = number {
-            if let Ok(Some(analysis)) = state.db.get_pr_analysis(n) {
-                memory::store_pr_analysis(
-                    &state.config,
-                    n,
-                    &analysis.pr_type,
-                    &analysis.risk_level,
-                    &analysis.summary,
-                )
-                .await;
-            }
-        }
-    }
-
-    Ok(())
+    .with_event_id(event.id)
+    .with_payload_info(
+        serde_json::from_str::<serde_json::Value>(&event.payload)
+            .ok()
+            .and_then(|v| pipelines::engine::ItemInfo::from_payload(kind, &v)),
+    )
 }
 
 async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Result<()> {
@@ -585,18 +388,18 @@ async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Re
         .and_then(|i| i.get("pull_request"))
         .is_some();
 
-    // Execute the command
-    let response = commands::execute(
-        &cmd,
-        number,
-        is_pr,
-        &state.config,
-        state.db.as_ref(),
-        &*state.gh(),
-        state.apply(),
-        Some(triggered_by),
-    )
-    .await?;
+    // Execute the command. triage / analyze / review go through the
+    // repo's pipeline (template + step conditions, recorded as a run with
+    // trigger "command").
+    let kind = if is_pr {
+        pipelines::engine::ItemKind::Pr
+    } else {
+        pipelines::engine::ItemKind::Issue
+    };
+    let ctx = run_context(state, event, kind)
+        .with_source(pipelines::engine::RunSource::Command)
+        .with_trigger("command");
+    let response = commands::execute(&cmd, is_pr, &ctx, Some(triggered_by)).await?;
 
     // Post response as a comment
     if state.apply() {

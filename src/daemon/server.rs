@@ -812,7 +812,8 @@ fn translate_gitlab(gl_event: &str, p: &Value) -> Option<(String, String, Value)
 
 fn should_process_event(event_type: &str, action: &str) -> bool {
     match event_type {
-        "issues" => action == "opened",
+        // `labeled`: only acted on for the injection approval label (#235).
+        "issues" => matches!(action, "opened" | "labeled"),
         // `closed` (incl. merged): cleanup of the PR's diagram page, cheap
         // (one PR refresh, no analysis).
         "pull_request" => matches!(action, "opened" | "synchronize" | "closed"),

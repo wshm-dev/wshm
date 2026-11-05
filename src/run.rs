@@ -170,13 +170,94 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
             )
             .await?;
 
-            // NOTE: Pro-only conflict resolution is invoked from the
-            // wshm-pro `run_oss_command` wrapper (which calls this
-            // function, then runs conflict_resolution separately).
-            // The OSS binary does not include conflict resolution.
+            let conflict_args = crate::cli::ConflictArgs { apply: args.apply };
+            crate::pipelines::conflict_resolution::run(
+                &config,
+                db.as_ref(),
+                &*gh,
+                &conflict_args,
+                cli.json,
+                exporter.as_ref(),
+            )
+            .await?;
+
+            if config.notify.on_run && config.notify.has_targets() {
+                crate::pipelines::notify::run(&config, db.as_ref(), cli.json).await?;
+            }
 
             if !cli.json {
                 println!("Full cycle complete.");
+            }
+        }
+        Some(Command::Conflicts(args)) => {
+            let (config, db, gh, exporter) = init_full(&cli)?;
+            if !cli.offline {
+                crate::github::sync::incremental_sync(&*gh, db.as_ref(), "pulls").await?;
+            }
+            crate::pipelines::conflict_resolution::run(
+                &config,
+                db.as_ref(),
+                &*gh,
+                args,
+                cli.json,
+                exporter.as_ref(),
+            )
+            .await?;
+        }
+        Some(Command::Review(args)) => {
+            let (config, db, gh) = init_core(&cli)?;
+            if !cli.offline {
+                crate::github::sync::incremental_sync(&*gh, db.as_ref(), "pulls").await?;
+            }
+            crate::pipelines::review::run(&config, db.as_ref(), &*gh, args, cli.json).await?;
+        }
+        Some(Command::Fix(args)) => {
+            let (config, db, gh, exporter) = init_full(&cli)?;
+            if !cli.offline {
+                crate::github::sync::incremental_sync(&*gh, db.as_ref(), "issues").await?;
+            }
+            crate::pipelines::autogen::run(&config, db.as_ref(), &*gh, args, exporter.as_ref())
+                .await?;
+        }
+        Some(Command::Report(args)) => {
+            let (config, db, _gh) = init_core(&cli)?;
+            let slug = config.repo_slug();
+            crate::pipelines::report::run(&config, db.as_ref(), args, &slug)?;
+        }
+        Some(Command::Improve(args)) => {
+            let (config, db, gh) = init_core(&cli)?;
+            if !cli.offline {
+                crate::github::sync::incremental_sync(&*gh, db.as_ref(), "issues").await?;
+            }
+            crate::pipelines::improve::run(&config, db.as_ref(), &*gh, args, cli.json).await?;
+        }
+        Some(Command::Notify) => {
+            let config = crate::Config::load(&cli)?;
+            let db: Arc<dyn DatabaseBackend> = Arc::new(crate::Database::open(&config)?);
+            crate::pipelines::notify::run(&config, db.as_ref(), cli.json).await?;
+        }
+        Some(Command::Changelog(args)) => {
+            let config = crate::Config::load(&cli)?;
+            let gh = crate::git_provider::build_provider(&config)?;
+            crate::pipelines::changelog::run(&*gh, args).await?;
+        }
+        Some(Command::Dashboard(args)) => {
+            let (config, db, _gh) = init_core(&cli)?;
+            crate::pipelines::dashboard::run(&config, db.as_ref(), args)?;
+        }
+        Some(Command::Plan(args)) => {
+            let plan_args = crate::pipelines::plan::PlanArgs {
+                json: cli.json,
+                csv: cli.csv,
+                limit: args.limit,
+            };
+            let global_path = crate::config::GlobalConfig::default_path();
+            if global_path.exists() {
+                let global = crate::config::GlobalConfig::load(&global_path)?;
+                crate::pipelines::plan::run_multi(&global, &plan_args)?;
+            } else {
+                let config = crate::Config::load(&cli)?;
+                crate::pipelines::plan::run_single(&config, &plan_args)?;
             }
         }
         Some(Command::Health(args)) => {
