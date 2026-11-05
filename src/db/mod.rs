@@ -6,6 +6,7 @@ pub mod issues;
 pub mod licenses;
 pub mod pulls;
 pub mod reviews;
+pub mod runs;
 pub mod schema;
 pub mod search;
 pub mod settings;

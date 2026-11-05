@@ -185,6 +185,139 @@ full_sync_interval_hours = 24
 
 The claude agent used by auto-fix may only read and edit files, plus run Bash for the configured `[fix] test_command`. That command still executes repository code (build scripts, test code, package hooks), and the agent can edit that code before running it. This is why `trusted_authors_only = true` (the default) and `wshm fix --docker` (with `container_network = "none"` by default) matter: keep both unless every issue author is trusted.
 
+## Pipelines
+
+Each issue or PR event (webhook or poller) is processed by a **pipeline**: an
+ordered list of steps. Without any pipeline config, the built-in `standard`
+pipeline runs, and it does exactly what the repo toggles say:
+
+| Item  | Steps of `standard`                                                    |
+|-------|------------------------------------------------------------------------|
+| issue | `sync` (collect_issues) → `triage` (triage_issues + filters) → `memory` |
+| PR    | `sync` (collect_prs) → `review` (review_prs, a failure does not stop the run) → `analyze` (analyze_prs + filters) → `memory` |
+
+So the existing toggles keep working unchanged: `standard` reads
+`collect_issues`, `collect_prs`, `triage_issues`, `review_prs`, `analyze_prs`
+and the repo filters as step conditions; `review_post_comments` and the apply
+mode still decide what the steps post. `auto_pr` and `auto_merge` are not part
+of the event pipeline (they were not before either).
+
+**A custom template does not apply the repo toggles by itself.** A step runs
+when its own `when` holds: to keep honouring a toggle, list it, e.g.
+`when = { features = ["triage_issues"], repo_filters = true }`. Without it, the
+step runs even when the toggle is off in Settings → Repos.
+
+The same template drives the other entry points, as a partial run (only the
+steps of one kind, recorded with their own trigger):
+
+- the scheduler's periodic triage and retriage run the `triage` steps of each
+  pending issue's template (trigger `scheduler`), still behind `[triage]
+  enabled`, `triage_issues` and apply mode as before. Such a run is recorded
+  only when a step actually runs. `needs` on steps outside the partial run
+  (e.g. `sync`) count as met: the scheduler synced already;
+- the slash commands `/wshm triage`, `analyze` and `review` run the steps of
+  that kind (trigger `command`). Their conditions apply, except the toggles
+  (`features`, `repo_filters`), which govern automatic processing and never
+  blocked an explicit command. A command on an item whose template has no such
+  step, or skips it, answers with the reason. The other commands (`label`,
+  `fix`, `queue`, ...) are not pipeline steps.
+
+The pipeline config is only read from `.wshm/config.toml` (default branch
+checkout), the global config, or the DB override. Never from the content of an
+issue or PR. It holds no secret: steps read credentials from the secret store.
+
+```toml
+[[pipelines]]
+name = "light"                  # a-z 0-9 - _ (1-64 chars); "standard" is reserved
+description = "Docs and small PRs"
+max_ai_calls = 2                # AI call budget of a run; later steps are skipped
+
+[[pipelines.steps]]
+id = "sync"                     # unique in the pipeline
+uses = "sync"                   # step kind
+
+[[pipelines.steps]]
+id = "analyze"
+uses = "analyze"
+needs = ["sync"]                # earlier steps that must have finished "done"
+on_failure = "continue"         # "abort" (default): stop the run and fail the event
+timeout_secs = 300              # the step fails after this long
+when = { item = "pr", features = ["analyze_prs"], labels_none = ["skip-ai"] }
+
+[[pipeline_routes]]             # picks the pipeline of a run
+template = "light"
+priority = 10                   # highest first, then declaration order
+when = { item = "pr", paths = ["docs/**", "**/*.md"] }
+
+[pipeline_runs]                 # run history retention
+retention_days = 30             # 0 = no age limit
+max_per_item = 20               # runs kept per issue/PR, newest first (0 = no limit)
+```
+
+No route matches: `standard` runs.
+
+Step kinds: `sync` (refresh the issue/PR from the forge), `triage` (issues),
+`review` (PRs, inline review), `analyze` (PRs, analysis and diagrams),
+`memory` (store the result in ICM when `[daemon] icm_enabled`). A step of the
+other item kind is left out of the run.
+
+Conditions (`when`, on steps and routes; all listed must hold):
+
+| Key | Meaning |
+|-----|---------|
+| `item` | `"issue"` or `"pr"` |
+| `features` | repo toggles that must all be on, e.g. `["triage_issues"]` |
+| `repo_filters` | apply the repo filters (skip_authors, triage labels/age, target_branches) |
+| `labels_any` / `labels_none` | labels on the item (case-insensitive) |
+| `authors` / `skip_authors` | item author logins |
+| `forges` | `github`, `gitlab`, `gitea`, `forgejo`, `azure-devops` |
+| `paths` | PR only: a changed path matches a glob (`*`, `**`, `?`) |
+| `risk` | PR only: risk level of the analysis (`low`, `medium`, `high`) |
+| `repos` | repo slug globs, e.g. `["my-org/*"]` |
+
+A step that does not run is recorded as skipped with the reason
+(`review_prs disabled`, `needs 'sync-pr', which was skipped`, ...).
+
+Routes are evaluated before any step, so on a webhook they read the labels and
+author from the event payload (a label just added by `pull_request.labeled`
+matches); step conditions read the cached item, refreshed by the `sync` step.
+
+Errors never stop the daemon from booting. An invalid TOML pipeline config is
+logged and the repo runs `standard` (a valid `[pipeline_runs]` is kept). A
+pipeline using an unknown step kind falls back to `standard` (logged). An
+unknown name in `when.features` (for instance a toggle renamed by an upgrade) is
+a warning and evaluates to false. `GET /api/v1/repos/{slug}/pipelines` shows
+them all: `toml_error`, `override_error`, `template_errors`, `warnings`.
+
+Limits:
+
+- `timeout_secs` stops the step where it is: what it already did stays (a label
+  set, a comment posted), so partial effects are possible. It is safest on
+  `sync` and `memory`; on `triage`, `review` and `analyze` the config gets a
+  warning.
+- `max_ai_calls` is checked before each step, so the step that crosses the
+  budget finishes. The `analyze` step's diagram runs in the background after the
+  step: it is not started once the budget is used up, but a started diagram
+  (up to `[pr.review_diagrams] max_summary_calls` + 1 calls) is not cut short.
+  Its calls are added to the run when it finishes.
+- A failure that the wrapped pipeline already handled by logging and going on
+  (a triage or review AI error) is recorded as `failed` but does not abort the
+  run, as before.
+
+DB override (multi-pod, shared by every pod): `PUT /api/v1/repos/{slug}/pipelines`
+(admin) with a JSON object holding any of `pipelines`, `pipeline_routes`,
+`pipeline_runs`; each replaces the TOML value (`pipeline_runs` is merged key by
+key). `null` drops the override. The PUT rejects an invalid override; one
+that became invalid later (for instance after an upgrade) only loses its
+invalid sections at run time (`override_error`). `GET` on the same path returns
+the effective, TOML and override values, the errors and warnings, and the
+built-in templates.
+
+Runs: `GET /api/v1/repos/{slug}/runs?item=N` (optionally `&kind=issue|pr`,
+`&limit=50`) returns the runs, newest first: template, trigger, PR head sha,
+status, and per step the status (done / skipped / failed), reason, timings,
+AI calls, summary and findings count.
+
 ## Environment Variables
 
 | Variable | Description |

@@ -22,16 +22,30 @@ struct ReviewOutput {
     review: InlineReviewResult,
 }
 
+/// What the inline review did for one PR. A failure inside the review (diff
+/// fetch, AI call) is reported here rather than as an `Err`, so callers
+/// keep the historical "warn and continue" behaviour while still knowing
+/// it failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewOutcome {
+    Reviewed { comments: u32, posted: bool },
+    Skipped(String),
+    Failed(String),
+}
+
 /// Minimum number of files to trigger per-file chunking instead of full-diff mode.
 const CHUNK_THRESHOLD_FILES: usize = 2;
 
+/// Review the PR(s) of `args`. Per-PR failures are logged and do not fail
+/// the pass; they are returned as outcomes so the daemon's pipeline step
+/// can record them.
 pub async fn run(
     config: &Config,
     db: &dyn DatabaseBackend,
     gh: &GhClient,
     args: &ReviewArgs,
     json: bool,
-) -> Result<()> {
+) -> Result<Vec<(u64, ReviewOutcome)>> {
     let ai = AiBackend::from_config(config, &config.ai.model)?;
 
     // Skills — standing instructions configured in Settings, same mechanism
@@ -49,7 +63,10 @@ pub async fn run(
                 } else {
                     println!("PR #{number} not found in cache. Run `wshm sync` first.");
                 }
-                return Ok(());
+                return Ok(vec![(
+                    number,
+                    ReviewOutcome::Skipped("PR not found in cache".into()),
+                )]);
             }
         }
     } else {
@@ -62,10 +79,11 @@ pub async fn run(
         } else {
             println!("No PRs to review.");
         }
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let mut results: Vec<ReviewOutput> = Vec::with_capacity(pulls.len());
+    let mut outcomes: Vec<(u64, ReviewOutcome)> = Vec::with_capacity(pulls.len());
 
     for pr in &pulls {
         info!("Reviewing PR #{}: {}", pr.number, pr.title);
@@ -77,10 +95,15 @@ pub async fn run(
                 if !json {
                     println!("  PR #{}: empty diff, skipping.", pr.number);
                 }
+                outcomes.push((pr.number, ReviewOutcome::Skipped("empty diff".into())));
                 continue;
             }
             Err(e) => {
                 tracing::warn!("Could not fetch diff for PR #{}: {e}", pr.number);
+                outcomes.push((
+                    pr.number,
+                    ReviewOutcome::Failed(format!("could not fetch the diff: {e}")),
+                ));
                 continue;
             }
         };
@@ -111,6 +134,7 @@ pub async fn run(
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("Failed to review PR #{}: {e:#}", pr.number);
+                outcomes.push((pr.number, ReviewOutcome::Failed(format!("{e:#}"))));
                 continue;
             }
         };
@@ -175,6 +199,13 @@ pub async fn run(
             tracing::warn!("Failed to store review for PR #{}: {e}", pr.number);
         }
 
+        outcomes.push((
+            pr.number,
+            ReviewOutcome::Reviewed {
+                comments: result.comments.len() as u32,
+                posted: posted_to_github,
+            },
+        ));
         results.push(ReviewOutput {
             pr_number: pr.number,
             title: pr.title.clone(),
@@ -190,7 +221,7 @@ pub async fn run(
         println!("{}", serde_json::to_string_pretty(&results)?);
     }
 
-    Ok(())
+    Ok(outcomes)
 }
 
 /// Review each file separately for better context and fewer truncation issues.

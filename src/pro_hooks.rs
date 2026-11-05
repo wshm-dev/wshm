@@ -15,6 +15,7 @@ use std::sync::OnceLock;
 use crate::config::Config;
 use crate::db::backend::DatabaseBackend;
 use crate::git_provider::Forge as GhClient;
+pub use crate::pipelines::review::ReviewOutcome;
 
 // --- Feature gate hook ---
 // Checks if a pro feature is available (license validation).
@@ -87,9 +88,9 @@ pub fn apply_output_hook(text: &str) -> String {
 
 // --- Review / auto-fix entry points ---
 // Inline review and auto-fix are part of wshm-core. These thin wrappers are
-// kept so existing call sites (triage auto-fix, daemon slash commands, the
-// PR event processor) keep a stable entry point. They always run the
-// pipeline and return `Ok(true)`.
+// the single entry points used by the pipeline engine's `review` step and by
+// triage / the `/wshm fix` command. There is no hook: they call the core
+// pipelines directly.
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -112,20 +113,43 @@ pub async fn run_auto_fix(
     Ok(true)
 }
 
-/// Run the inline review pipeline for a given PR number.
+/// Run the inline review for a given PR number and report what it did.
 pub async fn run_review(
     config: &Config,
     db: &dyn DatabaseBackend,
     gh: &GhClient,
     pr_number: u64,
     apply: bool,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<ReviewOutcome> {
     let args = crate::cli::ReviewArgs {
         pr: Some(pr_number),
         apply,
     };
-    crate::pipelines::review::run(config, db, gh, &args, false).await?;
-    Ok(true)
+    let outcomes = crate::pipelines::review::run(config, db, gh, &args, false).await?;
+    Ok(outcomes
+        .into_iter()
+        .find(|(n, _)| *n == pr_number)
+        .map(|(_, o)| o)
+        .unwrap_or_else(|| ReviewOutcome::Skipped("nothing reviewed".into())))
+}
+
+// --- Pipeline step hook ---
+// Pro registers its extra pipeline step kinds here (see
+// `pipelines::engine::steps::Step`). They join the built-in catalog in
+// `StepRegistry::global()`; a Pro kind with the name of a built-in one
+// replaces it.
+
+pub type PipelineStepsFn = fn() -> Vec<std::sync::Arc<dyn crate::pipelines::engine::steps::Step>>;
+
+static PIPELINE_STEPS_HOOK: OnceLock<PipelineStepsFn> = OnceLock::new();
+
+pub fn set_pipeline_steps(f: PipelineStepsFn) {
+    let _ = PIPELINE_STEPS_HOOK.set(f);
+}
+
+/// Extra step kinds registered by Pro (none in the OSS build).
+pub fn pipeline_steps() -> Vec<std::sync::Arc<dyn crate::pipelines::engine::steps::Step>> {
+    PIPELINE_STEPS_HOOK.get().map(|f| f()).unwrap_or_default()
 }
 
 // --- Update hooks ---

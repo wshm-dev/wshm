@@ -5,6 +5,7 @@ pub mod conflict_resolution;
 pub mod context;
 pub mod dashboard;
 pub mod discover_domains;
+pub mod engine;
 pub mod improve;
 pub mod migrate;
 pub mod notify;

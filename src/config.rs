@@ -114,6 +114,26 @@ pub struct Config {
     #[serde(default)]
     pub skills: Vec<SkillDef>,
 
+    /// `[[pipelines]]` — pipeline templates (ordered steps with conditions).
+    /// The built-in `standard` template (today's behaviour) is the default.
+    ///
+    /// Kept raw here and parsed by `pipelines::engine::template::toml_config`:
+    /// an invalid pipeline section must never fail the config load (one
+    /// repo's typo, or a key renamed by an upgrade, would otherwise stop the
+    /// multi-repo daemon from booting). An invalid section is logged, shown
+    /// in `GET /api/v1/repos/{slug}/pipelines`, and the repo runs `standard`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipelines: Option<serde_json::Value>,
+
+    /// `[[pipeline_routes]]` — rules picking the template of a run (raw, see
+    /// `pipelines`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_routes: Option<serde_json::Value>,
+
+    /// `[pipeline_runs]` — retention of the run history (raw, see `pipelines`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_runs: Option<serde_json::Value>,
+
     /// Resolved at runtime, not from config file
     #[serde(skip)]
     pub repo_owner: String,
@@ -548,7 +568,7 @@ pub const DIAGRAM_KINDS: &[&str] = &["architecture", "flow", "changes", "delta",
 
 /// Recursively overlay `over` onto `base` (objects merged key by key, any
 /// other value replaced).
-fn merge_json(base: &mut serde_json::Value, over: &serde_json::Value) {
+pub(crate) fn merge_json(base: &mut serde_json::Value, over: &serde_json::Value) {
     match (base, over) {
         (serde_json::Value::Object(b), serde_json::Value::Object(o)) => {
             for (k, v) in o {
@@ -2820,6 +2840,37 @@ full_sync_interval_hours = 24
 # pipelines = ["pr_review", "review"]
 # enabled = true
 
+# Pipelines: how an issue / PR event is processed. Without any of this, the
+# built-in "standard" pipeline runs: exactly the repo toggles
+# (collect_*, triage_issues, review_prs, analyze_prs, filters). A custom
+# pipeline only honours a toggle listed in its `when.features`. Every run is
+# recorded per step (GET /api/v1/repos/{slug}/runs?item=N). Never read from
+# an issue or PR. Override per repo in the DB: PUT /api/v1/repos/{slug}/pipelines.
+# [[pipelines]]
+# name = "light"                        # a-z 0-9 - _ ; "standard" is reserved
+# max_ai_calls = 2                      # AI call budget of a run (optional)
+#
+# [[pipelines.steps]]
+# id = "sync"
+# uses = "sync"                         # sync | triage | review | analyze | memory
+#
+# [[pipelines.steps]]
+# id = "analyze"
+# uses = "analyze"
+# needs = ["sync"]                      # earlier steps that must be done
+# on_failure = "abort"                  # abort (default) | continue
+# timeout_secs = 300
+# when = { item = "pr", features = ["analyze_prs"], labels_none = ["skip-ai"] }
+#
+# [[pipeline_routes]]                   # highest priority first; no match = standard
+# template = "light"
+# priority = 10
+# when = { item = "pr", paths = ["docs/**", "**/*.md"] }
+#
+# [pipeline_runs]
+# retention_days = 30                   # 0 = no age limit
+# max_per_item = 20                     # runs kept per issue/PR (0 = no limit)
+
 # [assign]
 # enabled = true
 #
@@ -3057,6 +3108,9 @@ impl Default for Config {
             prs_blacklist: Vec::new(),
             labels: Vec::new(),
             skills: Vec::new(),
+            pipelines: None,
+            pipeline_routes: None,
+            pipeline_runs: None,
             repo_owner: String::new(),
             repo_name: String::new(),
             wshm_dir: PathBuf::from(".wshm"),
