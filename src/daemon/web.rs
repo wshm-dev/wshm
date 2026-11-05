@@ -2997,6 +2997,166 @@ async fn api_repo_diagrams_put(
     Json(diagrams_settings_json(&ds)).into_response()
 }
 
+/// Body of the pipeline settings endpoints: the effective config, the raw
+/// per-repo override (null when none), the TOML value, what is wrong with
+/// them (`toml_error`: invalid TOML, the repo runs `standard`;
+/// `override_error(s)`: dropped parts of the override; `template_errors`:
+/// unknown step kinds; `warnings`), the built-in templates and the step
+/// catalog.
+fn pipelines_settings_json(ds: &crate::daemon::DaemonState) -> serde_json::Value {
+    use crate::pipelines::engine::{steps::StepRegistry, template};
+    let registry = StepRegistry::global();
+    let loaded = template::load_full(&ds.config, ds.db.as_ref());
+    // Templates whose step kinds are unknown run `standard` instead.
+    let invalid: Vec<String> = loaded
+        .config
+        .pipelines
+        .iter()
+        .filter_map(|t| template::validate_template_steps(t, &registry).err())
+        .collect();
+    json!({
+        "effective": loaded.config,
+        "override": template::read_override(ds.db.as_ref()).filter(|v| v.is_object()),
+        "toml": template::from_config(&ds.config),
+        "toml_error": loaded.toml_error,
+        "override_error": if loaded.override_errors.is_empty() {
+            serde_json::Value::Null
+        } else {
+            json!(loaded.override_errors.join("; "))
+        },
+        "override_errors": loaded.override_errors,
+        "template_errors": invalid,
+        "warnings": template::warnings(&loaded.config, &registry),
+        "builtin": [template::standard()],
+        "step_kinds": registry.kinds(),
+    })
+}
+
+/// GET /api/v1/repos/{slug}/pipelines -- the repo's pipeline config
+/// (`[[pipelines]]`, `[[pipeline_routes]]`, `[pipeline_runs]`; DB override >
+/// TOML > built-in `standard`).
+async fn api_repo_pipelines_get(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> Response {
+    let repos = state.multi.repos.read().await;
+    match repos.get(&slug) {
+        Some(ds) => Json(pipelines_settings_json(ds)).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("repo '{slug}' not configured")})),
+        )
+            .into_response(),
+    }
+}
+
+/// PUT /api/v1/repos/{slug}/pipelines -- set the per-repo override (admin).
+/// Body: an object with any of `pipelines`, `pipeline_routes`,
+/// `pipeline_runs` (each replaces the TOML value), or `null` to drop the
+/// override. Validated against the step catalog, then stored in the DB
+/// (app_settings) so every pod uses it from its next run.
+async fn api_repo_pipelines_put(
+    State(state): State<Arc<WebState>>,
+    user: axum::Extension<Option<crate::auth::User>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    use crate::pipelines::engine::{steps::StepRegistry, template};
+    if state.users.is_some() {
+        if let Err(e) = require_admin(&user) {
+            return e;
+        }
+    }
+    let ds = match state.multi.repos.read().await.get(&slug) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("repo '{slug}' not configured")})),
+            )
+                .into_response();
+        }
+    };
+    let stored = if body.is_null() {
+        String::new()
+    } else {
+        if let Err(e) = template::validate_override(
+            &template::from_config(&ds.config),
+            &body,
+            &StepRegistry::global(),
+        ) {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
+        }
+        body.to_string()
+    };
+    if let Err(e) = ds
+        .db
+        .set_app_setting(crate::db::settings::PIPELINES_KEY, &stored)
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+    Json(pipelines_settings_json(&ds)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct RunsQuery {
+    /// Issue or PR number.
+    item: Option<u64>,
+    /// `issue` or `pr` (numbers may collide on GitLab / Azure DevOps).
+    kind: Option<String>,
+    limit: Option<usize>,
+}
+
+/// GET /api/v1/repos/{slug}/runs?item=N[&kind=issue|pr][&limit=L] -- the
+/// pipeline runs of the repo (newest first, each with its steps), optionally
+/// for one issue/PR.
+async fn api_repo_runs(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+    Query(q): Query<RunsQuery>,
+) -> Response {
+    let ds = match state.multi.repos.read().await.get(&slug) {
+        Some(d) => d.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("repo '{slug}' not configured")})),
+            )
+                .into_response();
+        }
+    };
+    let kind = match q.kind.as_deref().filter(|k| !k.is_empty()) {
+        None => None,
+        Some(k) => match crate::pipelines::engine::ItemKind::parse(k) {
+            Some(k) => Some(k.as_str().to_string()),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "kind must be 'issue' or 'pr'"})),
+                )
+                    .into_response();
+            }
+        },
+    };
+    let filter = crate::db::runs::PipelineRunFilter {
+        item_kind: kind,
+        item_number: q.item,
+    };
+    let limit = q.limit.unwrap_or(50).clamp(1, crate::db::runs::MAX_LIST);
+    match ds.db.list_pipeline_runs(&filter, limit) {
+        Ok(runs) => Json(json!({ "runs": runs })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 /// POST /api/v1/repos/{slug}/domains/discover -- infer the repo's grand domains
 /// from the frequency of subjects across ALL its PR & issue titles and merge
 /// the top ones into the DB set as PROPOSED. Deterministic and instant (no AI),
@@ -4285,6 +4445,11 @@ pub fn oss_api_routes() -> Router<Arc<WebState>> {
             "/api/v1/repos/{slug}/diagrams",
             get(api_repo_diagrams_get).put(api_repo_diagrams_put),
         )
+        .route(
+            "/api/v1/repos/{slug}/pipelines",
+            get(api_repo_pipelines_get).put(api_repo_pipelines_put),
+        )
+        .route("/api/v1/repos/{slug}/runs", get(api_repo_runs))
         .route("/diagrams/_assets/{file}", get(diagram_asset))
         .route("/diagrams/{owner}/{repo}/{pr}", get(diagram_page))
         .route(
@@ -4400,4 +4565,103 @@ pub fn web_routes_with_extensions(
             auth_middleware,
         ))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod pipeline_api_tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    fn router() -> Router {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+        let mut config = crate::config::Config {
+            repo_owner: "o".into(),
+            repo_name: "r".into(),
+            ..Default::default()
+        };
+        config.web.password = Some("pw".into());
+        let db: Arc<dyn crate::db::backend::DatabaseBackend> =
+            Arc::new(crate::db::Database::open_memory().unwrap());
+        let id = db
+            .start_pipeline_run(&crate::db::runs::NewPipelineRun {
+                item_kind: "pr".into(),
+                item_number: 5,
+                template: "standard".into(),
+                trigger: "pull_request.opened".into(),
+                plan_json: "[]".into(),
+                started_at: chrono::Utc::now().to_rfc3339(),
+                ..Default::default()
+            })
+            .unwrap()
+            .unwrap();
+        db.record_pipeline_step(&crate::db::runs::PipelineStepRunRow {
+            run_id: id,
+            step_id: "sync-pr".into(),
+            uses: "sync".into(),
+            status: "done".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let gh = crate::git_provider::build_provider_with_db(&config, None).unwrap();
+        let ds = crate::daemon::DaemonState::new(db, gh, Arc::new(config), false);
+        let mut repos = std::collections::HashMap::new();
+        repos.insert("o/r".to_string(), Arc::new(ds));
+        web_routes(Arc::new(MultiDaemonState::new(repos)))
+    }
+
+    async fn get(router: Router, uri: &str, auth: bool) -> (StatusCode, serde_json::Value) {
+        let mut req = Request::builder().uri(uri);
+        if auth {
+            let b = base64::engine::general_purpose::STANDARD.encode("admin:pw");
+            req = req.header(header::AUTHORIZATION, format!("Basic {b}"));
+        }
+        let resp = router
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn runs_endpoint_requires_auth_and_filters_by_item() {
+        let (status, _) = get(router(), "/api/v1/repos/o%2Fr/runs?item=5", false).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, body) = get(router(), "/api/v1/repos/o%2Fr/runs?item=5", true).await;
+        assert_eq!(status, StatusCode::OK);
+        let runs = body["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["template"], "standard");
+        assert_eq!(runs[0]["steps"][0]["step_id"], "sync-pr");
+
+        let (_, body) = get(router(), "/api/v1/repos/o%2Fr/runs?item=6", true).await;
+        assert!(body["runs"].as_array().unwrap().is_empty());
+        let (status, _) = get(router(), "/api/v1/repos/o%2Fr/runs?kind=mr", true).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = get(router(), "/api/v1/repos/x%2Fy/runs", true).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn pipelines_endpoint_shows_standard() {
+        let (status, body) = get(router(), "/api/v1/repos/o%2Fr/pipelines", true).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["builtin"][0]["name"], "standard");
+        assert!(body["override"].is_null());
+        assert!(body["step_kinds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k == "analyze"));
+    }
 }

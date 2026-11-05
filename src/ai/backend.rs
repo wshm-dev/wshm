@@ -23,6 +23,7 @@ impl AiBackend {
 
     /// Call the AI and deserialize the JSON response into T.
     pub async fn complete<T: DeserializeOwned>(&self, system: &str, user: &str) -> Result<T> {
+        crate::pipelines::engine::note_ai_call();
         match self {
             AiBackend::Remote(ai) => ai.complete(system, user).await,
             AiBackend::Local(local) => local.complete(system, user),

@@ -144,23 +144,7 @@ pub async fn run(state: Arc<DaemonState>) {
                 dry_run_triage_logged = true;
             }
         } else if state.config.triage.enabled && features.triage_issues {
-            let args = TriageArgs {
-                issue: None,
-                apply: state.apply(),
-                retriage: false,
-            };
-
-            match pipelines::triage::run_with_filters(
-                &state.config,
-                state.db.as_ref(),
-                &*state.gh(),
-                &args,
-                pipelines::triage::OutputFormat::Text,
-                None,
-                Some(&features.filters),
-            )
-            .await
-            {
+            match scheduled_triage(&state, false).await {
                 Ok(()) => {
                     info!("Scheduled triage complete");
 
@@ -196,23 +180,7 @@ pub async fn run(state: Arc<DaemonState>) {
             last_retriage = Instant::now();
             info!("Periodic retriage triggered (interval: {retriage_interval_hours}h)");
 
-            let args = TriageArgs {
-                issue: None,
-                apply: state.apply(),
-                retriage: true,
-            };
-
-            match pipelines::triage::run_with_filters(
-                &state.config,
-                state.db.as_ref(),
-                &*state.gh(),
-                &args,
-                pipelines::triage::OutputFormat::Text,
-                None,
-                Some(&features.filters),
-            )
-            .await
-            {
+            match scheduled_triage(&state, true).await {
                 Ok(()) => info!("Scheduled retriage complete"),
                 Err(e) => error!("Scheduled retriage failed: {e:#}"),
             }
@@ -228,6 +196,11 @@ pub async fn run(state: Arc<DaemonState>) {
             if let Err(e) = state.db.cleanup_old_change_events(retention) {
                 error!("Change history cleanup failed: {e:#}");
             }
+        }
+        // Bounded pipeline run history ([pipeline_runs] retention_days /
+        // max_per_item, DB override included).
+        if let Err(e) = crate::pipelines::engine::cleanup_runs(&state.config, state.db.as_ref()) {
+            error!("Pipeline run cleanup failed: {e:#}");
         }
 
         // Auto-update check — gated on a process-global atomic so only
@@ -248,6 +221,88 @@ pub async fn run(state: Arc<DaemonState>) {
             info!("Daily recap: {} repos active", 1);
         }
     }
+}
+
+/// Scheduled (re)triage through the pipeline engine: the issues the batch
+/// selects (needing triage, or stale for a retriage), each as a partial run
+/// of its template's `triage` steps (trigger `scheduler`), so routes and
+/// step conditions apply as on the webhook path. A run is recorded only
+/// when a step actually runs (otherwise every cycle would record an
+/// all-skipped run per pending issue). Stops at the first AI usage-limit
+/// error, as the batch did.
+async fn scheduled_triage(state: &DaemonState, retriage: bool) -> anyhow::Result<()> {
+    use crate::pipelines::engine::{self, ExecOptions, ItemKind, ItemRef, RunContext, RunSource};
+    let features = state.features();
+    let args = TriageArgs {
+        issue: None,
+        apply: state.apply(),
+        retriage,
+    };
+    let issues = pipelines::triage::select_issues(
+        &state.config,
+        state.db.as_ref(),
+        &args,
+        false,
+        Some(&features.filters),
+    )?;
+    if issues.is_empty() {
+        return Ok(());
+    }
+    info!(
+        "[{}] scheduled {} of {} issue(s) through the pipeline",
+        state.config.repo_slug(),
+        if retriage { "retriage" } else { "triage" },
+        issues.len()
+    );
+    for issue in &issues {
+        if state.config.issues_blacklist.contains(&issue.number) {
+            info!("Skipping blacklisted issue #{}", issue.number);
+            continue;
+        }
+        let ctx = RunContext::new(
+            Arc::clone(&state.config),
+            Arc::clone(&state.db),
+            state.gh(),
+            state.apply(),
+            features.clone(),
+            ItemRef {
+                kind: ItemKind::Issue,
+                number: Some(issue.number),
+            },
+            "scheduler",
+        )
+        .with_source(RunSource::Scheduler);
+        let report = engine::run_kinds(
+            &ctx,
+            &["triage"],
+            ExecOptions {
+                record_only_if_active: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let mut errors: Vec<String> = report
+            .steps
+            .iter()
+            .filter(|s| s.status == engine::StepStatus::Failed)
+            .filter_map(|s| s.reason.clone())
+            .collect();
+        if let Some((id, e)) = &report.failure {
+            error!(
+                "Failed to triage issue #{} (step '{id}'): {e:#}",
+                issue.number
+            );
+            errors.push(format!("{e:#}"));
+        }
+        if errors
+            .iter()
+            .any(|e| pipelines::is_usage_limit_error(&anyhow::anyhow!(e.clone())))
+        {
+            warn!("Aborting scheduled triage — AI usage limit reached");
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Interval of the PR diagram cleanup sweep.

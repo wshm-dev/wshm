@@ -81,6 +81,9 @@ impl DaemonState {
         // Postgres factory) builds its per-repo state here, so this is the one
         // place TOML `[[skills]]` get seeded into the shared DB list.
         crate::config::seed_skills_logged(db.as_ref(), &config.skills);
+        // Same single place for the pipeline config: an invalid one is
+        // reported here and the repo runs `standard`; it never stops the boot.
+        crate::pipelines::engine::log_config_problems(&config, db.as_ref());
         Self {
             db,
             gh: std::sync::RwLock::new(gh),
