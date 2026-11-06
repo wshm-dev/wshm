@@ -61,7 +61,7 @@
 		"data-slot": "sidebar-menu-button",
 		"data-sidebar": "menu-button",
 		"data-size": size,
-		"data-active": isActive,
+		"data-active": isActive || undefined,
 		...restProps,
 	});
 </script>

@@ -37,12 +37,12 @@
 	--chart-3: oklch(0.398 0.07 227.392);
 	--chart-4: oklch(0.828 0.189 84.429);
 	--chart-5: oklch(0.769 0.188 70.08);
-	--sidebar: oklch(0.985 0 0);
+	--sidebar: oklch(0.975 0.002 286);
 	--sidebar-foreground: oklch(0.141 0.005 285.823);
 	--sidebar-border: oklch(0.92 0.004 286.32);
 	--sidebar-primary: oklch(0.546 0.245 262.881);
 	--sidebar-primary-foreground: oklch(0.985 0 0);
-	--sidebar-accent: oklch(0.967 0.001 286.375);
+	--sidebar-accent: oklch(0.935 0.004 286.3);
 	--sidebar-accent-foreground: oklch(0.21 0.006 285.885);
 	--sidebar-ring: oklch(0.623 0.214 259.815);
 	color-scheme: light;
@@ -81,6 +81,96 @@
 	--sidebar-accent-foreground: oklch(0.985 0 0);
 	--sidebar-ring: oklch(0.623 0.214 259.815);
 	color-scheme: dark;
+}
+
+/* =============================================================
+   Color themes (Settings -> Theme). Each one sets data-palette on
+   <html> and works in both light and dark mode. "default" is the
+   blue/zinc base above, so it needs no block. Accent-only themes
+   override --primary; Midnight and Contrast also re-tint surfaces.
+   ============================================================= */
+
+:root[data-palette] {
+	--ring: var(--primary);
+	--sidebar-primary: var(--primary);
+	--sidebar-primary-foreground: var(--primary-foreground);
+	--sidebar-ring: var(--primary);
+}
+
+:root[data-palette='violet'] { --primary: oklch(0.541 0.247 293.009); --primary-foreground: oklch(0.985 0 0); }
+:root.dark[data-palette='violet'] { --primary: oklch(0.606 0.25 292.717); }
+
+:root[data-palette='emerald'] { --primary: oklch(0.596 0.145 163.225); --primary-foreground: oklch(0.985 0 0); }
+:root.dark[data-palette='emerald'] { --primary: oklch(0.696 0.17 162.48); --primary-foreground: oklch(0.21 0.006 285.885); }
+
+:root[data-palette='amber'] { --primary: oklch(0.666 0.179 58.318); --primary-foreground: oklch(0.21 0.006 285.885); }
+:root.dark[data-palette='amber'] { --primary: oklch(0.769 0.188 70.08); }
+
+:root[data-palette='rose'] { --primary: oklch(0.586 0.253 17.585); --primary-foreground: oklch(0.985 0 0); }
+:root.dark[data-palette='rose'] { --primary: oklch(0.645 0.246 16.439); }
+
+:root[data-palette='graphite'] { --primary: oklch(0.21 0.006 285.885); --primary-foreground: oklch(0.985 0 0); }
+:root.dark[data-palette='graphite'] { --primary: oklch(0.92 0.004 286.32); --primary-foreground: oklch(0.21 0.006 285.885); }
+
+:root[data-palette='midnight'] {
+	--primary: oklch(0.52 0.105 223.128);
+	--primary-foreground: oklch(0.985 0 0);
+	--background: oklch(0.985 0.004 250);
+	--card: oklch(1 0 0);
+	--muted: oklch(0.95 0.012 250);
+	--accent: oklch(0.94 0.016 250);
+	--secondary: oklch(0.95 0.012 250);
+	--sidebar: oklch(0.955 0.014 252);
+	--sidebar-accent: oklch(0.915 0.022 252);
+}
+:root.dark[data-palette='midnight'] {
+	--primary: oklch(0.715 0.143 215.221);
+	--primary-foreground: oklch(0.2 0.03 260);
+	--background: oklch(0.16 0.03 262);
+	--card: oklch(0.2 0.034 262);
+	--popover: oklch(0.22 0.036 262);
+	--muted: oklch(0.28 0.04 262);
+	--accent: oklch(0.28 0.04 262);
+	--secondary: oklch(0.28 0.04 262);
+	--muted-foreground: oklch(0.74 0.035 255);
+	--border: oklch(0.75 0.06 255 / 16%);
+	--input: oklch(0.75 0.06 255 / 22%);
+	--sidebar: oklch(0.185 0.034 262);
+	--sidebar-accent: oklch(0.28 0.045 262);
+	--sidebar-border: oklch(0.75 0.06 255 / 16%);
+}
+
+/* High contrast: pure black/white surfaces, strong borders and text. */
+:root[data-palette='contrast'] {
+	--primary: oklch(0.45 0.25 264);
+	--primary-foreground: oklch(1 0 0);
+	--background: oklch(1 0 0);
+	--foreground: oklch(0 0 0);
+	--card: oklch(1 0 0);
+	--muted-foreground: oklch(0.32 0 0);
+	--border: oklch(0.45 0 0);
+	--input: oklch(0.45 0 0);
+	--accent: oklch(0.9 0 0);
+	--sidebar: oklch(1 0 0);
+	--sidebar-foreground: oklch(0 0 0);
+	--sidebar-accent: oklch(0.88 0 0);
+	--sidebar-border: oklch(0.45 0 0);
+}
+:root.dark[data-palette='contrast'] {
+	--primary: oklch(0.78 0.16 250);
+	--primary-foreground: oklch(0 0 0);
+	--background: oklch(0 0 0);
+	--foreground: oklch(1 0 0);
+	--card: oklch(0.12 0 0);
+	--popover: oklch(0.14 0 0);
+	--muted-foreground: oklch(0.88 0 0);
+	--border: oklch(1 0 0 / 50%);
+	--input: oklch(1 0 0 / 55%);
+	--accent: oklch(0.3 0 0);
+	--sidebar: oklch(0.06 0 0);
+	--sidebar-foreground: oklch(1 0 0);
+	--sidebar-accent: oklch(0.3 0 0);
+	--sidebar-border: oklch(1 0 0 / 50%);
 }
 
 @theme inline {
