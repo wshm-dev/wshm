@@ -255,6 +255,25 @@ Some settings had no effect in the open-source `wshm` binary and now run. Check 
 
 `wshm-pro` installs are not affected: these settings already ran there.
 
+#### Going Pro
+
+`wshm-pro` is a separate binary that drops in alongside `wshm` and reuses
+the same `~/.wshm/` data directory — your repos, credentials, and config
+carry over with zero migration.
+
+```bash
+# 1. Get a license at https://wshm.dev/pro
+# 2. Install — Docker, Homebrew, or tarball:
+brew install wshm-dev/tap/wshm-pro
+# or: docker pull innovtech/wshm-pro:latest
+# 3. Activate:
+wshm-pro login --license   # paste the key from your purchase email
+wshm-pro daemon            # boots with Pro features unlocked
+```
+
+Both binaries can coexist. Full install + upgrade guide:
+[`wshm-dev/wshm-pro`](https://github.com/wshm-dev/wshm-pro#upgrading-from-wshm-oss).
+
 ---
 
 ## Interfaces
