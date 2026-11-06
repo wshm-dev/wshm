@@ -732,6 +732,9 @@ export interface RepoDiagramsResponse {
 	toml: DiagramSettings;
 	/** Enterprise license feature `diagram_hosting` (publish target "wshm"). */
 	hosting_available: boolean;
+	/** Enterprise license feature `exports` (publish targets s3, gcs, azure).
+	 *  Older daemons don't send it. */
+	storage_available?: boolean;
 }
 
 export async function fetchRepoDiagrams(slug: string): Promise<RepoDiagramsResponse> {

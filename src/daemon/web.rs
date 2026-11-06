@@ -2943,6 +2943,7 @@ fn diagrams_settings_json(ds: &crate::daemon::DaemonState) -> serde_json::Value 
         "override": over,
         "toml": ds.config.pr.review_diagrams,
         "hosting_available": crate::pro_hooks::has_feature(crate::diagrams::publish::HOSTING_FEATURE),
+        "storage_available": crate::pro_hooks::has_feature(crate::diagrams::publish::STORAGE_FEATURE),
     })
 }
 
