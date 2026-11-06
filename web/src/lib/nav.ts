@@ -24,6 +24,10 @@ import DatabaseBackupIcon from '@lucide/svelte/icons/database-backup';
 import UsersIcon from '@lucide/svelte/icons/users';
 import SettingsIcon from '@lucide/svelte/icons/settings';
 import SearchIcon from '@lucide/svelte/icons/search';
+import BotIcon from '@lucide/svelte/icons/bot';
+import ChartAreaIcon from '@lucide/svelte/icons/chart-area';
+import SquareActivityIcon from '@lucide/svelte/icons/square-activity';
+import ShieldCheckIcon from '@lucide/svelte/icons/shield-check';
 
 export type NavIcon = typeof LayoutDashboardIcon;
 
@@ -54,6 +58,15 @@ export type NavItem = {
 };
 
 export const sectionOrder: NavSection[] = ['Main', 'Automation', 'Insights', 'Activity', 'Admin'];
+
+/** One icon per group, used when the sidebar is collapsed to icons: each
+ *  group then shows as a single button that opens its pages in a flyout. */
+export const sectionIcons: Record<Exclude<NavSection, 'Main'>, NavIcon> = {
+	Automation: BotIcon,
+	Insights: ChartAreaIcon,
+	Activity: SquareActivityIcon,
+	Admin: ShieldCheckIcon
+};
 
 export const allNavItems: NavItem[] = [
 	{ href: '/', label: 'Dashboard', icon: LayoutDashboardIcon, section: 'Main', keywords: 'home overview', shortcut: 'd' },

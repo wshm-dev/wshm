@@ -25,9 +25,11 @@
 		settingsItem,
 		searchItem,
 		activeHref,
+		sectionIcons,
 		type NavItem
 	} from '$lib/nav';
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
+	import SidebarCollapsedProbe from '$lib/components/SidebarCollapsedProbe.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import * as Alert from '$lib/components/ui/alert';
 	import * as Avatar from '$lib/components/ui/avatar';
@@ -61,6 +63,8 @@
 	let license: LicenseInfo | null = $state(null);
 	let bannerOpen: boolean = $state(true);
 	let paletteOpen = $state(false);
+	/** Desktop sidebar reduced to icons (never true on mobile). */
+	let iconMode = $state(false);
 	theme.subscribe((t) => (currentTheme = t));
 
 	function meLabel(m: Me): string {
@@ -411,14 +415,62 @@
 								<Sidebar.MenuItem>{@render navLink(item)}</Sidebar.MenuItem>
 							{/each}
 						</Sidebar.Menu>
+						{#if iconMode}<Sidebar.Separator class="mx-auto mt-1 w-6!" />{/if}
+					</Sidebar.Group>
+				{:else if iconMode}
+					<!-- Icon mode: one button per group, its pages in a flyout, so the
+					     groups stay readable and the rail never overflows. -->
+					{@const SectionIcon = sectionIcons[section.name as keyof typeof sectionIcons]}
+					{@const flat = section.items.flatMap((e) => [e.item, ...e.children])}
+					{@const groupActive = flat.some((i) => i.href === activeUrl)}
+					{@const groupCount = flat.reduce((acc, i) => acc + (i.countAttention ? (countFor(i) ?? 0) : 0), 0)}
+					<Sidebar.Group class="py-0.5">
+						<Sidebar.Menu>
+							<Sidebar.MenuItem>
+								<DropdownMenu.Root>
+									<DropdownMenu.Trigger>
+										{#snippet child({ props })}
+											<Sidebar.MenuButton
+												{...props}
+												isActive={groupActive}
+												title={section.name}
+												aria-label={section.name}
+												class="relative text-sidebar-foreground/75 data-active:text-sidebar-accent-foreground data-active:before:absolute data-active:before:inset-y-1.5 data-active:before:left-0 data-active:before:w-0.5 data-active:before:rounded-full data-active:before:bg-primary data-[state=open]:bg-sidebar-accent"
+											>
+												<SectionIcon />
+												{#if groupCount > 0}
+													<span class="absolute top-1 right-1 size-1.5 rounded-full bg-primary"></span>
+												{/if}
+											</Sidebar.MenuButton>
+										{/snippet}
+									</DropdownMenu.Trigger>
+									<DropdownMenu.Content side="right" align="start" sideOffset={8} class="min-w-52">
+										<DropdownMenu.Label class="text-xs text-muted-foreground">{section.name}</DropdownMenu.Label>
+										{#each flat as i (i.href)}
+											{@const ItemIcon = i.icon}
+											{@const n = countFor(i)}
+											<DropdownMenu.Item
+												onSelect={() => goto(i.href)}
+												class={activeUrl === i.href ? 'bg-accent text-accent-foreground' : ''}
+											>
+												<ItemIcon class="size-4 {i.parent ? 'ml-3' : ''}" />
+												<span class="flex-1">{i.label}</span>
+												{#if n !== null}
+													<span class="text-xs tabular-nums {i.countAttention ? 'text-primary' : 'text-muted-foreground'}">{formatCount(n)}</span>
+												{:else if i.shortcut}
+													<span class="text-xs text-muted-foreground">G {i.shortcut.toUpperCase()}</span>
+												{/if}
+											</DropdownMenu.Item>
+										{/each}
+									</DropdownMenu.Content>
+								</DropdownMenu.Root>
+							</Sidebar.MenuItem>
+						</Sidebar.Menu>
 					</Sidebar.Group>
 				{:else}
-					<!-- In icon-collapsed mode the group labels (fold triggers) are not
-					     visible, so a folded section would leave orphaned, unreachable
-					     items: force every section open while collapsed. -->
 					<Collapsible.Root
-						open={!sidebarOpen || sectionOpen(section)}
-						onOpenChange={(o) => { if (sidebarOpen) setSectionOpen(section.name, o); }}
+						open={sectionOpen(section)}
+						onOpenChange={(o) => setSectionOpen(section.name, o)}
 						class="group/collapsible"
 					>
 						<Sidebar.Group class="py-1">
@@ -519,6 +571,7 @@
 		<Sidebar.Rail />
 	</Sidebar.Root>
 
+	<SidebarCollapsedProbe bind:collapsed={iconMode} />
 	<CommandPalette bind:open={paletteOpen} items={paletteItems} recent={recentPages} />
 
 	<Sidebar.Inset class="min-w-0">
