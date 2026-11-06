@@ -39,6 +39,12 @@ export type NavItem = {
 	parent?: string;
 	/** Extra words the command palette matches on. */
 	keywords?: string;
+	/** Second key of a Linear-style "G then <key>" shortcut. */
+	shortcut?: string;
+	/** Status counter shown as a badge next to the item. */
+	count?: 'open_issues' | 'open_prs' | 'untriaged' | 'conflicts';
+	/** Highlight a non-zero count: it is work waiting on someone. */
+	countAttention?: boolean;
 	/** When set, hide the item unless `license.features[id].enabled === true`. */
 	feature?: string;
 	/** Hide the item unless the daemon reports `is_pro`. For Pro-only
@@ -50,17 +56,17 @@ export type NavItem = {
 export const sectionOrder: NavSection[] = ['Main', 'Automation', 'Insights', 'Activity', 'Admin'];
 
 export const allNavItems: NavItem[] = [
-	{ href: '/', label: 'Dashboard', icon: LayoutDashboardIcon, section: 'Main', keywords: 'home overview' },
-	{ href: '/issues', label: 'Issues', icon: CircleDotIcon, section: 'Main' },
-	{ href: '/prs', label: 'Pull Requests', icon: GitPullRequestIcon, section: 'Main', keywords: 'pr' },
+	{ href: '/', label: 'Dashboard', icon: LayoutDashboardIcon, section: 'Main', keywords: 'home overview', shortcut: 'd' },
+	{ href: '/issues', label: 'Issues', icon: CircleDotIcon, section: 'Main', shortcut: 'i', count: 'open_issues' },
+	{ href: '/prs', label: 'Pull Requests', icon: GitPullRequestIcon, section: 'Main', keywords: 'pr', shortcut: 'p', count: 'open_prs' },
 
-	{ href: '/triage', label: 'Triage', icon: TagsIcon, section: 'Automation', keywords: 'labels' },
-	{ href: '/review', label: 'Code Review', icon: ScanSearchIcon, section: 'Automation' },
+	{ href: '/triage', label: 'Triage', icon: TagsIcon, section: 'Automation', keywords: 'labels', shortcut: 't', count: 'untriaged', countAttention: true },
+	{ href: '/review', label: 'Code Review', icon: ScanSearchIcon, section: 'Automation', shortcut: 'r' },
 	{ href: '/review/radar', label: 'Radar', icon: RadarIcon, section: 'Automation', parent: '/review', keywords: 'review radar' },
 	{ href: '/autofix', label: 'Auto-fix', icon: WandSparklesIcon, section: 'Automation', keywords: 'fix' },
-	{ href: '/conflicts', label: 'Conflicts', icon: GitMergeIcon, section: 'Automation' },
+	{ href: '/conflicts', label: 'Conflicts', icon: GitMergeIcon, section: 'Automation', count: 'conflicts', countAttention: true },
 	{ href: '/improve', label: 'Improvements', icon: LightbulbIcon, section: 'Automation', keywords: 'improve ideas' },
-	{ href: '/queue', label: 'Merge Queue', icon: ListOrderedIcon, section: 'Automation' },
+	{ href: '/queue', label: 'Merge Queue', icon: ListOrderedIcon, section: 'Automation', shortcut: 'q' },
 	{ href: '/actions', label: 'Actions', icon: ZapIcon, section: 'Automation' },
 
 	{ href: '/summary', label: 'Summary', icon: GaugeIcon, section: 'Insights' },
@@ -86,7 +92,8 @@ export const settingsItem: NavItem = {
 	label: 'Settings',
 	icon: SettingsIcon,
 	section: 'Admin',
-	keywords: 'repos secrets license ai provider'
+	keywords: 'repos secrets license ai provider',
+	shortcut: 's'
 };
 
 export const searchItem: NavItem = {

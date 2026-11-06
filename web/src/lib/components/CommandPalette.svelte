@@ -5,7 +5,11 @@
 	import CornerDownLeftIcon from '@lucide/svelte/icons/corner-down-left';
 	import type { NavItem } from '$lib/nav';
 
-	let { open = $bindable(false), items }: { open: boolean; items: NavItem[] } = $props();
+	let {
+		open = $bindable(false),
+		items,
+		recent = []
+	}: { open: boolean; items: NavItem[]; recent?: string[] } = $props();
 
 	let query = $state('');
 	let selected = $state(0);
@@ -15,15 +19,29 @@
 
 	let entries: Entry[] = $derived.by(() => {
 		const q = query.trim().toLowerCase();
-		const pages = items
-			.filter((i) => !q || `${i.label} ${i.section} ${i.keywords ?? ''}`.toLowerCase().includes(q))
-			.map((i) => ({
-				key: i.href,
-				label: i.label,
-				hint: i.section === 'Main' ? 'Page' : i.section,
-				icon: i.icon,
-				href: i.href
-			}));
+		let matched = items.filter(
+			(i) => !q || `${i.label} ${i.section} ${i.keywords ?? ''}`.toLowerCase().includes(q)
+		);
+		const recentSet = new Set(q ? [] : recent);
+		if (!q) {
+			// Empty query: recently visited pages first, like Linear's palette.
+			const byHref = new Map(matched.map((i) => [i.href, i]));
+			const first = recent.map((h) => byHref.get(h)).filter((i): i is NavItem => !!i);
+			matched = [...first, ...matched.filter((i) => !recentSet.has(i.href))];
+		}
+		const pages = matched.map((i) => ({
+			key: i.href,
+			label: i.label,
+			hint: recentSet.has(i.href)
+				? 'Recent'
+				: i.shortcut
+					? `G ${i.shortcut.toUpperCase()}`
+					: i.section === 'Main'
+						? 'Page'
+						: i.section,
+			icon: i.icon,
+			href: i.href
+		}));
 		// Always offer a full-text search so typing an issue title or number
 		// works even when it matches no page name.
 		const search = items.find((i) => i.href === '/search');
@@ -124,6 +142,7 @@
 			<span><kbd class="kbd">↑</kbd> <kbd class="kbd">↓</kbd> to move</span>
 			<span><kbd class="kbd">↵</kbd> to open</span>
 			<span><kbd class="kbd">esc</kbd> to close</span>
+			<span class="ml-auto"><kbd class="kbd">G</kbd> then a letter to jump</span>
 		</div>
 	</Dialog.Content>
 </Dialog.Root>

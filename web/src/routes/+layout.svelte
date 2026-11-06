@@ -11,11 +11,14 @@
 		syncIncremental,
 		syncFull,
 		type RepoInfo,
+		type Status,
 		type Me,
 		type AuthStatus,
 		type LicenseInfo
 	} from '$lib/api';
 	import { canAccessRoute, can } from '$lib/permissions';
+	import { timeAgo } from '$lib/time';
+	import { goto, afterNavigate } from '$app/navigation';
 	import {
 		allNavItems,
 		sectionOrder,
@@ -48,6 +51,9 @@
 	let isLoginRoute = $derived($page.url.pathname === '/login');
 
 	let repos: RepoInfo[] = $state([]);
+	let status: Status | null = $state(null);
+	let selectedRepoValue: string = $state('');
+	selectedRepo.subscribe((v) => (selectedRepoValue = v ?? ''));
 	let sidebarOpen: boolean = $state(true);
 	let currentTheme: Theme = $state('dark');
 	let me: Me | null = $state(null);
@@ -145,11 +151,66 @@
 		window.location.replace('/login');
 	}
 
+	// "G then <key>" jumps (Linear, GitHub). The G arms the sequence for
+	// one second; typing in a field never triggers it.
+	let gArmedUntil = 0;
+	function isTyping(t: EventTarget | null): boolean {
+		const el = t as HTMLElement | null;
+		return !!el && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName));
+	}
 	function onGlobalKeydown(e: KeyboardEvent) {
-		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !isLoginRoute) {
+		if (isLoginRoute) return;
+		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
 			e.preventDefault();
 			paletteOpen = !paletteOpen;
+			return;
 		}
+		if (e.metaKey || e.ctrlKey || e.altKey || paletteOpen || isTyping(e.target)) return;
+		const key = e.key.toLowerCase();
+		if (Date.now() < gArmedUntil) {
+			gArmedUntil = 0;
+			const target = paletteItems.find((i) => i.shortcut === key);
+			if (target) {
+				e.preventDefault();
+				goto(target.href);
+			}
+		} else if (key === 'g') {
+			gArmedUntil = Date.now() + 1000;
+		}
+	}
+
+	// Recently visited pages, newest first, for the palette.
+	const RECENT_KEY = 'wshm-recent-pages';
+	let recentPages: string[] = $state([]);
+	afterNavigate(() => {
+		const href = activeHref($page.url.pathname, paletteItems);
+		if (!href || href === '/search') return;
+		recentPages = [href, ...recentPages.filter((h) => h !== href)].slice(0, 4);
+		try { localStorage.setItem(RECENT_KEY, JSON.stringify(recentPages)); } catch { /* ignore */ }
+	});
+
+	// Badge counts follow the repo picked in the switcher.
+	let counts = $derived.by(() => {
+		if (!status) return null;
+		if (selectedRepoValue === '') return status;
+		return status.repos.find((r) => r.slug === selectedRepoValue) ?? null;
+	});
+	function countFor(item: NavItem): number | null {
+		if (!item.count || !counts) return null;
+		const n = counts[item.count];
+		return typeof n === 'number' && n > 0 ? n : null;
+	}
+	function formatCount(n: number): string {
+		return n > 999 ? `${Math.floor(n / 1000)}k` : String(n);
+	}
+	// Status and RepoInfo both carry last_sync.
+	let lastSync = $derived(counts?.last_sync ?? null);
+
+	async function refreshStatus() {
+		try {
+			status = await fetchStatus();
+			repos = status.repos;
+		} catch { /* ignore */ }
 	}
 
 	let isMac = $state(true);
@@ -161,11 +222,11 @@
 			if (saved === 'true') sidebarOpen = false;
 		} catch { /* ignore */ }
 		loadFoldedSections();
-		theme.update((t) => t);
 		try {
-			const status = await fetchStatus();
-			repos = status.repos;
+			recentPages = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]');
 		} catch { /* ignore */ }
+		theme.update((t) => t);
+		await refreshStatus();
 		try {
 			me = await fetchMe();
 		} catch { /* ignore */ }
@@ -178,6 +239,12 @@
 		try {
 			bannerOpen = localStorage.getItem('wshm-anon-banner-dismissed') !== 'true';
 		} catch { /* ignore */ }
+	});
+
+	// Keep the badge counts fresh while the app stays open.
+	onMount(() => {
+		const poll = setInterval(refreshStatus, 60_000);
+		return () => clearInterval(poll);
 	});
 
 	function persistBannerDismiss() {
@@ -195,6 +262,7 @@
 			const r = full ? await syncFull() : await syncIncremental();
 			const ok = r.errors?.length === 0;
 			syncMsg = ok ? `Synced ${r.synced.length} repo(s)` : `Partial: ${r.errors?.length} error(s)`;
+			await refreshStatus();
 		} catch (e) {
 			syncMsg = e instanceof Error ? e.message : 'Sync failed';
 		}
@@ -212,22 +280,24 @@
 		}
 	});
 
-	let selectedRepoValue: string = $state('');
-	selectedRepo.subscribe((v) => (selectedRepoValue = v ?? ''));
 	$effect(() => {
 		selectedRepo.set(selectedRepoValue === '' ? null : selectedRepoValue);
 	});
 	let repoLabel = $derived(selectedRepoValue === '' ? 'All repos' : selectedRepoValue);
+	let repoSubtitle = $derived(
+		syncMsg ?? (lastSync ? `${repoLabel} · ${timeAgo(lastSync)}` : repoLabel)
+	);
 </script>
 
 <svelte:window onkeydown={onGlobalKeydown} />
 
 {#snippet navLink(item: NavItem)}
 	{@const Icon = item.icon}
+	{@const n = countFor(item)}
 	<Sidebar.MenuButton
 		isActive={activeUrl === item.href}
-		tooltipContent={item.label}
-		class="h-7 text-[0.8125rem] text-sidebar-foreground/75 data-active:text-sidebar-accent-foreground"
+		tooltipContent={item.shortcut ? `${item.label}  ·  G ${item.shortcut.toUpperCase()}` : item.label}
+		class="relative h-7 text-[0.8125rem] text-sidebar-foreground/75 data-active:text-sidebar-accent-foreground data-active:before:absolute data-active:before:inset-y-1.5 data-active:before:left-0 data-active:before:w-0.5 data-active:before:rounded-full data-active:before:bg-primary {n !== null ? 'pr-10' : ''}"
 	>
 		{#snippet child({ props })}
 			<a href={item.href} aria-current={activeUrl === item.href ? 'page' : undefined} {...props}>
@@ -236,6 +306,14 @@
 			</a>
 		{/snippet}
 	</Sidebar.MenuButton>
+	{#if n !== null}
+		<Sidebar.MenuBadge
+			class="top-1 h-5 font-normal tabular-nums {item.countAttention
+				? 'bg-primary/15 text-primary'
+				: 'text-muted-foreground'}"
+			title="{n} {item.count?.replace('_', ' ')}"
+		>{formatCount(n)}</Sidebar.MenuBadge>
+	{/if}
 {/snippet}
 
 {#if isLoginRoute}
@@ -260,7 +338,7 @@
 									<img src="/wizard-icon.png" alt="" class="size-8 shrink-0 rounded-md bg-gray-900 p-0.5" />
 									<div class="grid min-w-0 flex-1 text-left leading-tight">
 										<span class="truncate text-sm font-semibold">wshm</span>
-										<span class="truncate text-xs text-muted-foreground">{syncMsg ?? repoLabel}</span>
+										<span class="truncate text-xs text-muted-foreground" title={lastSync ?? undefined}>{repoSubtitle}</span>
 									</div>
 									<ChevronsUpDownIcon class="ml-auto text-muted-foreground" />
 								</Sidebar.MenuButton>
@@ -441,7 +519,7 @@
 		<Sidebar.Rail />
 	</Sidebar.Root>
 
-	<CommandPalette bind:open={paletteOpen} items={paletteItems} />
+	<CommandPalette bind:open={paletteOpen} items={paletteItems} recent={recentPages} />
 
 	<Sidebar.Inset class="min-w-0">
 		<main class="min-w-0 p-3">
