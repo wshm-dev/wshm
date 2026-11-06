@@ -1166,7 +1166,7 @@
 
 						{#if !licensed}
 							<p class="text-xs text-muted-foreground mt-2">
-								<a href="mailto:contact@wshm.dev" class="text-primary hover:underline">{$t('settings.license.getLicense')}</a>
+								<a href="https://wshm.dev/pro/" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">{$t('settings.license.getLicense')}</a>
 							</p>
 						{/if}
 					</div>
