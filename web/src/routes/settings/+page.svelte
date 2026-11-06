@@ -69,6 +69,11 @@
 
 	// License
 	let license: LicenseInfo | null = $state(null);
+	// Daemons without `licensed` only had the edition flag.
+	let licensed = $derived.by(() => {
+		const l = license as LicenseInfo | null;
+		return l?.licensed ?? l?.is_pro ?? false;
+	});
 	let licenseKey: string = $state('');
 	let activating: boolean = $state(false);
 	let activateMessage: string | null = $state(null);
@@ -1111,11 +1116,13 @@
 				{#if license}
 					<div class="flex items-center gap-3 mb-4">
 						<Badge
-							variant={license.is_pro ? 'outline' : 'secondary'}
-							class={license.is_pro ? 'border-green-500/30 bg-green-500/15 text-green-600 dark:text-green-400' : ''}
+							variant={licensed ? 'outline' : 'secondary'}
+							class={licensed ? 'border-green-500/30 bg-green-500/15 text-green-600 dark:text-green-400' : ''}
 						>{license.plan.toUpperCase()}</Badge>
 						{#if !license.is_pro}
 							<span class="text-sm text-muted-foreground">{$t('settings.license.free')}</span>
+						{:else if !licensed}
+							<span class="text-sm text-muted-foreground">{$t('settings.license.unlicensed')}</span>
 						{/if}
 					</div>
 
@@ -1149,15 +1156,15 @@
 							{@render statusAlert(activateMessage, activateError, 'mb-2')}
 						{/if}
 
-						<p class="text-xs text-muted-foreground mb-2">{license.is_pro ? $t('settings.license.update') : $t('settings.license.enter')}</p>
+						<p class="text-xs text-muted-foreground mb-2">{licensed ? $t('settings.license.update') : $t('settings.license.enter')}</p>
 						<form onsubmit={(e) => { e.preventDefault(); handleActivate(); }} class="flex gap-2">
-							<Input type="text" bind:value={licenseKey} placeholder="wshm-pro-xxxx-xxxx-xxxx" disabled={activating} class="h-8 flex-1" />
+							<Input type="text" bind:value={licenseKey} placeholder="WSHM-XXXX-XXXX-XXXX" disabled={activating} class="h-8 flex-1" />
 							<Button type="submit" disabled={activating || !licenseKey.trim()} size="sm">
 								{activating ? $t('settings.license.activating') : $t('settings.license.activate')}
 							</Button>
 						</form>
 
-						{#if !license.is_pro}
+						{#if !licensed}
 							<p class="text-xs text-muted-foreground mt-2">
 								<a href="mailto:contact@wshm.dev" class="text-primary hover:underline">{$t('settings.license.getLicense')}</a>
 							</p>

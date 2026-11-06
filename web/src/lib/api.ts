@@ -382,7 +382,11 @@ export interface LicenseFeature {
 }
 
 export interface LicenseInfo {
+	/** Enterprise binary (drives the Enterprise-only pages). */
 	is_pro: boolean;
+	/** A license unlocks at least one Enterprise feature. Older daemons
+	 *  don't send it. */
+	licensed?: boolean;
 	plan: string;
 	features: LicenseFeature[];
 	oss_features: string[];

@@ -129,6 +129,7 @@
 
 	"settings.license.title": "Licence",
 	"settings.license.free": "Offre Free",
+	"settings.license.unlicensed": "Pas de licence : les fonctionnalités Enterprise sont verrouillées",
 	"settings.license.ossFeatures": "Fonctionnalités OSS (incluses)",
 	"settings.license.proFeatures": "Fonctionnalités Enterprise",
 	"settings.license.feature.active": "Active",

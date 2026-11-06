@@ -129,6 +129,7 @@
 
 	"settings.license.title": "License",
 	"settings.license.free": "Free tier",
+	"settings.license.unlicensed": "No license: Enterprise features are locked",
 	"settings.license.ossFeatures": "OSS Features (included)",
 	"settings.license.proFeatures": "Enterprise features",
 	"settings.license.feature.active": "Active",
