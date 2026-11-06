@@ -78,6 +78,7 @@
 	"settings.tabs.gitProviders": "Git providers",
 	"settings.tabs.aiProviders": "AI providers",
 	"settings.tabs.license": "License",
+	"settings.tabs.theme": "Theme",
 	"settings.tabs.appearance": "Appearance",
 	"settings.tabs.configuration": "Configuration",
 	"settings.tabs.reliability": "Reliability",

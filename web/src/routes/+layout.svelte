@@ -2,7 +2,7 @@
 	import type { Snippet } from 'svelte';
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { selectedRepo, theme, collapseSidebarSignal, type Theme } from '$lib/stores';
+	import { selectedRepo, theme, themeMode, collapseSidebarSignal, type Theme } from '$lib/stores';
 	import {
 		fetchStatus,
 		fetchMe,
@@ -46,6 +46,7 @@
 	import SearchIcon from '@lucide/svelte/icons/search';
 	import LogOutIcon from '@lucide/svelte/icons/log-out';
 	import SunIcon from '@lucide/svelte/icons/sun';
+	import TimerIcon from '@lucide/svelte/icons/timer';
 	import MoonIcon from '@lucide/svelte/icons/moon';
 	import '../app.css';
 
@@ -76,7 +77,7 @@
 	}
 
 	function toggleTheme() {
-		theme.set(currentTheme === 'dark' ? 'light' : 'dark');
+		themeMode.set(currentTheme === 'dark' ? 'light' : 'dark');
 	}
 
 	function isFeatureLicensed(featureId: string | undefined): boolean {
@@ -142,6 +143,38 @@
 	function persistSidebarOpen(open: boolean) {
 		try { localStorage.setItem('wshm-sidebar-collapsed', String(!open)); } catch { /* ignore */ }
 	}
+
+	// Auto-collapse: once the pointer has been away from the expanded sidebar
+	// for AUTO_COLLAPSE_MS, fold it to icons. On by default, switchable from
+	// the user menu. Not persisted as "collapsed", so a reload re-expands it.
+	const AUTO_COLLAPSE_KEY = 'wshm-sidebar-autocollapse';
+	const AUTO_COLLAPSE_MS = 10_000;
+	let autoCollapse = $state(true);
+	let collapseTimer: ReturnType<typeof setTimeout> | undefined;
+	function stopCollapseTimer() {
+		clearTimeout(collapseTimer);
+		collapseTimer = undefined;
+	}
+	function armCollapseTimer() {
+		stopCollapseTimer();
+		if (!autoCollapse || !sidebarOpen) return;
+		collapseTimer = setTimeout(() => {
+			// Never fold under an open repo/user menu or the palette.
+			const menuOpen = document.querySelector('[data-slot="dropdown-menu-content"]');
+			if (paletteOpen || menuOpen) armCollapseTimer();
+			else sidebarOpen = false;
+		}, AUTO_COLLAPSE_MS);
+	}
+	function setAutoCollapse(on: boolean) {
+		autoCollapse = on;
+		try { localStorage.setItem(AUTO_COLLAPSE_KEY, String(on)); } catch { /* ignore */ }
+		if (on) armCollapseTimer();
+		else stopCollapseTimer();
+	}
+	// Re-arm whenever the sidebar is (re)opened.
+	$effect(() => {
+		if (sidebarOpen && !iconMode) armCollapseTimer();
+	});
 
 	async function handleLogout() {
 		try {
@@ -227,6 +260,9 @@
 		} catch { /* ignore */ }
 		loadFoldedSections();
 		try {
+			autoCollapse = localStorage.getItem(AUTO_COLLAPSE_KEY) !== 'false';
+		} catch { /* ignore */ }
+		try {
 			recentPages = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]');
 		} catch { /* ignore */ }
 		theme.update((t) => t);
@@ -248,7 +284,10 @@
 	// Keep the badge counts fresh while the app stays open.
 	onMount(() => {
 		const poll = setInterval(refreshStatus, 60_000);
-		return () => clearInterval(poll);
+		return () => {
+			clearInterval(poll);
+			stopCollapseTimer();
+		};
 	});
 
 	function persistBannerDismiss() {
@@ -301,7 +340,7 @@
 	<Sidebar.MenuButton
 		isActive={activeUrl === item.href}
 		tooltipContent={item.shortcut ? `${item.label}  ·  G ${item.shortcut.toUpperCase()}` : item.label}
-		class="relative h-7 text-[0.8125rem] text-sidebar-foreground/75 data-active:text-sidebar-accent-foreground data-active:before:absolute data-active:before:inset-y-1.5 data-active:before:left-0 data-active:before:w-0.5 data-active:before:rounded-full data-active:before:bg-primary {n !== null ? 'pr-10' : ''}"
+		class="relative h-7 text-[0.8125rem] text-sidebar-foreground/75 hover:text-sidebar-foreground data-active:bg-primary/12 data-active:text-sidebar-foreground data-active:[&>svg]:text-primary data-active:before:absolute data-active:before:inset-y-1.5 data-active:before:left-0 data-active:before:w-0.5 data-active:before:rounded-full data-active:before:bg-primary {n !== null ? 'pr-10' : ''}"
 	>
 		{#snippet child({ props })}
 			<a href={item.href} aria-current={activeUrl === item.href ? 'page' : undefined} {...props}>
@@ -328,18 +367,27 @@
 	onOpenChange={persistSidebarOpen}
 	style="--sidebar-width: 15rem; --sidebar-width-icon: 3rem;"
 >
-	<Sidebar.Root collapsible="icon">
+	<Sidebar.Root collapsible="icon" onmouseenter={stopCollapseTimer} onmouseleave={armCollapseTimer}>
 		<Sidebar.Header class="gap-1.5">
 			<!-- Repo switcher: the "workspace" picker of Linear / Vercel. Sync
 			     lives here because it acts on the selected repos. -->
-			<Sidebar.Menu>
+			<div class="flex items-center gap-1">
+				<!-- The logo always goes home, also in icon mode. Dark backdrop keeps
+				     the (dark) logo art visible on the light theme. -->
+				<a
+					href="/"
+					title="Home (G D)"
+					aria-label="Home"
+					class="shrink-0 rounded-md p-1 ring-sidebar-ring transition-colors outline-hidden hover:bg-sidebar-accent focus-visible:ring-2 group-data-[collapsible=icon]:p-0"
+				>
+					<img src="/wizard-icon.png" alt="" class="size-8 rounded-md bg-gray-900 p-0.5" />
+				</a>
+			<Sidebar.Menu class="min-w-0 flex-1 group-data-[collapsible=icon]:hidden">
 				<Sidebar.MenuItem>
 					<DropdownMenu.Root>
 						<DropdownMenu.Trigger>
 							{#snippet child({ props })}
-								<Sidebar.MenuButton size="lg" class="data-[state=open]:bg-sidebar-accent" {...props}>
-									<!-- Dark backdrop keeps the (dark) logo art visible on the light theme. -->
-									<img src="/wizard-icon.png" alt="" class="size-8 shrink-0 rounded-md bg-gray-900 p-0.5" />
+								<Sidebar.MenuButton size="lg" class="h-10 data-[state=open]:bg-sidebar-accent" {...props}>
 									<div class="grid min-w-0 flex-1 text-left leading-tight">
 										<span class="truncate text-sm font-semibold">wshm</span>
 										<span class="truncate text-xs text-muted-foreground" title={lastSync ?? undefined}>{repoSubtitle}</span>
@@ -383,6 +431,7 @@
 					</DropdownMenu.Root>
 				</Sidebar.MenuItem>
 			</Sidebar.Menu>
+			</div>
 			<div class="flex items-center gap-1 group-data-[collapsible=icon]:flex-col">
 				<Sidebar.Menu class="min-w-0 flex-1">
 					<Sidebar.MenuItem>
@@ -435,7 +484,7 @@
 												isActive={groupActive}
 												title={section.name}
 												aria-label={section.name}
-												class="relative text-sidebar-foreground/75 data-active:text-sidebar-accent-foreground data-active:before:absolute data-active:before:inset-y-1.5 data-active:before:left-0 data-active:before:w-0.5 data-active:before:rounded-full data-active:before:bg-primary data-[state=open]:bg-sidebar-accent"
+												class="relative text-sidebar-foreground/75 hover:text-sidebar-foreground data-active:bg-primary/12 data-active:text-sidebar-foreground data-active:[&>svg]:text-primary data-active:before:absolute data-active:before:inset-y-1.5 data-active:before:left-0 data-active:before:w-0.5 data-active:before:rounded-full data-active:before:bg-primary data-[state=open]:bg-sidebar-accent"
 											>
 												<SectionIcon />
 												{#if groupCount > 0}
@@ -451,7 +500,7 @@
 											{@const n = countFor(i)}
 											<DropdownMenu.Item
 												onSelect={() => goto(i.href)}
-												class={activeUrl === i.href ? 'bg-accent text-accent-foreground' : ''}
+												class={activeUrl === i.href ? 'bg-primary/12 text-foreground [&>svg]:text-primary' : ''}
 											>
 												<ItemIcon class="size-4 {i.parent ? 'ml-3' : ''}" />
 												<span class="flex-1">{i.label}</span>
@@ -491,14 +540,14 @@
 											<Sidebar.MenuItem>
 												{@render navLink(item)}
 												{#if subs.length > 0}
-													<Sidebar.MenuSub>
+													<Sidebar.MenuSub class="mr-0 border-l-primary/30 bg-black/[0.04] py-1 dark:bg-black/25">
 														{#each subs as sub (sub.href)}
 															{@const SubIcon = sub.icon}
 															<Sidebar.MenuSubItem>
 																<Sidebar.MenuSubButton
 																	href={sub.href}
 																	isActive={activeUrl === sub.href}
-																	class="text-[0.8125rem] text-sidebar-foreground/75 data-active:text-sidebar-accent-foreground"
+																	class="h-6 text-xs text-muted-foreground hover:text-sidebar-foreground data-active:bg-primary/12 data-active:font-medium data-active:text-primary data-active:[&>svg]:text-primary"
 																	aria-current={activeUrl === sub.href ? 'page' : undefined}
 																>
 																	<SubIcon />
@@ -554,6 +603,15 @@
 								</DropdownMenu.Label>
 								<DropdownMenu.Separator />
 							{/if}
+							<DropdownMenu.CheckboxItem
+								checked={autoCollapse}
+								onCheckedChange={(v) => setAutoCollapse(v === true)}
+								closeOnSelect={false}
+							>
+								<TimerIcon class="size-4" />
+								<span class="flex-1">Auto-collapse menu</span>
+								<span class="text-xs text-muted-foreground">10 s</span>
+							</DropdownMenu.CheckboxItem>
 							<DropdownMenu.Item onSelect={toggleTheme}>
 								{#if currentTheme === 'dark'}<SunIcon class="size-4" />{:else}<MoonIcon class="size-4" />{/if}
 								<span class="flex-1">{currentTheme === 'dark' ? 'Light mode' : 'Dark mode'}</span>
