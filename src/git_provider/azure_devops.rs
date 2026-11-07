@@ -548,6 +548,8 @@ impl GitProvider for AzureDevOpsProvider {
             Capability::ReviewDecisions | Capability::CiStatus => true,
             // No reactions on PRs; no repo-wide comment feed to poll.
             Capability::Reactions | Capability::CommentPolling => false,
+            // PR statuses and votes exist but are not wired yet.
+            Capability::CommitStatus | Capability::PrApprovals => false,
         }
     }
 

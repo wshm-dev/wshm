@@ -52,6 +52,56 @@ pub enum Capability {
     /// [`GitProvider::fetch_comments_since`] is implemented (slash commands
     /// in polling mode without webhooks).
     CommentPolling,
+    /// [`GitProvider::set_commit_status`] is implemented (a status the
+    /// branch protection can require: the `status_check` pipeline step).
+    CommitStatus,
+    /// [`GitProvider::fetch_pr_approvals`] is implemented (the `approval`
+    /// pipeline step counts human approvals).
+    PrApprovals,
+}
+
+/// State of a commit status set by [`GitProvider::set_commit_status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitState {
+    Pending,
+    Success,
+    Failure,
+}
+
+impl CommitState {
+    /// GitHub / Gitea spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommitState::Pending => "pending",
+            CommitState::Success => "success",
+            CommitState::Failure => "failure",
+        }
+    }
+}
+
+/// A commit status: `context` names the check (e.g. `wshm/review`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitStatus {
+    pub state: CommitState,
+    pub context: String,
+    /// Short text shown next to the check (forges cap it, ~140 chars).
+    pub description: String,
+}
+
+/// An approving review of a pull request, as returned by
+/// [`GitProvider::fetch_pr_approvals`] (the latest review of each
+/// reviewer, kept only when it approves).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrApproval {
+    pub login: String,
+    /// Commit the approval was given on, when the forge says.
+    pub commit_sha: Option<String>,
+    /// The reviewer is a bot / app account (never counts as a human).
+    pub bot: bool,
+    /// The forge says the reviewer has write access: GitHub
+    /// `author_association` OWNER / MEMBER / COLLABORATOR, Gitea
+    /// `official`. Unknown = false (not counted).
+    pub write_access: bool,
 }
 
 /// The conversation a comment belongs to. GitHub and Gitea share one number
@@ -227,6 +277,20 @@ pub trait GitProvider: Send + Sync {
         Err(unsupported(self.provider_name(), "CI statuses"))
     }
 
+    /// Set a commit status on `sha` (created, or replaced for the same
+    /// `context`). Requires [`Capability::CommitStatus`].
+    async fn set_commit_status(&self, sha: &str, status: &CommitStatus) -> Result<()> {
+        let _ = (sha, status);
+        Err(unsupported(self.provider_name(), "commit statuses"))
+    }
+
+    /// Approving reviews of a pull request (latest review per reviewer).
+    /// Requires [`Capability::PrApprovals`].
+    async fn fetch_pr_approvals(&self, number: u64) -> Result<Vec<PrApproval>> {
+        let _ = number;
+        Err(unsupported(self.provider_name(), "PR approvals"))
+    }
+
     /// Add labels to a pull request (additive).
     async fn label_pr(&self, number: u64, labels: &[String]) -> Result<()>;
 
@@ -286,6 +350,53 @@ pub trait GitProvider: Send + Sync {
     /// Must return `Ok(false)` or an error when this cannot be established:
     /// it gates slash commands.
     async fn is_collaborator(&self, username: &str) -> Result<bool>;
+}
+
+/// Description of a commit status, capped to what forges accept.
+pub fn status_description(s: &str) -> String {
+    if s.chars().count() <= 140 {
+        s.to_string()
+    } else {
+        let mut t: String = s.chars().take(139).collect();
+        t.push('…');
+        t
+    }
+}
+
+/// Approvals from a chronological list of PR reviews in the GitHub / Gitea
+/// shape (`user.login`, `user.type`, `state`, `commit_id`, GitHub
+/// `author_association`, Gitea `official`): the latest
+/// deciding review of each reviewer (comments do not change a decision),
+/// kept when it approves and was not dismissed.
+pub(crate) fn approvals_from_reviews(reviews: &[serde_json::Value]) -> Vec<PrApproval> {
+    let mut latest: Vec<(String, Option<PrApproval>)> = Vec::new();
+    for r in reviews {
+        let Some(login) = r["user"]["login"].as_str().filter(|l| !l.is_empty()) else {
+            continue;
+        };
+        let state = r["state"].as_str().unwrap_or("").to_ascii_uppercase();
+        let decision = match state.as_str() {
+            "APPROVED" if !r["dismissed"].as_bool().unwrap_or(false) => Some(PrApproval {
+                login: login.to_string(),
+                commit_sha: r["commit_id"].as_str().map(str::to_string),
+                bot: r["user"]["type"].as_str() == Some("Bot") || login.ends_with("[bot]"),
+                write_access: matches!(
+                    r["author_association"].as_str(),
+                    Some("OWNER" | "MEMBER" | "COLLABORATOR")
+                ) || r["official"].as_bool() == Some(true),
+            }),
+            "APPROVED" | "CHANGES_REQUESTED" | "REQUEST_CHANGES" | "DISMISSED" => None,
+            _ => continue,
+        };
+        match latest
+            .iter_mut()
+            .find(|(l, _)| l.eq_ignore_ascii_case(login))
+        {
+            Some(slot) => slot.1 = decision,
+            None => latest.push((login.to_string(), decision)),
+        }
+    }
+    latest.into_iter().filter_map(|(_, a)| a).collect()
 }
 
 /// Normalized provider id from config (`None` → "github").
@@ -480,5 +591,31 @@ mod tests {
         assert!(p.supports(Capability::ReviewDecisions));
         assert!(p.as_github().is_some());
         assert_eq!(p.repo_slug(), "rtk-ai/rtk");
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+
+    #[test]
+    fn github_reviews_need_a_write_association() {
+        let reviews: Vec<serde_json::Value> = serde_json::from_value(serde_json::json!([
+            {"user": {"login": "owner"}, "state": "APPROVED", "commit_id": "h", "author_association": "OWNER"},
+            {"user": {"login": "member"}, "state": "APPROVED", "commit_id": "h", "author_association": "MEMBER"},
+            {"user": {"login": "collab"}, "state": "APPROVED", "commit_id": "h", "author_association": "COLLABORATOR"},
+            {"user": {"login": "drive-by"}, "state": "APPROVED", "commit_id": "h", "author_association": "CONTRIBUTOR"},
+            {"user": {"login": "anon"}, "state": "APPROVED", "commit_id": "h"},
+            {"user": {"login": "app[bot]", "type": "Bot"}, "state": "APPROVED", "commit_id": "h", "author_association": "MEMBER"}
+        ]))
+        .unwrap();
+        let a = approvals_from_reviews(&reviews);
+        let counted: Vec<&str> = a
+            .iter()
+            .filter(|a| a.write_access && !a.bot)
+            .map(|a| a.login.as_str())
+            .collect();
+        assert_eq!(counted, ["owner", "member", "collab"]);
+        assert_eq!(a.len(), 6, "all parsed; the approval step filters");
     }
 }

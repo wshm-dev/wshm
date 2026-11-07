@@ -16,6 +16,10 @@ pub struct RecordingForge {
     pub calls: Mutex<Vec<String>>,
     pub collaborators: HashSet<String>,
     pub diff: String,
+    /// Capabilities the forge claims.
+    pub caps: Vec<Capability>,
+    /// Returned by `fetch_pr_approvals`.
+    pub approvals: Vec<super::PrApproval>,
 }
 
 impl RecordingForge {
@@ -50,8 +54,20 @@ impl GitProvider for RecordingForge {
     fn is_authenticated(&self) -> bool {
         true
     }
-    fn supports(&self, _cap: Capability) -> bool {
-        false
+    fn supports(&self, cap: Capability) -> bool {
+        self.caps.contains(&cap)
+    }
+    async fn set_commit_status(&self, sha: &str, status: &super::CommitStatus) -> Result<()> {
+        self.log(format!(
+            "set_commit_status {sha} {} {} {}",
+            status.context,
+            status.state.as_str(),
+            status.description
+        ));
+        Ok(())
+    }
+    async fn fetch_pr_approvals(&self, _number: u64) -> Result<Vec<super::PrApproval>> {
+        Ok(self.approvals.clone())
     }
     async fn fetch_issues(&self, _since: Option<&str>) -> Result<Vec<Issue>> {
         Ok(Vec::new())

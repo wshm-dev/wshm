@@ -460,6 +460,74 @@ impl Client {
         .await
     }
 
+    /// Set a commit status (`POST /repos/{o}/{r}/statuses/{sha}`).
+    pub async fn set_commit_status(
+        &self,
+        sha: &str,
+        status: &crate::git_provider::CommitStatus,
+    ) -> Result<()> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/statuses/{sha}",
+            self.owner, self.repo
+        );
+        let body = serde_json::json!({
+            "state": status.state.as_str(),
+            "context": status.context,
+            "description": crate::git_provider::status_description(&status.description),
+        });
+        // Idempotent per (sha, context): a retry replaces the same status.
+        crate::retry::with_retry("github: set commit status", || async {
+            let response = self
+                .octocrab
+                ._post(&url, Some(&body))
+                .await
+                .with_context(|| format!("Failed to set commit status on {sha}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = self.octocrab.body_to_string(response).await?;
+                anyhow::bail!("Failed to set commit status on {sha}: {status} {body}");
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+    }
+
+    /// Approving reviews of a PR (latest review per reviewer).
+    pub async fn fetch_pr_approvals(
+        &self,
+        number: u64,
+    ) -> Result<Vec<crate::git_provider::PrApproval>> {
+        let mut reviews: Vec<serde_json::Value> = Vec::new();
+        // 10 pages of 100 reviews is far beyond any real PR.
+        for page in 1..=10u32 {
+            let url = format!(
+                "https://api.github.com/repos/{}/{}/pulls/{number}/reviews?per_page=100&page={page}",
+                self.owner, self.repo
+            );
+            let body = crate::retry::with_retry("github: list PR reviews", || async {
+                let resp = self
+                    .octocrab
+                    ._get(&url)
+                    .await
+                    .with_context(|| format!("Failed to list reviews of PR #{number}"))?;
+                self.octocrab
+                    .body_to_string(resp)
+                    .await
+                    .context("Failed to read reviews response body")
+            })
+            .await?;
+            let json: serde_json::Value =
+                serde_json::from_str(&body).context("Failed to parse PR reviews")?;
+            let items = json.as_array().cloned().unwrap_or_default();
+            let n = items.len();
+            reviews.extend(items);
+            if n < 100 {
+                break;
+            }
+        }
+        Ok(crate::git_provider::approvals_from_reviews(&reviews))
+    }
+
     /// Submit a review with inline comments on a PR
     pub async fn submit_review(
         &self,

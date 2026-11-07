@@ -20,6 +20,9 @@ pub struct PlannedStep {
     pub uses: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
+    /// Ordering-only dependencies (`after`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
 }
 
 /// Columns written when a run starts.

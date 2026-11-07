@@ -643,6 +643,7 @@ fn validate_webhook(
     } else {
         action
     };
+    let (event_type, action) = normalize_review_event(event_type, action);
 
     Ok((event_type, action, payload))
 }
@@ -774,6 +775,13 @@ fn translate_gitlab(gl_event: &str, p: &Value) -> Option<(String, String, Value)
                 "open" | "reopen" => "opened",
                 // `oldrev` is only present when the update pushed commits.
                 "update" if attrs.get("oldrev").is_some_and(|v| !v.is_null()) => "synchronize",
+                "approved" | "unapproved" | "approval" | "unapproval" => {
+                    return Some((
+                        "pull_request_review".into(),
+                        "submitted".into(),
+                        json!({"action": "submitted", "pull_request": {"number": iid}, "repository": repo}),
+                    ));
+                }
                 _ => return None,
             };
             Some((
@@ -810,6 +818,21 @@ fn translate_gitlab(gl_event: &str, p: &Value) -> Option<(String, String, Value)
     }
 }
 
+/// A review submitted on a PR, as GitHub (`pull_request_review`) or Gitea /
+/// Forgejo (`pull_request_approved`, `pull_request_rejected`, ... with the
+/// `_review_` spelling too) name it: `pull_request_review.submitted` (or
+/// `.dismissed`). Used to re-evaluate approvals and the review status.
+fn normalize_review_event(event_type: String, action: String) -> (String, String) {
+    match event_type.as_str() {
+        "pull_request_review" => (event_type, action),
+        "pull_request_approved"
+        | "pull_request_rejected"
+        | "pull_request_review_approved"
+        | "pull_request_review_rejected" => ("pull_request_review".into(), "submitted".into()),
+        _ => (event_type, action),
+    }
+}
+
 fn should_process_event(event_type: &str, action: &str) -> bool {
     match event_type {
         // `labeled`: only acted on for the injection approval label (#235).
@@ -817,6 +840,9 @@ fn should_process_event(event_type: &str, action: &str) -> bool {
         // `closed` (incl. merged): cleanup of the PR's diagram page, cheap
         // (one PR refresh, no analysis).
         "pull_request" => matches!(action, "opened" | "synchronize" | "closed"),
+        // Approvals changed: only the approval and status steps re-run (no
+        // AI, no review round).
+        "pull_request_review" => matches!(action, "submitted" | "dismissed"),
         "issue_comment" => action == "created",
         _ => false,
     }
@@ -828,7 +854,7 @@ fn extract_number(event_type: &str, payload: &Value) -> Option<u64> {
             .get("issue")
             .and_then(|i| i.get("number"))
             .and_then(|n| n.as_u64()),
-        "pull_request" => payload
+        "pull_request" | "pull_request_review" => payload
             .get("pull_request")
             .and_then(|p| p.get("number"))
             .and_then(|n| n.as_u64()),
@@ -987,6 +1013,35 @@ mod forge_webhook_tests {
             ("pull_request", "synchronize")
         );
         assert!(should_process_event(&ev, &action));
+    }
+
+    #[test]
+    fn review_events_are_normalized_and_processed() {
+        for (ev, action) in [
+            ("pull_request_review", "submitted"),
+            ("pull_request_review", "dismissed"),
+            ("pull_request_approved", ""),
+            ("pull_request_review_rejected", "reviewed"),
+        ] {
+            let (e, a) = normalize_review_event(ev.into(), action.into());
+            assert!(should_process_event(&e, &a), "{ev}.{action}");
+            assert_eq!(
+                extract_number(&e, &json!({"pull_request": {"number": 4}})),
+                Some(4)
+            );
+        }
+        assert!(!should_process_event("pull_request_review", "edited"));
+        let (ev, action, payload) = translate_gitlab(
+            "Merge Request Hook",
+            &json!({"project": {"path_with_namespace": "g/p"},
+                    "object_attributes": {"iid": 3, "action": "approved"}}),
+        )
+        .unwrap();
+        assert_eq!(
+            (ev.as_str(), action.as_str()),
+            ("pull_request_review", "submitted")
+        );
+        assert_eq!(payload["pull_request"]["number"], 3);
     }
 
     #[test]

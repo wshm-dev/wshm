@@ -56,7 +56,9 @@ impl GitProvider for GitHubProvider {
             Capability::Mermaid
             | Capability::ReviewDecisions
             | Capability::Reactions
-            | Capability::CiStatus => true,
+            | Capability::CiStatus
+            | Capability::CommitStatus
+            | Capability::PrApprovals => true,
             // The poller uses the events API instead.
             Capability::CommentPolling => false,
         }
@@ -144,6 +146,14 @@ impl GitProvider for GitHubProvider {
 
     async fn fetch_ci_statuses(&self) -> Result<HashMap<u64, Option<String>>> {
         self.client.fetch_ci_statuses().await
+    }
+
+    async fn set_commit_status(&self, sha: &str, status: &super::CommitStatus) -> Result<()> {
+        self.client.set_commit_status(sha, status).await
+    }
+
+    async fn fetch_pr_approvals(&self, number: u64) -> Result<Vec<super::PrApproval>> {
+        self.client.fetch_pr_approvals(number).await
     }
 
     async fn label_pr(&self, number: u64, labels: &[String]) -> Result<()> {
