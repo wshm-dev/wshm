@@ -159,6 +159,7 @@ async fn process_event(state: &DaemonState, event: &WebhookEvent) {
         match event.event_type.as_str() {
             "issues" => handle_issue(state, event).await,
             "pull_request" => handle_pull_request(state, event).await,
+            "pull_request_review" => handle_pull_request_review(state, event).await,
             "issue_comment" => handle_comment(state, event).await,
             _ => {
                 info!("Unknown event type: {}", event.event_type);
@@ -301,6 +302,33 @@ async fn handle_pull_request(state: &DaemonState, event: &WebhookEvent) -> anyho
     // flow and reads the repo toggles as step conditions), recorded per step.
     let ctx = run_context(state, event, pipelines::engine::ItemKind::Pr);
     pipelines::engine::run_item(&ctx).await
+}
+
+/// A review was submitted or dismissed: re-run only the template's
+/// `risk`, `approval` and `status_check` steps (no AI call, no review
+/// round), so a pending status clears once the approvals are there.
+async fn handle_pull_request_review(
+    state: &DaemonState,
+    event: &WebhookEvent,
+) -> anyhow::Result<()> {
+    let Some(n) = event.number else {
+        return Ok(());
+    };
+    if state.config.prs_blacklist.contains(&n) {
+        info!("Skipping blacklisted PR #{n}");
+        return Ok(());
+    }
+    let ctx = run_context(state, event, pipelines::engine::ItemKind::Pr);
+    pipelines::engine::run_kinds(
+        &ctx,
+        pipelines::engine::APPROVAL_KINDS,
+        pipelines::engine::ExecOptions {
+            record_only_if_active: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .into_result()
 }
 
 /// Pipeline context for an issue / PR event, with the repo's live apply

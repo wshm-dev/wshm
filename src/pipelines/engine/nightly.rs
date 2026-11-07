@@ -2,18 +2,18 @@
 //! branch, outside any PR, a few files per night. Off by default.
 //!
 //! Started by the scheduler once per UTC day after `hour_utc`, by one pod
-//! only (claimed in the shared DB). The files come from `git ls-files` of
-//! the local checkout, filtered by `paths` / `exclude`; a cursor in the DB
+//! only (claimed in the shared DB). The files are the tracked files of the
+//! default branch, read from git objects of the local checkout (never the
+//! working tree, see [`super::repo_files`]), filtered by `paths` / `exclude`; a cursor in the DB
 //! makes each night go on where the previous one stopped. Each file is one
 //! AI call, its content wrapped as an untrusted block and the model output
 //! validated against the file's lines. The run is recorded like the other
 //! runs (item kind `repo`, number 0, template `nightly`, one step); in
 //! apply mode with `create_issue`, one issue lists the findings.
 
-use std::path::Path;
-
 use tracing::{info, warn};
 
+use super::repo_files::Checkout;
 use super::template::NightlyConfig;
 use crate::ai::backend::AiBackend;
 use crate::ai::prompts::nightly_review;
@@ -53,30 +53,15 @@ pub fn claim(
     }
 }
 
-/// Tracked files of the checkout matching the config, sorted.
-pub fn candidate_files(root: &Path, cfg: &NightlyConfig) -> anyhow::Result<Vec<String>> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["ls-files", "-z"])
-        .output()?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "git ls-files failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let mut files: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .split('\0')
-        .filter(|p| !p.is_empty())
+/// Tracked files of the default branch matching the config, sorted.
+pub fn candidate_files(repo: &Checkout, cfg: &NightlyConfig) -> anyhow::Result<Vec<String>> {
+    Ok(repo
+        .files()?
+        .into_iter()
         .filter(|p| super::params::matches_any(&cfg.paths, p))
         .filter(|p| !super::params::matches_any(&cfg.exclude, p))
         .filter(|p| !crate::pipelines::review::should_skip_file(p))
-        .filter_map(crate::ai::output::sanitize_path)
-        .collect();
-    files.sort();
-    files.dedup();
-    Ok(files)
+        .collect())
 }
 
 /// The next `max` files after the stored cursor (wrapping around), and the
@@ -97,11 +82,25 @@ fn next_batch(files: &[String], cursor: Option<&str>, max: usize) -> (Vec<String
 
 /// Comments of the model that point at a real line of the file, sanitized.
 fn validate(r: &mut InlineReviewResult, path: &str, line_count: u64) {
+    use crate::ai::output::{REVIEW_CATEGORIES, SEVERITIES};
     r.comments.retain(|c| c.line >= 1 && c.line <= line_count);
     for c in &mut r.comments {
         c.path = path.to_string();
         c.body = crate::ai::output::sanitize_posted_text(&c.body, 1000);
         c.suggestion = None;
+        // Model-chosen words go into the issue: only the known ones.
+        let sev = c.severity.trim().to_lowercase();
+        c.severity = if SEVERITIES.contains(&sev.as_str()) {
+            sev
+        } else {
+            "info".into()
+        };
+        let cat = c.category.trim().to_lowercase();
+        c.category = if REVIEW_CATEGORIES.contains(&cat.as_str()) {
+            cat
+        } else {
+            "logic".into()
+        };
     }
     r.comments.retain(|c| !c.body.is_empty());
     r.comments.truncate(5);
@@ -124,13 +123,13 @@ pub async fn run_with(
     db: &dyn DatabaseBackend,
     gh: &Forge,
     ai: &AiBackend,
-    root: &Path,
+    repo: &Checkout,
     cfg: &NightlyConfig,
     apply: bool,
 ) -> anyhow::Result<NightlyReport> {
     let started = chrono::Utc::now();
     let t0 = std::time::Instant::now();
-    let files = candidate_files(root, cfg)?;
+    let files = candidate_files(repo, cfg)?;
     let cursor = db.get_app_setting(CURSOR_KEY).ok().flatten();
     let (batch, new_cursor) = next_batch(&files, cursor.as_deref(), cfg.max_files as usize);
     let guard_cfg = crate::ai::guard::load(config, db);
@@ -138,20 +137,12 @@ pub async fn run_with(
     let mut report = NightlyReport::default();
     let (_, calls) = super::count_ai_calls(async {
         for path in &batch {
-            let full = root.join(path);
-            let Ok(canon) = full.canonicalize() else {
+            let Some(text) = repo.read(path, MAX_FILE_BYTES as usize + 1) else {
                 continue;
             };
-            if !canon.starts_with(root) {
+            if text.len() > MAX_FILE_BYTES as usize {
                 continue;
             }
-            match std::fs::metadata(&canon) {
-                Ok(m) if m.is_file() && m.len() <= MAX_FILE_BYTES => {}
-                _ => continue,
-            }
-            let Ok(text) = std::fs::read_to_string(&canon) else {
-                continue;
-            };
             let lines = text.lines().count() as u64;
             if lines == 0 || lines > MAX_LINES {
                 continue;
@@ -232,6 +223,7 @@ fn record(
         id: "nightly".into(),
         uses: "nightly".into(),
         needs: Vec::new(),
+        after: Vec::new(),
     }];
     let run = NewPipelineRun {
         item_kind: ITEM_KIND.into(),
@@ -314,19 +306,8 @@ pub async fn maybe_run(config: &Config, db: &dyn DatabaseBackend, gh: &Forge, ap
         return;
     }
     let slug = config.repo_slug();
-    let Some(root) = config
-        .wshm_dir
-        .parent()
-        .map(|p| {
-            if p.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                p
-            }
-        })
-        .and_then(|p| p.canonicalize().ok())
-    else {
-        warn!("[{slug}] nightly review: no local checkout");
+    let Some(repo) = super::repo_files::default_checkout(config) else {
+        warn!("[{slug}] nightly review: no local checkout of the default branch");
         return;
     };
     let ai = match AiBackend::from_config(config, &config.ai.model) {
@@ -336,7 +317,7 @@ pub async fn maybe_run(config: &Config, db: &dyn DatabaseBackend, gh: &Forge, ap
             return;
         }
     };
-    match run_with(config, db, gh, &ai, &root, &cfg, apply).await {
+    match run_with(config, db, gh, &ai, &repo, &cfg, apply).await {
         Ok(r) => info!(
             "[{slug}] nightly review: {} finding(s) in {} file(s)",
             r.findings.len(),
@@ -383,26 +364,18 @@ mod tests {
 
     #[tokio::test]
     async fn reviews_files_and_records_the_run() {
-        let dir = std::env::temp_dir().join(format!("wshm-nightly-{:x}", rand::random::<u64>()));
-        std::fs::create_dir_all(dir.join("src")).unwrap();
-        let root = dir.canonicalize().unwrap();
-        std::fs::write(root.join("src/a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
-        std::fs::write(root.join("README.md"), "x\n").unwrap();
-        let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args(args)
-                .output()
-                .unwrap()
-        };
-        git(&["init", "-q"]);
-        git(&["add", "."]);
-
+        let root = super::super::repo_files::test_repo::make(
+            &[("src/a.rs", "fn a() {}\nfn b() {}\n"), ("README.md", "x\n")],
+            &[
+                ("src/a.rs", "working tree change, not reviewed\n"),
+                ("src/new.rs", "untracked\n"),
+            ],
+        );
+        let repo = Checkout::open(&root, "main").unwrap();
         let db = crate::db::Database::open_memory().unwrap();
         let gh = crate::git_provider::recording::RecordingForge::default();
         let ai = AiBackend::Mock(
-            r#"{"comments":[{"path":"x","line":2,"body":"b never returns @someone","severity":"error","category":"bug"},{"path":"x","line":99,"body":"out of range"}],"summary":"1 issue"}"#
+            r#"{"comments":[{"path":"x","line":2,"body":"b never returns @someone","severity":"<b>CRITICAL</b>","category":"[pwned](http://x)"},{"path":"x","line":99,"body":"out of range"}],"summary":"1 issue"}"#
                 .into(),
         );
         let cfg = NightlyConfig {
@@ -411,11 +384,23 @@ mod tests {
             ..Default::default()
         };
         let config = Config::default();
-        let r = run_with(&config, &db, &gh, &ai, &root, &cfg, true)
+        let r = run_with(&config, &db, &gh, &ai, &repo, &cfg, true)
             .await
             .unwrap();
         assert_eq!(r.files, ["src/a.rs"], "README.md is outside paths");
-        assert_eq!(r.findings.len(), 1, "line 99 is not in the file");
+        assert_eq!(
+            r.findings.len(),
+            1,
+            "line 99 is not in the file; line 2 only exists in the committed file"
+        );
+        assert_eq!(
+            (
+                r.findings[0].severity.as_str(),
+                r.findings[0].category.as_str()
+            ),
+            ("info", "logic"),
+            "unknown severity / category replaced"
+        );
         assert_eq!(r.findings[0].path, "src/a.rs");
         assert!(
             !r.findings[0].body.contains("@someone"),
@@ -438,7 +423,7 @@ mod tests {
 
         // Dry-run: no issue.
         let gh = crate::git_provider::recording::RecordingForge::default();
-        let r = run_with(&config, &db, &gh, &ai, &root, &cfg, false)
+        let r = run_with(&config, &db, &gh, &ai, &repo, &cfg, false)
             .await
             .unwrap();
         assert!(r.issue.is_none() && gh.calls().is_empty());

@@ -670,15 +670,24 @@ impl GitProvider for GiteaProvider {
     }
 
     async fn fetch_pr_approvals(&self, number: u64) -> Result<Vec<super::PrApproval>> {
-        let v = self
-            .rest
-            .get_json(&self.url(&format!("pulls/{number}/reviews?limit=50")))
-            .await?;
-        // Stale approvals (given on an older commit) keep their commit id,
-        // which the approval step compares with the head.
-        Ok(super::approvals_from_reviews(
-            v.as_array().map(Vec::as_slice).unwrap_or(&[]),
-        ))
+        // Paginated (oldest first). Stale approvals (given on an older
+        // commit) keep their commit id, which the approval step compares
+        // with the head. Gitea has no bot user type: `official` (a reviewer
+        // with write access) is what decides.
+        let mut reviews: Vec<Value> = Vec::new();
+        for page in 1..=20u32 {
+            let v = self
+                .rest
+                .get_json(&self.url(&format!("pulls/{number}/reviews?limit=50&page={page}")))
+                .await?;
+            let items = v.as_array().cloned().unwrap_or_default();
+            let n = items.len();
+            reviews.extend(items);
+            if n < 50 {
+                break;
+            }
+        }
+        Ok(super::approvals_from_reviews(&reviews))
     }
 
     async fn submit_review(
@@ -1117,7 +1126,7 @@ mod tests {
             &format!("{R}/pulls/4/reviews"),
             Reply::json(json!([
                 {"user": {"login": "alice"}, "state": "APPROVED", "commit_id": "old"},
-                {"user": {"login": "bob"}, "state": "APPROVED", "commit_id": "abc123"},
+                {"user": {"login": "bob"}, "state": "APPROVED", "commit_id": "abc123", "official": true},
                 {"user": {"login": "alice"}, "state": "COMMENT", "commit_id": "abc123"},
                 {"user": {"login": "carol"}, "state": "APPROVED", "commit_id": "abc123"},
                 {"user": {"login": "carol"}, "state": "REQUEST_CHANGES", "commit_id": "abc123"},
@@ -1141,12 +1150,16 @@ mod tests {
             json!({"state": "failure", "context": "wshm/review", "description": "1 important finding open"})
         );
         let a = p.fetch_pr_approvals(4).await.unwrap();
-        let who: Vec<(&str, Option<&str>)> = a
+        let who: Vec<(&str, Option<&str>, bool)> = a
             .iter()
-            .map(|a| (a.login.as_str(), a.commit_sha.as_deref()))
+            .map(|a| (a.login.as_str(), a.commit_sha.as_deref(), a.write_access))
             .collect();
         // A comment keeps alice's (stale) approval; carol's change request
         // replaces hers; a dismissed approval does not count.
-        assert_eq!(who, [("alice", Some("old")), ("bob", Some("abc123"))]);
+        // Only `official` reviews (write access) are marked as counting.
+        assert_eq!(
+            who,
+            [("alice", Some("old"), false), ("bob", Some("abc123"), true)]
+        );
     }
 }

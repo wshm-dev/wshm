@@ -259,44 +259,72 @@ pub async fn run(
 /// confirmed findings). Same prompts and output validation as [`run`];
 /// `extra_context` (already wrapped as untrusted blocks, e.g. CLAUDE.md /
 /// REVIEW.md and the code around the changed lines) is appended to every
-/// prompt.
+/// prompt. At most `max_calls` AI calls are made (per-file mode reviews
+/// the first files only).
 pub struct Collected {
     pub result: InlineReviewResult,
-    pub diff: String,
+    /// Files not reviewed because of `max_calls`.
+    pub files_left_out: usize,
     /// The PR text or diff looks like a prompt injection attempt and
     /// mutating actions are disabled for it.
     pub blocked: bool,
 }
 
+/// Files of `diff` the per-file review looks at (all of them in one call
+/// when there are fewer than two).
+fn review_chunks(diff: &str) -> Option<Vec<(String, String)>> {
+    let chunks = inline_review::split_diff_by_file(diff);
+    (chunks.len() >= CHUNK_THRESHOLD_FILES).then(|| {
+        chunks
+            .into_iter()
+            .filter(|(p, _)| !should_skip_file(p))
+            .collect()
+    })
+}
+
+/// AI calls [`collect`] makes for `diff` without a limit.
+pub fn review_calls_needed(diff: &str) -> u32 {
+    review_chunks(diff).map_or(1, |c| c.len() as u32)
+}
+
 pub async fn collect(
     config: &Config,
     db: &dyn DatabaseBackend,
-    gh: &GhClient,
     ai: &AiBackend,
     number: u64,
+    diff: &str,
     extra_context: &str,
+    max_calls: u32,
 ) -> Result<std::result::Result<Collected, String>> {
     let Some(pr) = db.get_pull(number)? else {
         return Ok(Err("PR not found in cache".into()));
     };
-    let diff = gh.fetch_pr_diff(number).await?;
     if diff.trim().is_empty() {
         return Ok(Err("empty diff".into()));
+    }
+    if max_calls == 0 {
+        return Ok(Err("AI call budget reached".into()));
     }
     let guard_cfg = crate::ai::guard::load(config, db);
     let skills = crate::config::load_skills(db);
     let mut suffix = crate::config::skills_prompt(&skills, "review");
     suffix.push_str(extra_context);
-    let file_chunks = inline_review::split_diff_by_file(&diff);
     let pr_body = pr.body.as_deref().unwrap_or("");
-    let mut result = if file_chunks.len() >= CHUNK_THRESHOLD_FILES {
-        review_per_file(ai, &pr.title, pr_body, &file_chunks, &suffix).await?
-    } else {
-        let mut user_prompt = inline_review::build_user_prompt(&pr.title, pr_body, &diff);
-        user_prompt.push_str(&suffix);
-        ai.complete(inline_review::SYSTEM, &user_prompt).await?
+    let mut files_left_out = 0;
+    let mut result = match review_chunks(diff) {
+        Some(mut chunks) => {
+            let max = max_calls as usize;
+            files_left_out = chunks.len().saturating_sub(max);
+            chunks.truncate(max);
+            review_per_file(ai, &pr.title, pr_body, &chunks, &suffix).await?
+        }
+        None => {
+            let mut user_prompt = inline_review::build_user_prompt(&pr.title, pr_body, diff);
+            user_prompt.push_str(&suffix);
+            ai.complete(inline_review::SYSTEM, &user_prompt).await?
+        }
     };
-    let dropped = crate::ai::output::validate_review(&mut result, &diff);
+    let dropped = crate::ai::output::validate_review(&mut result, diff);
     if dropped > 0 {
         info!(
             "PR #{number}: {dropped} review comment(s) dropped (line not in the diff or invalid)"
@@ -307,13 +335,13 @@ pub async fn collect(
         &guard_cfg,
         &[
             ("pull request", pr_text.as_str()),
-            ("pull request diff", diff.as_str()),
+            ("pull request diff", diff),
         ],
     );
     crate::ai::guard::record(db, "pull", number, "review", &assessment);
     Ok(Ok(Collected {
         result,
-        diff,
+        files_left_out,
         blocked: assessment.blocked,
     }))
 }

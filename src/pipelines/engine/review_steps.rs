@@ -9,7 +9,6 @@
 //! content is flagged as a possible prompt injection.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::LazyLock;
 
 use async_trait::async_trait;
@@ -27,8 +26,6 @@ const PR: &[ItemKind] = &[ItemKind::Pr];
 
 /// Max size of one guideline file in the prompt.
 const MAX_DOC_BYTES: usize = 8000;
-/// Larger files are not read for context.
-const MAX_FILE_BYTES: u64 = 1_000_000;
 /// Findings sent to the voters (the rest is not verified, so not posted).
 const MAX_VERIFY: usize = 50;
 /// Posted-finding fingerprints kept per PR.
@@ -75,10 +72,10 @@ impl Step for ContextStep {
     }
 
     async fn run(&self, ctx: &RunContext, def: &StepDef) -> anyhow::Result<StepOutput> {
-        let Some(root) = ctx.repo_root() else {
+        let Some(repo) = super::repo_files::default_checkout(&ctx.config) else {
             ctx.state().context = Some(ReviewContext::default());
             return Ok(StepOutput::done(
-                "no local checkout: no guidelines or code context loaded",
+                "no local checkout of the default branch: no guidelines or code context loaded",
             ));
         };
         let files = params::list_or(&def.with, "files", &["CLAUDE.md", "REVIEW.md"]);
@@ -91,7 +88,7 @@ impl Step for ContextStep {
             let Some(rel) = crate::ai::output::sanitize_path(f) else {
                 continue;
             };
-            if let Some(text) = read_in_root(&root, &rel, MAX_DOC_BYTES) {
+            if let Some(text) = repo.read(&rel, MAX_DOC_BYTES) {
                 let block = crate::ai::untrusted::wrap_context_whole(
                     "repository guidelines",
                     &format!("# {rel}\n\n{text}"),
@@ -117,7 +114,7 @@ impl Step for ContextStep {
             let Some(rel) = crate::ai::output::sanitize_path(&path) else {
                 continue;
             };
-            let Some(text) = read_in_root(&root, &rel, usize::MAX) else {
+            let Some(text) = repo.read(&rel, usize::MAX) else {
                 continue;
             };
             let snippet = around_lines(&text, &ranges, around);
@@ -139,25 +136,11 @@ impl Step for ContextStep {
             loaded.join(", ")
         };
         Ok(StepOutput::done(format!(
-            "{docs}; code around the changes of {snippets} file(s)"
+            "{docs}; code around the changes of {snippets} file(s) ({} at {})",
+            repo.rev,
+            &repo.commit[..repo.commit.len().min(7)]
         )))
     }
-}
-
-/// A file of the checkout, at most `max` bytes, only when it resolves
-/// inside `root` (no `..`, no symlink out of the repo).
-fn read_in_root(root: &Path, rel: &str, max: usize) -> Option<String> {
-    let p = root.join(rel).canonicalize().ok()?;
-    if !p.starts_with(root) {
-        return None;
-    }
-    let meta = std::fs::metadata(&p).ok()?;
-    if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
-        return None;
-    }
-    let text = std::fs::read_to_string(&p).ok()?;
-    let end = crate::ai::prompts::truncate_utf8(&text, max);
-    Some(text[..end].to_string())
 }
 
 static RE_OLD_HUNK: LazyLock<regex::Regex> =
@@ -232,25 +215,63 @@ fn to_findings(comments: Vec<InlineComment>, diff: &str) -> Vec<(InlineComment, 
 
 /// `review` with `mode = "collect"`: the inline review, kept for the
 /// `verify` step instead of being posted.
-pub async fn collect_review(ctx: &RunContext) -> anyhow::Result<StepOutput> {
+pub async fn collect_review(ctx: &RunContext, def: &StepDef) -> anyhow::Result<StepOutput> {
     let Some(n) = ctx.item.number else {
         return Ok(StepOutput::skipped("no PR number"));
     };
+    let diff = ctx.pr_diff().await.map_err(anyhow::Error::msg)?;
+    if diff.trim().is_empty() {
+        return Ok(StepOutput::skipped("empty diff"));
+    }
+    // One call per file (or one for a small PR), reserved up front so the
+    // step's and the run's AI budgets hold with steps running alongside.
+    let needed = crate::pipelines::review::review_calls_needed(&diff);
+    let granted = ctx.reserve_ai_calls(def, needed);
+    if granted == 0 {
+        return Ok(StepOutput::skipped("AI call budget reached"));
+    }
     let ai = ctx.ai_for("review")?;
     let extra = context_prompt(ctx);
-    let collected =
-        crate::pipelines::review::collect(&ctx.config, ctx.db.as_ref(), &*ctx.gh, &ai, n, &extra)
-            .await?;
+    let collected = crate::pipelines::review::collect(
+        &ctx.config,
+        ctx.db.as_ref(),
+        &ai,
+        n,
+        &diff,
+        &extra,
+        granted,
+    )
+    .await?;
     let c = match collected {
         Ok(c) => c,
         Err(reason) => return Ok(StepOutput::skipped(reason)),
     };
-    let items = to_findings(c.result.comments, &c.diff);
-    let found = ctx.state().add_findings("review", items);
-    Ok(
-        StepOutput::done(format!("{found} finding(s) collected for verification"))
-            .with_findings(found),
-    )
+    let items = to_findings(c.result.comments, &diff);
+    let found = ctx.state().add_findings("review", items, &diff);
+    let mut summary = format!("{found} finding(s) collected for verification");
+    if c.files_left_out > 0 {
+        summary.push_str(&format!(
+            "; {} file(s) not reviewed (AI call budget)",
+            c.files_left_out
+        ));
+    }
+    Ok(StepOutput::done(summary).with_findings(found))
+}
+
+/// `review` in post mode: the findings of the review just posted, so a
+/// later `status_check` sees them (they were posted as they are, so they
+/// also stand as verified).
+pub async fn record_posted_review(ctx: &RunContext, n: u64) {
+    let Ok(Some(row)) = ctx.db.get_pr_review(n) else {
+        return;
+    };
+    let Ok(diff) = ctx.pr_diff().await else {
+        return;
+    };
+    let items = to_findings(row.result.comments, &diff);
+    let mut st = ctx.state();
+    st.add_findings("review", items, &diff);
+    st.verified = Some(st.findings.clone());
 }
 
 const SECURITY_PARAMS: &[(&str, Param)] = &[("ai", Param::Bool), ("secrets", Param::Bool)];
@@ -314,7 +335,7 @@ impl Step for SecurityStep {
         let secrets = comments.len();
         let mut note = String::new();
         if params::bool_or(&def.with, "ai", true) {
-            if ctx.budget_for(def) == Some(0) {
+            if ctx.reserve_ai_calls(def, 1) == 0 {
                 note = "; AI pass skipped (AI call budget reached)".into();
             } else {
                 let ai = ctx.ai_for("security")?;
@@ -337,7 +358,7 @@ impl Step for SecurityStep {
             }
         }
         let items = to_findings(comments, &diff);
-        let found = ctx.state().add_findings("security", items);
+        let found = ctx.state().add_findings("security", items, &diff);
         Ok(StepOutput::done(format!(
             "{found} security finding(s), {secrets} from the secret patterns{note}"
         ))
@@ -345,11 +366,10 @@ impl Step for SecurityStep {
     }
 }
 
-/// Added lines that look like a committed secret (at most one finding per
-/// file and 20 in all). The secret itself is never echoed.
+/// Added lines that look like a committed secret (one finding per line, 20
+/// at most). The secret itself is never echoed.
 fn secret_findings(diff: &str) -> Vec<InlineComment> {
     let mut out = Vec::new();
-    let mut files = HashSet::new();
     for d in crate::ai::diff::lines(diff) {
         if d.kind != crate::ai::diff::LineKind::Added || out.len() >= 20 {
             continue;
@@ -357,7 +377,7 @@ fn secret_findings(diff: &str) -> Vec<InlineComment> {
         let (Some(path), Some(line)) = (d.path, d.new_line) else {
             continue;
         };
-        if crate::ai::output::has_secret(d.text) && files.insert(path.to_string()) {
+        if crate::ai::output::has_secret(d.text) {
             out.push(InlineComment {
                 path: path.to_string(),
                 line,
@@ -430,13 +450,25 @@ impl Step for VerifyStep {
         findings.truncate(MAX_VERIFY);
 
         let wanted = params::u64_or(&def.with, "voters", 3) as u32;
-        let voters = ctx.budget_for(def).map_or(wanted, |b| b.min(wanted));
-        if voters == 0 {
-            return Ok(StepOutput::skipped(
-                "AI call budget reached: findings not verified, nothing posted",
-            ));
-        }
         let min_votes = params::u64_or(&def.with, "min_votes", u64::from(wanted / 2 + 1)) as u32;
+        // Never fewer voters than votes needed: then nothing is confirmed
+        // and nothing posted, rather than one vote confirming everything.
+        let budget = ctx.budget_for(def).map_or(wanted, |b| b.min(wanted));
+        if budget < min_votes {
+            let why = format!(
+                "only {budget} voter(s) fit in the AI call budget, {min_votes} vote(s) needed: findings not verified, nothing posted"
+            );
+            ctx.state().verify_incomplete = Some(why.clone());
+            return Ok(StepOutput::skipped(why));
+        }
+        let voters = ctx.reserve_ai_calls(def, wanted);
+        if voters < min_votes {
+            let why = format!(
+                "only {voters} voter(s) fit in the AI call budget, {min_votes} vote(s) needed: findings not verified, nothing posted"
+            );
+            ctx.state().verify_incomplete = Some(why.clone());
+            return Ok(StepOutput::skipped(why));
+        }
 
         let diff = ctx.pr_diff().await.map_err(anyhow::Error::msg)?;
         let title = ctx.db.get_pull(n)?.map(|p| p.title).unwrap_or_default();
@@ -485,11 +517,19 @@ impl Step for VerifyStep {
             }
         }
         if ok_voters == 0 {
+            ctx.state().verify_incomplete = Some("every verify voter failed".into());
             return Err(last_err
                 .unwrap_or_else(|| anyhow::anyhow!("no voter answered"))
                 .context("every verify voter failed"));
         }
-        let needed = min_votes.min(ok_voters).max(1);
+        if ok_voters < min_votes {
+            let why = format!(
+                "only {ok_voters} of {voters} voter(s) answered, {min_votes} vote(s) needed: findings not verified, nothing posted"
+            );
+            ctx.state().verify_incomplete = Some(why.clone());
+            return Ok(StepOutput::soft_failed(why));
+        }
+        let needed = min_votes.max(1);
         let max_nits = params::u64_or(&def.with, "max_nits", 3) as usize;
         let mut nits = 0;
         let confirmed: Vec<ReviewFinding> = findings
@@ -522,6 +562,87 @@ impl Step for VerifyStep {
 
 fn fingerprints_key(n: u64) -> String {
     format!("pipeline_posted_findings:{n}")
+}
+
+/// Atomically change the stored fingerprints of PR `n` with `f` (which
+/// returns the new list, or `None` to leave it). Compare-and-set, retried.
+fn update_fingerprints<F>(ctx: &RunContext, n: u64, mut f: F) -> bool
+where
+    F: FnMut(&[String]) -> Option<Vec<String>>,
+{
+    let key = fingerprints_key(n);
+    for _ in 0..5 {
+        let raw = ctx.db.get_app_setting(&key).ok().flatten();
+        let current: Vec<String> = raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let Some(mut next) = f(&current) else {
+            return true;
+        };
+        let start = next.len().saturating_sub(MAX_FINGERPRINTS);
+        next.drain(..start);
+        let Ok(j) = serde_json::to_string(&next) else {
+            return false;
+        };
+        let ok = match &raw {
+            None => ctx.db.set_app_setting_if_absent(&key, &j),
+            Some(old) => ctx.db.compare_and_set_app_setting(&key, old, &j),
+        };
+        match ok {
+            Ok(true) => return true,
+            Ok(false) => continue,
+            Err(e) => {
+                warn!("Could not store the posted findings of PR #{n}: {e:#}");
+                return false;
+            }
+        }
+    }
+    false
+}
+
+/// The confirmed findings not posted before (each fingerprint once, also
+/// within this batch), claimed in the store. Empty when the store cannot
+/// be updated (nothing is posted rather than risking a double post).
+fn claim_fingerprints<'a>(
+    ctx: &RunContext,
+    n: u64,
+    confirmed: &'a [ReviewFinding],
+) -> Vec<&'a ReviewFinding> {
+    let mut fresh = Vec::new();
+    let claimed = update_fingerprints(ctx, n, |current| {
+        fresh.clear();
+        let mut seen: HashSet<String> = current.iter().cloned().collect();
+        for f in confirmed {
+            if seen.insert(f.fingerprint()) {
+                fresh.push(f);
+            }
+        }
+        if fresh.is_empty() {
+            return None;
+        }
+        let mut next = current.to_vec();
+        next.extend(fresh.iter().map(|f| f.fingerprint()));
+        Some(next)
+    });
+    if claimed {
+        fresh
+    } else {
+        Vec::new()
+    }
+}
+
+fn release_fingerprints(ctx: &RunContext, n: u64, fresh: &[&ReviewFinding]) {
+    let gone: HashSet<String> = fresh.iter().map(|f| f.fingerprint()).collect();
+    update_fingerprints(ctx, n, |current| {
+        Some(
+            current
+                .iter()
+                .filter(|f| !gone.contains(*f))
+                .cloned()
+                .collect(),
+        )
+    });
 }
 
 /// Store the review (always) and post the confirmed findings not posted
@@ -565,17 +686,10 @@ async fn post_confirmed(
     } else if ctx.mutations_blocked() {
         "not posted (flagged as possible prompt injection)".to_string()
     } else {
-        let mut seen: Vec<String> = ctx
-            .db
-            .get_app_setting(&fingerprints_key(n))
-            .ok()
-            .flatten()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        let fresh: Vec<&ReviewFinding> = confirmed
-            .iter()
-            .filter(|f| !seen.contains(&f.fingerprint()))
-            .collect();
+        // Claim the new fingerprints before posting (compare-and-set), so
+        // two runs on the same PR (other pod) cannot post them twice; a
+        // failed post gives them back.
+        let fresh = claim_fingerprints(ctx, n, confirmed);
         if fresh.is_empty() {
             if confirmed.is_empty() {
                 "nothing to post".to_string()
@@ -608,17 +722,11 @@ async fn post_confirmed(
             match ctx.gh.submit_review(n, &body, &inline).await {
                 Ok(()) => {
                     posted = true;
-                    seen.extend(fresh.iter().map(|f| f.fingerprint()));
-                    let start = seen.len().saturating_sub(MAX_FINGERPRINTS);
-                    if let Ok(j) = serde_json::to_string(&seen[start..]) {
-                        if let Err(e) = ctx.db.set_app_setting(&fingerprints_key(n), &j) {
-                            warn!("Could not store the posted findings of PR #{n}: {e:#}");
-                        }
-                    }
                     format!("{} posted", fresh.len())
                 }
                 Err(e) => {
                     warn!("Failed to post the verified review on PR #{n}: {e:#}");
+                    release_fingerprints(ctx, n, &fresh);
                     format!("posting failed: {e}")
                 }
             }
@@ -653,33 +761,11 @@ mod tests {
     }
 
     #[test]
-    fn reads_stay_in_the_repo() {
-        let dir = std::env::temp_dir().join(format!("wshm-ctx-{:x}", rand::random::<u64>()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let root = dir.canonicalize().unwrap();
-        std::fs::write(root.join("CLAUDE.md"), "be nice").unwrap();
-        assert_eq!(
-            read_in_root(&root, "CLAUDE.md", 100).as_deref(),
-            Some("be nice")
-        );
-        assert_eq!(read_in_root(&root, "CLAUDE.md", 2).as_deref(), Some("be"));
-        assert!(read_in_root(&root, "../etc/passwd", 100).is_none());
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink("/etc/hosts", root.join("out")).unwrap();
-            assert!(
-                read_in_root(&root, "out", 100).is_none(),
-                "symlink out of the repo"
-            );
-        }
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
     fn secret_patterns_on_added_lines_only() {
-        let diff = "diff --git a/c.env b/c.env\n--- a/c.env\n+++ b/c.env\n@@ -1,1 +1,2 @@\n-token = ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAA\n+token = ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBB\n+ok = 1\n";
+        let diff = "diff --git a/c.env b/c.env\n--- a/c.env\n+++ b/c.env\n@@ -1,1 +1,3 @@\n-token = ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAA\n+token = ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBB\n+ok = 1\n+key = ghp_CCCCCCCCCCCCCCCCCCCCCCCCCCCC\n";
         let f = secret_findings(diff);
-        assert_eq!(f.len(), 1);
+        assert_eq!(f.len(), 2, "two secrets in one file are two findings");
+        assert_eq!(f[1].line, 3);
         assert_eq!((f[0].path.as_str(), f[0].line), ("c.env", 1));
         assert!(!f[0].body.contains("ghp_"), "the secret is never echoed");
     }

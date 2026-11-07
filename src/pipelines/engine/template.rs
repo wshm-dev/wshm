@@ -67,6 +67,11 @@ pub struct StepDef {
     /// run. Otherwise the step is skipped with the reason.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
+    /// Ids of earlier steps this one runs after, whatever their outcome
+    /// (ordering only, for `parallel` templates: unlike `needs`, a skipped
+    /// or failed step does not skip this one).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
     /// Conditions; the step is skipped (with the reason) when one fails.
     #[serde(default, skip_serializing_if = "Condition::is_empty")]
     pub when: Condition,
@@ -370,7 +375,7 @@ when = { item = "pr" }
 [[steps]]
 id = "status"
 uses = "status_check"
-needs = ["verify", "approval"]
+after = ["verify", "approval"]
 on_failure = "continue"
 when = { item = "pr", features = ["review_prs"] }
 "#;
@@ -539,6 +544,13 @@ pub fn validate_template(t: &PipelineTemplate) -> Result<(), String> {
                         b.as_str()
                     )));
                 }
+            }
+        }
+        for a in &s.after {
+            if !seen.contains_key(a.as_str()) {
+                return Err(sctx(format!(
+                    "after '{a}', which is not an earlier step of the pipeline"
+                )));
             }
         }
         if let Some(secs) = s.timeout_secs {

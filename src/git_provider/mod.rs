@@ -98,6 +98,10 @@ pub struct PrApproval {
     pub commit_sha: Option<String>,
     /// The reviewer is a bot / app account (never counts as a human).
     pub bot: bool,
+    /// The forge says the reviewer has write access: GitHub
+    /// `author_association` OWNER / MEMBER / COLLABORATOR, Gitea
+    /// `official`. Unknown = false (not counted).
+    pub write_access: bool,
 }
 
 /// The conversation a comment belongs to. GitHub and Gitea share one number
@@ -360,7 +364,8 @@ pub fn status_description(s: &str) -> String {
 }
 
 /// Approvals from a chronological list of PR reviews in the GitHub / Gitea
-/// shape (`user.login`, `user.type`, `state`, `commit_id`): the latest
+/// shape (`user.login`, `user.type`, `state`, `commit_id`, GitHub
+/// `author_association`, Gitea `official`): the latest
 /// deciding review of each reviewer (comments do not change a decision),
 /// kept when it approves and was not dismissed.
 pub(crate) fn approvals_from_reviews(reviews: &[serde_json::Value]) -> Vec<PrApproval> {
@@ -375,6 +380,10 @@ pub(crate) fn approvals_from_reviews(reviews: &[serde_json::Value]) -> Vec<PrApp
                 login: login.to_string(),
                 commit_sha: r["commit_id"].as_str().map(str::to_string),
                 bot: r["user"]["type"].as_str() == Some("Bot") || login.ends_with("[bot]"),
+                write_access: matches!(
+                    r["author_association"].as_str(),
+                    Some("OWNER" | "MEMBER" | "COLLABORATOR")
+                ) || r["official"].as_bool() == Some(true),
             }),
             "APPROVED" | "CHANGES_REQUESTED" | "REQUEST_CHANGES" | "DISMISSED" => None,
             _ => continue,
@@ -582,5 +591,31 @@ mod tests {
         assert!(p.supports(Capability::ReviewDecisions));
         assert!(p.as_github().is_some());
         assert_eq!(p.repo_slug(), "rtk-ai/rtk");
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+
+    #[test]
+    fn github_reviews_need_a_write_association() {
+        let reviews: Vec<serde_json::Value> = serde_json::from_value(serde_json::json!([
+            {"user": {"login": "owner"}, "state": "APPROVED", "commit_id": "h", "author_association": "OWNER"},
+            {"user": {"login": "member"}, "state": "APPROVED", "commit_id": "h", "author_association": "MEMBER"},
+            {"user": {"login": "collab"}, "state": "APPROVED", "commit_id": "h", "author_association": "COLLABORATOR"},
+            {"user": {"login": "drive-by"}, "state": "APPROVED", "commit_id": "h", "author_association": "CONTRIBUTOR"},
+            {"user": {"login": "anon"}, "state": "APPROVED", "commit_id": "h"},
+            {"user": {"login": "app[bot]", "type": "Bot"}, "state": "APPROVED", "commit_id": "h", "author_association": "MEMBER"}
+        ]))
+        .unwrap();
+        let a = approvals_from_reviews(&reviews);
+        let counted: Vec<&str> = a
+            .iter()
+            .filter(|a| a.write_access && !a.bot)
+            .map(|a| a.login.as_str())
+            .collect();
+        assert_eq!(counted, ["owner", "member", "collab"]);
+        assert_eq!(a.len(), 6, "all parsed; the approval step filters");
     }
 }

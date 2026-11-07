@@ -46,6 +46,10 @@ pub struct ReviewFinding {
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
+    /// Text of the targeted line (trimmed): tells two findings with the
+    /// same wording apart while surviving a line shift.
+    #[serde(default)]
+    pub anchor: String,
 }
 
 impl ReviewFinding {
@@ -64,7 +68,9 @@ impl ReviewFinding {
         }
     }
 
-    /// Stable key of the finding, to avoid posting it twice on a PR.
+    /// Stable key of the finding, to avoid posting it twice on a PR: path,
+    /// category, wording and the text of the targeted line (not its number,
+    /// which moves when lines are added above).
     pub fn fingerprint(&self) -> String {
         use sha2::{Digest, Sha256};
         let norm: String = self
@@ -79,6 +85,8 @@ impl ReviewFinding {
         h.update(self.category.as_bytes());
         h.update([0]);
         h.update(norm.as_bytes());
+        h.update([0]);
+        h.update(self.anchor.trim().as_bytes());
         format!("{:x}", h.finalize())[..16].to_string()
     }
 }
@@ -183,8 +191,22 @@ impl ApprovalInfo {
     }
 }
 
+/// What a step of the run did (for the steps after it).
+#[derive(Debug, Clone)]
+pub struct StepOutcome {
+    pub id: String,
+    pub uses: String,
+    pub status: super::StepStatus,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunState {
+    /// Steps of the run that finished, in completion order.
+    pub outcomes: Vec<StepOutcome>,
+    /// Why the verify step could not confirm the findings (too few voters
+    /// answered or fitted in the budget): they stand unverified.
+    pub verify_incomplete: Option<String>,
     pub context: Option<ReviewContext>,
     /// Findings of the review / security steps, in the order found.
     pub findings: Vec<ReviewFinding>,
@@ -198,9 +220,22 @@ pub struct RunState {
 
 impl RunState {
     /// Add findings, numbering them after the existing ones.
-    pub fn add_findings(&mut self, source: &str, items: Vec<(InlineComment, Severity)>) -> u32 {
+    pub fn add_findings(
+        &mut self,
+        source: &str,
+        items: Vec<(InlineComment, Severity)>,
+        diff: &str,
+    ) -> u32 {
+        let texts: std::collections::HashMap<(&str, u64), &str> = crate::ai::diff::lines(diff)
+            .into_iter()
+            .filter_map(|d| Some(((d.path?, d.new_line?), d.text)))
+            .collect();
         let mut n = 0;
         for (c, severity) in items {
+            let anchor = texts
+                .get(&(c.path.as_str(), c.line))
+                .map(|t| t.trim().to_string())
+                .unwrap_or_default();
             let id = self.findings.len() as u32 + 1;
             self.findings.push(ReviewFinding {
                 id,
@@ -211,6 +246,7 @@ impl RunState {
                 category: c.category,
                 body: c.body,
                 suggestion: c.suggestion,
+                anchor,
             });
             n += 1;
         }
@@ -270,12 +306,23 @@ mod tests {
     #[test]
     fn fingerprint_ignores_case_and_spacing() {
         let mut s = RunState::default();
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,3 @@\n x\n+let k = \"one\";\n+let k = \"two\";\n";
         s.add_findings(
             "review",
-            vec![(comment("a.rs", 2, "error"), Severity::Important)],
+            vec![
+                (comment("a.rs", 2, "error"), Severity::Important),
+                (comment("a.rs", 3, "error"), Severity::Important),
+            ],
+            diff,
         );
+        assert_eq!(s.findings[0].anchor, "let k = \"one\";");
         let mut f = s.findings[0].clone();
         let a = f.fingerprint();
+        assert_ne!(
+            a,
+            s.findings[1].fingerprint(),
+            "same wording on another line is another finding"
+        );
         f.body = "  B ".into();
         f.line = 9;
         assert_eq!(a, f.fingerprint(), "a moved line is the same finding");

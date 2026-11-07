@@ -302,7 +302,7 @@ impl Step for ReviewStep {
     async fn run(&self, ctx: &RunContext, def: &StepDef) -> anyhow::Result<StepOutput> {
         use crate::pipelines::review::ReviewOutcome;
         if super::params::str_or(&def.with, "mode", "post") == "collect" {
-            return super::review_steps::collect_review(ctx).await;
+            return super::review_steps::collect_review(ctx, def).await;
         }
         let Some(n) = ctx.item.number else {
             return Ok(StepOutput::skipped("no PR number"));
