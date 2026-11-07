@@ -2,6 +2,7 @@
 	import { page } from '$app/stores';
 	import { onMount } from 'svelte';
 	import { fetchPulls, type PullRequest } from '$lib/api';
+	import { itemRef } from '$lib/stores';
 	import * as Card from '$lib/components/ui/card';
 	import PrDetail from '$lib/components/PrDetail.svelte';
 	import RunGraph from '$lib/components/RunGraph.svelte';
@@ -34,7 +35,7 @@
 {:else if pr}
 	<div class="mb-4">
 		<h2 class="text-xl font-semibold text-foreground">
-			<span class="mono text-muted-foreground">#{pr.number}</span> {pr.title}
+			<span class="mono text-muted-foreground">{$itemRef(pr.number, 'pr', pr.repo)}</span> {pr.title}
 		</h2>
 	</div>
 	<PrDetail {pr} />

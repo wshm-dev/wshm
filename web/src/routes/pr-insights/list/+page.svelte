@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { selectedRepo } from '$lib/stores';
+	import { selectedRepo, itemRef } from '$lib/stores';
 	import {
 		fetchPrInsights,
 		type PrInsightItem,
@@ -260,7 +260,7 @@
 			<Table.Body>
 				{#each filteredItems as pr (pr.repo + '#' + pr.number)}
 					<Table.Row class="cursor-pointer" onclick={() => openPr(pr)}>
-						<Table.Cell class="px-2 py-1.5 mono text-primary">#{pr.number}</Table.Cell>
+						<Table.Cell class="px-2 py-1.5 mono text-primary">{$itemRef(pr.number)}</Table.Cell>
 						<Table.Cell class="px-2 py-1.5 mono text-xs text-muted-foreground">
 							{pr.repo}
 						</Table.Cell>

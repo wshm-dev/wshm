@@ -2,7 +2,7 @@
 	import type { Snippet } from 'svelte';
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { selectedRepo, theme, themeMode, collapseSidebarSignal, type Theme } from '$lib/stores';
+	import { selectedRepo, theme, themeMode, collapseSidebarSignal, forgeBySlug, type Theme } from '$lib/stores';
 	import {
 		fetchStatus,
 		fetchMe,
@@ -247,6 +247,9 @@
 		try {
 			status = await fetchStatus();
 			repos = status.repos;
+			forgeBySlug.set(
+				Object.fromEntries(status.repos.map((r) => [r.slug, r.git_provider ?? 'github']))
+			);
 		} catch { /* ignore */ }
 	}
 
@@ -311,6 +314,20 @@
 		}
 		syncing = false;
 		setTimeout(() => { if (syncMsg) syncMsg = null; }, 4000);
+	}
+
+	// Forges running without a token. Older daemons only report GitHub.
+	let anonymousForges: string[] = $derived.by(() => {
+		const a = authStatus as AuthStatus | null;
+		return a?.forge_tokens_missing ?? (a && !a.github ? ['github'] : []);
+	});
+	function forgeLabel(f: string): string {
+		return (
+			{ github: 'GitHub', gitlab: 'GitLab', gitea: 'Gitea', forgejo: 'Forgejo', 'azure-devops': 'Azure DevOps' }[f] ?? f
+		);
+	}
+	function forgeSecret(f: string): string {
+		return `a ${f === 'azure-devops' ? 'azure_devops' : f}_token`;
 	}
 
 	// Auto-collapse the sidebar when a content page requests it (e.g. the graph
@@ -634,15 +651,15 @@
 
 	<Sidebar.Inset class="min-w-0">
 		<main class="min-w-0 p-3">
-			{#if authStatus && !authStatus.github && bannerOpen}
+			{#if authStatus && anonymousForges.length > 0 && bannerOpen}
 				<Alert.Root
 					class="mb-3 border-yellow-500/40 bg-yellow-500/10 text-yellow-700 dark:text-yellow-200 [&>svg]:text-yellow-500"
 				>
 					<TriangleAlertIcon />
-					<Alert.Title>Anonymous GitHub mode.</Alert.Title>
+					<Alert.Title>Anonymous {anonymousForges.map(forgeLabel).join(' / ')} mode.</Alert.Title>
 					<Alert.Description class="text-yellow-700/90 dark:text-yellow-200/90">
-						Public repos sync read-only with a 60 req/h limit; labels, comments, and auto-fix actions are skipped.
-						<a href="/settings" class="ml-1 underline">Add a github_token in Settings → Secrets</a>
+						Public repos sync read-only{anonymousForges.includes('github') ? ' with a 60 req/h limit' : ''}; labels, comments, and auto-fix actions are skipped.
+						<a href="/settings" class="ml-1 underline">Add {anonymousForges.map(forgeSecret).join(' / ')} in Settings → Secrets</a>
 						for full functionality.
 					</Alert.Description>
 					<Button

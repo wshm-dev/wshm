@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { selectedRepo } from '$lib/stores';
+	import { selectedRepo, itemRef } from '$lib/stores';
 	import {
 		fetchSummary,
 		fetchIssues,
@@ -191,7 +191,7 @@
 			class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted/50"
 			onclick={() => openPr(pr.number)}
 		>
-			<span class="mono text-yellow-600 dark:text-yellow-400 text-xs w-12 shrink-0">#{pr.number}</span>
+			<span class="mono text-yellow-600 dark:text-yellow-400 text-xs w-12 shrink-0">{$itemRef(pr.number)}</span>
 			{#if pr.has_conflicts}
 				<Badge variant="outline" class="shrink-0 border-red-500/30 bg-red-500/15 text-red-600 dark:text-red-400">conflict</Badge>
 			{:else if pr.risk_level}
@@ -368,7 +368,7 @@
 	<Dialog.Content class="max-h-[85vh] w-[80vw] max-w-[80vw] overflow-y-auto sm:max-w-[80vw]">
 		<Dialog.Header>
 			<Dialog.Title class="flex w-full items-center gap-3 pr-2">
-				<span class="mono text-muted-foreground text-sm">#{activePr?.number ?? ''}</span>
+				<span class="mono text-muted-foreground text-sm">{activePr ? $itemRef(activePr.number, 'pr', activePr.repo) : ''}</span>
 				<span class="text-base font-semibold text-foreground truncate">
 					{activePr?.title ?? (prLoading ? 'Loading…' : '')}
 				</span>

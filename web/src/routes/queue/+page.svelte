@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { selectedRepo } from '$lib/stores';
+	import { selectedRepo, itemRef } from '$lib/stores';
 	import { fetchQueue, fetchPulls, type QueueEntry, type PullRequest } from '$lib/api';
 	import { multiSort, toggleSort as toggle, sortArrow, sortIndex, sortArrowClass, type SortColumn } from '$lib/sort';
 	import { applyFilters, distinctValues } from '$lib/filter';
@@ -184,7 +184,7 @@
 				{#each sorted as entry, i}
 					<Table.Row class="cursor-pointer" onclick={() => openPr(entry.number)}>
 						<Table.Cell class="px-2 py-1.5 mono text-muted-foreground font-bold text-sm">{i + 1}</Table.Cell>
-						<Table.Cell class="px-2 py-1.5 mono">#{entry.number}</Table.Cell>
+						<Table.Cell class="px-2 py-1.5 mono">{$itemRef(entry.number)}</Table.Cell>
 						<Table.Cell class="px-2 py-1.5 truncate">{entry.title}</Table.Cell>
 						<Table.Cell class="px-2 py-1.5">
 							<span class="mono font-bold {scoreColor(entry.score)}">{entry.score}</span>
@@ -227,7 +227,7 @@
 		<Dialog.Content class="sm:max-w-[80vw] max-h-[85vh] overflow-y-auto">
 			<Dialog.Header>
 				<Dialog.Title class="flex w-full items-center gap-3 pr-2 text-base font-semibold">
-					<span class="mono text-muted-foreground text-sm font-normal">#{activePr?.number ?? ''}</span>
+					<span class="mono text-muted-foreground text-sm font-normal">{activePr ? $itemRef(activePr.number, 'pr', activePr.repo) : ''}</span>
 					<span class="truncate">
 						{activePr?.title ?? (prLoading ? 'Loading…' : '')}
 					</span>

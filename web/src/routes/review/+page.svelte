@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { selectedRepo } from '$lib/stores';
+	import { selectedRepo, itemRef } from '$lib/stores';
 	import { fetchReviews, type ReviewEntry } from '$lib/api';
 	import { multiSort, toggleSort as toggle, sortArrow, sortIndex, sortArrowClass, type SortColumn } from '$lib/sort';
 	import { applyFilters, distinctValues } from '$lib/filter';
@@ -158,7 +158,7 @@
 					</Table.Row>
 					{#each paged as r}
 						<Table.Row class="cursor-pointer" onclick={() => toggleExpand(r)}>
-							<Table.Cell class="px-2 py-1.5 font-mono text-primary">#{r.pr_number}</Table.Cell>
+							<Table.Cell class="px-2 py-1.5 font-mono text-primary">{$itemRef(r.pr_number)}</Table.Cell>
 							<Table.Cell class="px-2 py-1.5 overflow-hidden">
 								<div class="truncate">{r.title}</div>
 								{#if r.summary}

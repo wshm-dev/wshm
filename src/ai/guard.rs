@@ -392,8 +392,20 @@ pub async fn on_issue_labeled(
     if payload.get("action").and_then(|v| v.as_str()) != Some("labeled") {
         return None;
     }
-    let label = payload.pointer("/label/name").and_then(|v| v.as_str())?;
-    if !label.eq_ignore_ascii_case(approval) {
+    // GitLab reports every label added by one edit (`added_labels`, set by
+    // the webhook translation); GitHub sends one event per label.
+    let added = payload
+        .get("added_labels")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l.get("name").and_then(|n| n.as_str()));
+    let mut labels = payload
+        .pointer("/label/name")
+        .and_then(|v| v.as_str())
+        .into_iter()
+        .chain(added);
+    if !labels.any(|l| l.eq_ignore_ascii_case(approval)) {
         return None;
     }
     let sender = payload.pointer("/sender/login").and_then(|v| v.as_str())?;

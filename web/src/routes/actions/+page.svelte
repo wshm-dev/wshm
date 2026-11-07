@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { selectedRepo } from '$lib/stores';
+	import { selectedRepo, itemRef } from '$lib/stores';
 	import { fetchStatus, fetchIssues, fetchPulls, fetchAuthStatus, type Status, type Issue, type PullRequest, type AuthStatus } from '$lib/api';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
@@ -430,7 +430,7 @@
 	<Dialog.Content class="sm:max-w-[80vw] max-h-[85vh] overflow-y-auto">
 		<Dialog.Header>
 			<Dialog.Title class="flex w-full items-center gap-3 pr-2 text-base font-semibold">
-				<span class="mono text-muted-foreground text-sm font-normal">#{activePr?.number}</span>
+				<span class="mono text-muted-foreground text-sm font-normal">{activePr ? $itemRef(activePr.number, 'pr', activePr.repo) : ''}</span>
 				<span class="truncate">{activePr?.title}</span>
 			</Dialog.Title>
 		</Dialog.Header>

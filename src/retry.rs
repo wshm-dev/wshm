@@ -161,6 +161,34 @@ pub fn is_transient_connect(err: &anyhow::Error) -> bool {
     CONNECT_TRANSIENT.iter().any(|needle| msg.contains(needle))
 }
 
+/// A `429 Too Many Requests` answer: the server refused the request
+/// before processing it, so re-issuing it (even a create) is safe.
+pub fn is_throttled(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}").to_lowercase();
+    msg.contains("(429 ") || msg.contains("429 too many requests")
+}
+
+/// Attempts [`with_retry`] makes under the current policy (1 = no retry).
+pub fn effective_max_attempts() -> u32 {
+    let cfg = global();
+    if cfg.enabled {
+        cfg.max_attempts.max(1)
+    } else {
+        1
+    }
+}
+
+/// Like [`with_retry_connect_only`], also retrying `429` answers (see
+/// [`is_throttled`]). For writes: never re-issued after a 5xx or a body-read
+/// failure, which may follow a processed request.
+pub async fn with_retry_writes<T, F, Fut>(label: &str, op: F) -> anyhow::Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+{
+    with_retry_classified(label, |e| is_transient_connect(e) || is_throttled(e), op).await
+}
+
 /// Run `op`, retrying transient failures per the global [`RetryConfig`].
 ///
 /// `op` is a closure that returns a fresh future on each call, so a retry
@@ -286,6 +314,15 @@ mod tests {
         .await;
         assert_eq!(result.unwrap(), 3);
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn writes_retry_throttling_but_not_server_errors() {
+        let throttled = anyhow::anyhow!("GitLab API error (429 Too Many Requests) on POST x: slow");
+        assert!(is_throttled(&throttled));
+        let server = anyhow::anyhow!("GitLab API error (502 Bad Gateway) on PUT x: oops");
+        assert!(!is_throttled(&server));
+        assert!(!is_transient_connect(&server));
     }
 
     #[test]

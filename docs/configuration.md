@@ -140,6 +140,8 @@ target = "off"                    # off | local | github-pages | wshm (Enterpris
 enabled = true
 merge_threshold = 15              # minimum score to auto-merge
 strategy = "rebase"               # merge, rebase, squash
+auto_merge = false                # really merge on `queue --apply` / `run --apply` (GitLab)
+required_approvals = 1            # approvals from members with write access, author and bots excluded
 
 [conflicts]
 enabled = true                    # conflict detection (read-only)

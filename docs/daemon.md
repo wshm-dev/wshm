@@ -45,6 +45,8 @@ apply = true
 4. Secret: same as `webhook_secret`
 5. Events: Issues, Pull requests, Issue comments
 
+GitLab uses its own secret token header and event names: see [GitLab](gitlab.md#3-webhook).
+
 ## Multi-Repo
 
 Manage multiple repos from a single daemon instance.

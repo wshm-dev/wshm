@@ -45,6 +45,8 @@ export interface RepoInfo {
 	conflicts: number;
 	last_sync: string | null;
 	apply: boolean;
+	/** Forge of the repo (github, gitlab, gitea, forgejo, azure-devops). */
+	git_provider?: string;
 }
 
 export interface DailyCount {
@@ -501,6 +503,8 @@ export async function removeRepo(slug: string): Promise<{ status: string; slug: 
 export interface AuthStatus {
 	github: boolean;
 	anthropic: 'oauth' | 'api_key' | null;
+	/** Forges of tracked repos running without a token (anonymous mode). */
+	forge_tokens_missing?: string[];
 }
 
 export function fetchAuthStatus(): Promise<AuthStatus> {
@@ -768,8 +772,8 @@ export interface PrGroupPr {
 	number: number;
 	title: string;
 	repo: string;
-	/** Web URL on the repo's forge, when the server could build it. */
-	url?: string;
+	/** Web URL on the repo's forge, built server-side. */
+	url?: string | null;
 }
 /** A secondary subject inside a grand groupe. */
 export interface PrSubGroup {

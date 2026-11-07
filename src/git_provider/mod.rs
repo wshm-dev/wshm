@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use tracing::warn;
 
 use crate::db::issues::Issue;
 use crate::db::pulls::PullRequest;
@@ -361,6 +362,17 @@ pub trait GitProvider: Send + Sync {
         marker: &str,
     ) -> Result<Option<CommentRef>>;
 
+    /// Every comment wshm wrote on the thread (`wshm revert`), including
+    /// those [`Self::find_comment_with_marker`] leaves out on purpose
+    /// (GitLab review notes and inline discussions).
+    async fn find_wshm_comments(&self, thread: Thread, marker: &str) -> Result<Vec<CommentRef>> {
+        Ok(self
+            .find_comment_with_marker(thread, marker)
+            .await?
+            .into_iter()
+            .collect())
+    }
+
     /// Replace a comment's body.
     async fn update_comment(&self, comment: &CommentRef, body: &str) -> Result<()>;
 
@@ -486,7 +498,24 @@ pub fn build_provider_with_db(
 /// vars. Never read from config files, and never `WSHM_TOKEN` /
 /// `GITHUB_TOKEN`: those are GitHub credentials and must not be sent to
 /// another host.
+///
+/// The token is bound to the forge host: a token stored as
+/// `<provider>_token@<host>` is sent to that host only; the provider-wide
+/// token / env var only to the SaaS host or a host listed in
+/// [`FORGE_HOSTS_ENV`]. A plain `http://` URL gets no token unless
+/// [`ALLOW_HTTP_ENV`] is set. So a `git_url` pointing elsewhere never
+/// receives the credentials.
 pub fn forge_token(config: &crate::config::Config, provider: &str) -> Option<String> {
+    let base = forge_base_url(config, provider);
+    let hosts = std::env::var(FORGE_HOSTS_ENV).unwrap_or_default();
+    let binding = token_binding(provider, &base, &hosts, http_forge_allowed());
+    let host = match binding {
+        TokenBinding::Denied(why) => {
+            warn!("{provider}: no token sent to {base}: {why}");
+            return None;
+        }
+        TokenBinding::PerHostOnly(ref h) | TokenBinding::Any(ref h) => h.clone(),
+    };
     let (key, env_names): (&str, &[&str]) = match provider {
         "gitlab" => ("gitlab_token", &["GITLAB_TOKEN"]),
         "gitea" => ("gitea_token", &["GITEA_TOKEN"]),
@@ -499,6 +528,20 @@ pub fn forge_token(config: &crate::config::Config, provider: &str) -> Option<Str
     };
     let store = crate::secrets::global();
     let slug = config.repo_slug();
+    let per_host = format!("{key}@{host}");
+    if let Some(t) = crate::secrets::resolve(store.as_ref(), Some(&slug), &per_host, "")
+        .filter(|t| !t.trim().is_empty())
+    {
+        return Some(t);
+    }
+    if let TokenBinding::PerHostOnly(_) = binding {
+        warn!(
+            "{provider}: {host} is not {} nor listed in {FORGE_HOSTS_ENV}: store its token as \
+             `{per_host}` (the {key} / env token is not sent to it)",
+            saas_host(provider)
+        );
+        return None;
+    }
     let mut found = crate::secrets::resolve(store.as_ref(), Some(&slug), key, env_names[0]);
     // A forgejo install may have stored its token as gitea_token.
     if found.is_none() && provider == "forgejo" {
@@ -507,6 +550,82 @@ pub fn forge_token(config: &crate::config::Config, provider: &str) -> Option<Str
     found
         .or_else(|| env_names[1..].iter().find_map(|n| std::env::var(n).ok()))
         .filter(|t| !t.trim().is_empty())
+}
+
+/// Env opt-in for a forge base URL over plain `http://` (the token would
+/// travel in clear).
+pub const ALLOW_HTTP_ENV: &str = "WSHM_ALLOW_HTTP_FORGE";
+
+/// Comma-separated forge hosts (e.g. `gitlab.example.com`) allowed to
+/// receive the provider-wide token, besides the SaaS host.
+pub const FORGE_HOSTS_ENV: &str = "WSHM_FORGE_HOSTS";
+
+/// Whether [`ALLOW_HTTP_ENV`] is set.
+pub fn http_forge_allowed() -> bool {
+    std::env::var(ALLOW_HTTP_ENV).is_ok_and(|v| v == "1" || v == "true")
+}
+
+/// SaaS host of a provider (the host its provider-wide token is for).
+pub fn saas_host(provider: &str) -> &'static str {
+    match provider {
+        "github" => "github.com",
+        "gitlab" => "gitlab.com",
+        "gitea" => "gitea.com",
+        "forgejo" => "codeberg.org",
+        "azure-devops" | "azure" => "dev.azure.com",
+        _ => "",
+    }
+}
+
+/// Lowercased host of an http(s) URL.
+pub fn url_host(url: &str) -> Option<String> {
+    reqwest::Url::parse(url)
+        .ok()
+        .filter(|u| matches!(u.scheme(), "https" | "http"))
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+}
+
+/// Which token a forge base URL may receive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TokenBinding {
+    /// None at all.
+    Denied(String),
+    /// Only a token stored for this host (`<key>@<host>`).
+    PerHostOnly(String),
+    /// The per-host token, else the provider-wide one.
+    Any(String),
+}
+
+pub(crate) fn token_binding(
+    provider: &str,
+    base: &str,
+    allowed_hosts: &str,
+    allow_http: bool,
+) -> TokenBinding {
+    let Some(host) = url_host(base) else {
+        return TokenBinding::Denied("not an http(s) URL".into());
+    };
+    if base.trim().to_ascii_lowercase().starts_with("http://") && !allow_http {
+        return TokenBinding::Denied(format!("plain http (set {ALLOW_HTTP_ENV}=1 to allow)"));
+    }
+    let listed = allowed_hosts
+        .split(',')
+        .map(|h| h.trim().to_ascii_lowercase())
+        .any(|h| !h.is_empty() && h == host);
+    if host == saas_host(provider) || listed {
+        TokenBinding::Any(host)
+    } else {
+        TokenBinding::PerHostOnly(host)
+    }
+}
+
+/// Whether a secret-store key holds forge credentials (including the
+/// per-host `<provider>_token@<host>` form).
+pub fn is_forge_auth_key(key: &str) -> bool {
+    let key = key.trim();
+    let base = key.split_once('@').map_or(key, |(k, _)| k);
+    FORGE_AUTH_KEYS.contains(&key)
+        || (key.contains('@') && FORGE_AUTH_KEYS.contains(&base) && base.ends_with("_token"))
 }
 
 /// Secret-store keys holding forge credentials; a change to any of them
@@ -579,7 +698,7 @@ fn azure_seg(s: &str) -> String {
 
 /// Resolve the public base URL for the configured forge, with sensible
 /// defaults for the SaaS instance of each provider.
-fn forge_base_url(config: &crate::config::Config, provider: &str) -> String {
+pub(crate) fn forge_base_url(config: &crate::config::Config, provider: &str) -> String {
     if let Some(custom) = config.git_url.as_deref() {
         let trimmed = custom.trim_end_matches('/');
         if !trimmed.is_empty() {
@@ -625,6 +744,62 @@ mod tests {
             assert!(p.as_github().is_none());
         }
         assert!(build_provider(&config(Some("svn"), ("a", "b"))).is_err());
+    }
+
+    #[test]
+    fn tokens_only_go_to_the_host_they_are_for() {
+        use TokenBinding::*;
+        let b = |p, url, hosts, http| token_binding(p, url, hosts, http);
+        assert_eq!(
+            b("gitlab", "https://gitlab.com", "", false),
+            Any("gitlab.com".into())
+        );
+        // A self-managed (or attacker-chosen) host only gets its own token.
+        assert_eq!(
+            b("gitlab", "https://evil.example", "", false),
+            PerHostOnly("evil.example".into())
+        );
+        assert_eq!(
+            b(
+                "gitlab",
+                "https://GL.corp.example/",
+                " gl.corp.example ,x",
+                false
+            ),
+            Any("gl.corp.example".into())
+        );
+        // gitlab.com is not the SaaS host of gitea.
+        assert_eq!(
+            b("gitea", "https://gitlab.com", "", false),
+            PerHostOnly("gitlab.com".into())
+        );
+        assert!(matches!(
+            b("gitlab", "http://gl.corp.example", "gl.corp.example", false),
+            Denied(_)
+        ));
+        assert_eq!(
+            b("gitlab", "http://gl.corp.example", "gl.corp.example", true),
+            Any("gl.corp.example".into())
+        );
+        assert!(matches!(b("gitlab", "file:///etc", "", true), Denied(_)));
+
+        assert!(is_forge_auth_key("gitlab_token"));
+        assert!(is_forge_auth_key("gitlab_token@gl.corp.example"));
+        assert!(!is_forge_auth_key("github_app_id@x"));
+        assert!(!is_forge_auth_key("anthropic_api_key"));
+    }
+
+    #[test]
+    fn unlisted_host_gets_no_provider_wide_token() {
+        // No secret store in unit tests: the env token would be the
+        // fallback, and it must not reach an unlisted self-managed host.
+        // Only this test reads GITLAB_TOKEN through forge_token.
+        std::env::set_var("GITLAB_TOKEN", "glpat-test");
+        let mut c = config(Some("gitlab"), ("g", "p"));
+        assert_eq!(forge_token(&c, "gitlab").as_deref(), Some("glpat-test"));
+        c.git_url = Some("https://attacker.example".into());
+        assert_eq!(forge_token(&c, "gitlab"), None);
+        std::env::remove_var("GITLAB_TOKEN");
     }
 
     #[tokio::test]

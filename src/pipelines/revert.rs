@@ -14,11 +14,12 @@ pub async fn run(db: &dyn DatabaseBackend, gh: &GhClient, apply: bool) -> Result
 
     // Process issues
     for issue in &open_issues {
-        // Find and remove wshm comment
-        if let Ok(Some(comment_id)) = gh
-            .find_comment_with_marker(Thread::Issue(issue.number), gh.comment_marker())
+        // Find and remove wshm's comments
+        let found = gh
+            .find_wshm_comments(Thread::Issue(issue.number), gh.comment_marker())
             .await
-        {
+            .unwrap_or_default();
+        for comment_id in found {
             if apply {
                 info!(
                     "Deleting wshm comment {comment_id} on issue #{}",
@@ -57,10 +58,12 @@ pub async fn run(db: &dyn DatabaseBackend, gh: &GhClient, apply: bool) -> Result
 
     // Process PRs
     for pr in &open_pulls {
-        if let Ok(Some(comment_id)) = gh
-            .find_comment_with_marker(Thread::Pull(pr.number), gh.comment_marker())
+        // Analysis comment, review summaries and inline review notes.
+        let found = gh
+            .find_wshm_comments(Thread::Pull(pr.number), gh.comment_marker())
             .await
-        {
+            .unwrap_or_default();
+        for comment_id in found {
             if apply {
                 info!("Deleting wshm comment {comment_id} on PR #{}", pr.number);
                 gh.delete_comment(&comment_id).await?;

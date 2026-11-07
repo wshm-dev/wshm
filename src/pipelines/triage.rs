@@ -1340,6 +1340,18 @@ mod injection_flow {
             crate::db::schema::compute_issue_hash("T", Some("B"))
         );
         assert_eq!(a.approved_by, "alice");
+
+        // GitLab: several labels added by one edit (translated Issue Hook).
+        let gitlab = serde_json::json!({
+            "action": "labeled", "label": {"name": "bug"},
+            "added_labels": [{"name": "bug"}, {"name": "wshm:approved"}],
+            "sender": {"login": "alice"},
+            "issue": {"number": 81, "title": "T", "body": null}
+        });
+        assert_eq!(
+            crate::ai::guard::on_issue_labeled(&config, &db, g, &gitlab).await,
+            Some(81)
+        );
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@
 		type PrSubGroup,
 		type PrGroupPr
 	} from '$lib/api';
+	import { itemRef } from '$lib/stores';
 
 	let {
 		kind,
@@ -27,13 +28,11 @@
 	let noun = $derived(kind === 'pr' ? 'PR' : 'issue');
 	let fetcher = $derived(kind === 'pr' ? fetchPrGroups : fetchIssueGroups);
 
-	// Link to the forge rather than the in-app page: the graph groups ALL PRs incl.
-	// closed ones (and can span repos), which the in-app PR view can't load.
-	// The server builds the URL for the repo's forge; GitHub is the fallback.
-	function itemUrl(pr: PrGroupPr): string {
-		if (pr.url) return pr.url;
-		const seg = kind === 'pr' ? 'pull' : 'issues';
-		return `https://github.com/${pr.repo}/${seg}/${pr.number}`;
+	// Link to the forge rather than the in-app page: the graph groups ALL PRs
+	// incl. closed ones (and can span repos), which the in-app PR view can't
+	// load. The URL is built server-side from each repo's forge.
+	function itemUrl(pr: PrGroupPr): string | undefined {
+		return pr.url ?? undefined;
 	}
 
 	let groups = $state<PrGroup[]>([]);
@@ -149,7 +148,7 @@
 							rel="noopener noreferrer"
 							class="block rounded px-2 py-1 text-xs hover:bg-muted"
 						>
-							<span class="mono text-muted-foreground">#{pr.number}</span>
+							<span class="mono text-muted-foreground">{$itemRef(pr.number, kind, pr.repo)}</span>
 							{pr.title}
 						</a>
 					{/each}

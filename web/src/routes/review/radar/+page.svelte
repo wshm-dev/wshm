@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { selectedRepo } from '$lib/stores';
+	import { selectedRepo, itemRef } from '$lib/stores';
 	import { fetchPulls, type PullRequest } from '$lib/api';
 	import { timeAgo, exactTime } from '$lib/time';
 	import { Badge } from '$lib/components/ui/badge';
@@ -289,7 +289,7 @@
 						class="text-xs px-2 py-1 rounded border bg-card text-muted-foreground hover:text-foreground hover:border-muted-foreground/50"
 						onclick={() => openPr(pr)}
 						title={pr.title}
-					>#{pr.number}</button>
+					>{$itemRef(pr.number)}</button>
 				{/each}
 			</div>
 		</div>
@@ -299,7 +299,7 @@
 		<Dialog.Content class="max-h-[85vh] w-[80vw] max-w-[80vw] overflow-y-auto sm:max-w-[80vw]">
 			<Dialog.Header>
 				<Dialog.Title class="flex w-full items-center gap-3 pr-2">
-					<span class="mono text-muted-foreground text-sm">#{activePr?.number ?? ''}</span>
+					<span class="mono text-muted-foreground text-sm">{activePr ? $itemRef(activePr.number, 'pr', activePr.repo) : ''}</span>
 					<span class="text-base font-semibold text-foreground truncate">{activePr?.title ?? ''}</span>
 				</Dialog.Title>
 			</Dialog.Header>
