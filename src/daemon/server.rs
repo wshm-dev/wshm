@@ -135,13 +135,7 @@ async fn handle_webhook(
     // dedup is not silently bypassed on a non-GitHub forge. Without this, a
     // captured signed payload verifies forever and can be replayed to
     // re-trigger issue/PR processing (auto-fix runs, comment posting, LLM spend).
-    let delivery_id = headers
-        .get("x-github-delivery")
-        .or_else(|| headers.get("x-gitea-delivery"))
-        .or_else(|| headers.get("x-forgejo-delivery"))
-        .or_else(|| headers.get("x-gitlab-event-uuid"))
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    let delivery_id = delivery_id(&headers, &payload);
     // When a webhook secret is configured the HMAC already proved authenticity,
     // so a delivery with no id is almost certainly a forged/malformed replay:
     // reject it rather than letting it bypass dedup. Without a secret we keep
@@ -169,6 +163,11 @@ async fn handle_webhook(
     }
     if headers.contains_key("x-gitlab-event")
         && payload["repository"]["full_name"].as_str() != Some(config.repo_slug().as_str())
+    {
+        return provider_mismatch(&config.repo_slug());
+    }
+    if payload.get("wshm_azure").is_some()
+        && !super::azure_hooks::targets(&payload, &config.repo_slug())
     {
         return provider_mismatch(&config.repo_slug());
     }
@@ -410,13 +409,7 @@ async fn handle_webhook_multi(
     // GitHub sends it in x-github-delivery; Gitea/Forgejo (used by wshm-pro)
     // send it in x-gitea-delivery / x-forgejo-delivery. Consult all three so
     // dedup is not silently bypassed on a non-GitHub forge.
-    let delivery_id = headers
-        .get("x-github-delivery")
-        .or_else(|| headers.get("x-gitea-delivery"))
-        .or_else(|| headers.get("x-forgejo-delivery"))
-        .or_else(|| headers.get("x-gitlab-event-uuid"))
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    let delivery_id = delivery_id(&headers, &payload);
     // When a webhook secret is configured the HMAC already proved authenticity,
     // so a delivery with no id is almost certainly a forged/malformed replay:
     // reject it rather than letting it bypass dedup. Without a secret we keep
@@ -456,6 +449,14 @@ async fn handle_webhook_multi(
     };
 
     let repos_guard = state.multi.repos.read().await;
+    // Azure DevOps names are case-insensitive and work item events carry
+    // a project, not a repository.
+    let repo_slug = if payload.get("wshm_azure").is_some() && !repos_guard.contains_key(&repo_slug)
+    {
+        super::azure_hooks::route(&payload, repos_guard.keys()).unwrap_or(repo_slug)
+    } else {
+        repo_slug
+    };
     let daemon = match repos_guard.get(&repo_slug) {
         Some(d) => Arc::clone(d),
         None => {
@@ -563,6 +564,13 @@ fn validate_webhook(
     // the rest of the pipeline expects.
     if let Some(gl_event) = headers.get("x-gitlab-event").and_then(|v| v.to_str().ok()) {
         return validate_gitlab_webhook(gl_event, headers, body);
+    }
+    // Azure DevOps service hooks carry no event header: recognised by
+    // their JSON, authenticated by their own secret (see azure_hooks).
+    if !headers.contains_key("x-github-event") {
+        if let Some(payload) = super::azure_hooks::parse(body) {
+            return super::azure_hooks::validate(headers, payload);
+        }
     }
 
     // Validate HMAC signature. Without a configured secret the endpoint
@@ -717,16 +725,32 @@ fn validate_gitlab_webhook(
 pub const GITLAB_WEBHOOK_TOKEN_KEY: &str = "gitlab_webhook_token";
 
 /// A delivery's wire format must match the target repo's forge: GitLab
-/// format only for gitlab repos, GitHub format (GitHub, Gitea, Forgejo)
-/// only for those. Azure DevOps webhooks are not supported. Stops a sender
-/// of one forge from driving a repo hosted on another.
+/// format only for gitlab repos, Azure DevOps service hooks (no event
+/// header) only for azure-devops repos, GitHub format (GitHub, Gitea,
+/// Forgejo) only for those. Stops a sender of one forge from driving a
+/// repo hosted on another.
 fn format_matches_provider(headers: &HeaderMap, config: &crate::config::Config) -> bool {
     let gitlab_format = headers.contains_key("x-gitlab-event");
+    let azure_format = !gitlab_format && !headers.contains_key("x-github-event");
     match crate::git_provider::provider_id(config) {
         "gitlab" => gitlab_format,
-        "github" | "gitea" | "forgejo" => !gitlab_format,
+        "github" | "gitea" | "forgejo" => !gitlab_format && !azure_format,
+        "azure-devops" | "azure" => azure_format,
         _ => false,
     }
+}
+
+/// Delivery id for replay protection: the forge header, else the event id
+/// a translated payload carries (Azure DevOps sends no delivery header).
+fn delivery_id<'a>(headers: &'a HeaderMap, payload: &'a Value) -> &'a str {
+    headers
+        .get("x-github-delivery")
+        .or_else(|| headers.get("x-gitea-delivery"))
+        .or_else(|| headers.get("x-forgejo-delivery"))
+        .or_else(|| headers.get("x-gitlab-event-uuid"))
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| payload["wshm_delivery_id"].as_str())
+        .unwrap_or("")
 }
 
 fn provider_mismatch(repo: &str) -> axum::response::Response {
@@ -739,7 +763,7 @@ fn provider_mismatch(repo: &str) -> axum::response::Response {
 }
 
 /// Constant-time string comparison (via HMAC verification).
-fn constant_time_eq(expected: &str, given: &str) -> bool {
+pub(super) fn constant_time_eq(expected: &str, given: &str) -> bool {
     let Ok(mut a) = Hmac::<Sha256>::new_from_slice(b"wshm-token-compare") else {
         return false;
     };
@@ -922,6 +946,51 @@ mod forge_webhook_tests {
         assert!(format_matches_provider(&gitlab, &cfg(Some("gitlab"))));
         assert!(format_matches_provider(&github, &cfg(None)));
         assert!(format_matches_provider(&github, &cfg(Some("forgejo"))));
+    }
+
+    #[test]
+    fn azure_service_hook_is_routed_to_azure_repos_only() {
+        let cfg = |p: Option<&str>| crate::config::Config {
+            git_provider: p.map(String::from),
+            repo_owner: "acme".into(),
+            repo_name: "Proj/web".into(),
+            ..Default::default()
+        };
+        // Azure deliveries have neither event header.
+        let azure = headers(&[("x-wshm-token", "t")]);
+        assert!(format_matches_provider(&azure, &cfg(Some("azure-devops"))));
+        assert!(!format_matches_provider(&azure, &cfg(None)));
+        assert!(!format_matches_provider(&azure, &cfg(Some("gitlab"))));
+        assert!(!format_matches_provider(&azure, &cfg(Some("gitea"))));
+        assert!(!format_matches_provider(
+            &headers(&[("x-gitlab-event", "Issue Hook")]),
+            &cfg(Some("azure"))
+        ));
+
+        // The event id stands in for the missing delivery header.
+        let p = json!({"wshm_delivery_id": "ev-9"});
+        assert_eq!(delivery_id(&azure, &p), "ev-9");
+        let gh = headers(&[("x-github-delivery", "d1")]);
+        assert_eq!(delivery_id(&gh, &p), "d1");
+        assert_eq!(delivery_id(&azure, &json!({})), "");
+    }
+
+    #[test]
+    fn azure_service_hook_goes_through_validate_webhook() {
+        // A body without an event header that is not an Azure delivery
+        // keeps the GitHub path (signature, then event header).
+        let body = Bytes::from(json!({"action": "opened"}).to_string());
+        let r = validate_webhook(Some("k"), &headers(&[]), &body).unwrap_err();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // An Azure delivery is never accepted with the GitHub HMAC secret.
+        let azure = Bytes::from(
+            json!({"publisherId": "tfs", "eventType": "workitem.created",
+                   "resourceContainers": {"collection": {"baseUrl": "https://dev.azure.com/acme/"}},
+                   "resource": {"id": 1, "fields": {"System.TeamProject": "Proj"}}})
+            .to_string(),
+        );
+        let r = validate_webhook(Some("k"), &headers(&[("x-wshm-token", "k")]), &azure);
+        assert!(r.is_err());
     }
 
     #[test]
