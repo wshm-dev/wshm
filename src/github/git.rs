@@ -4,13 +4,16 @@ use tracing::info;
 
 /// Clone a repository to a local path using secure credential callbacks.
 pub fn clone_repo(url: &str, path: &Path, token: &str) -> Result<git2::Repository> {
+    clone_repo_as(url, path, "x-access-token", token)
+}
+
+/// [`clone_repo`] with an explicit HTTP user name (GitLab: `oauth2`).
+pub fn clone_repo_as(url: &str, path: &Path, user: &str, token: &str) -> Result<git2::Repository> {
     info!("Cloning {url} to {}", path.display());
 
-    let token = token.to_string();
+    let (user, token) = (user.to_string(), token.to_string());
     let mut cb = git2::RemoteCallbacks::new();
-    cb.credentials(move |_url, _username, _allowed| {
-        git2::Cred::userpass_plaintext("x-access-token", &token)
-    });
+    cb.credentials(move |_url, _username, _allowed| git2::Cred::userpass_plaintext(&user, &token));
 
     let mut fo = git2::FetchOptions::new();
     fo.remote_callbacks(cb);

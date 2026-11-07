@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { selectedRepo } from '$lib/stores';
+	import { selectedRepo, itemRef } from '$lib/stores';
 	import { fetchConflicts, type ConflictScan, type ConflictPr } from '$lib/api';
 	import * as Table from '$lib/components/ui/table';
 	import { Badge } from '$lib/components/ui/badge';
@@ -85,7 +85,7 @@
 					<Table.Body>
 						{#each paged as c}
 							<Table.Row>
-								<Table.Cell class="font-mono text-red-600 dark:text-red-400">#{c.number}</Table.Cell>
+								<Table.Cell class="font-mono text-red-600 dark:text-red-400">{$itemRef(c.number)}</Table.Cell>
 								<Table.Cell>
 									<div class="max-w-xs truncate">{c.title}</div>
 								</Table.Cell>

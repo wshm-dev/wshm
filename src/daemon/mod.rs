@@ -14,7 +14,7 @@ const WEBHOOK_CHANNEL_CAPACITY: usize = 256;
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
@@ -362,7 +362,7 @@ impl MultiDaemonState {
         features: crate::config::RepoFeatures,
     ) -> Result<Arc<DaemonState>> {
         ensure_checkout(entry, &features);
-        let mut config = Config::load_for_repo(&entry.path, &entry.slug)?;
+        let mut config = Config::load_for_entry(entry)?;
         std::fs::create_dir_all(&config.wshm_dir)?;
         config.web.resolve_password(&config.wshm_dir);
         let db = match &runtime.db_factory {
@@ -416,6 +416,20 @@ impl MultiDaemonState {
     /// When `path` is None, defaults to `<global_config_parent>/repos/<name>`
     /// so dynamic adds land on the same volume as the daemon's config.
     pub async fn add_repo(&self, slug: &str, path: Option<PathBuf>) -> Result<Arc<DaemonState>> {
+        self.add_repo_on_forge(slug, path, None, None).await
+    }
+
+    /// [`Self::add_repo`] for a repo on another forge than GitHub
+    /// (`git_provider`, and `git_url` for a self-managed instance), recorded
+    /// in the registry entry. GitLab slugs may carry subgroups
+    /// (`group/sub/repo`).
+    pub async fn add_repo_on_forge(
+        &self,
+        slug: &str,
+        path: Option<PathBuf>,
+        git_provider: Option<String>,
+        git_url: Option<String>,
+    ) -> Result<Arc<DaemonState>> {
         let runtime = self
             .runtime
             .as_ref()
@@ -426,7 +440,9 @@ impl MultiDaemonState {
         // separator, so a value like "owner/.." can never become a directory
         // component of ".." when we derive the on-disk path from it.
         let segments: Vec<&str> = slug.split('/').collect();
-        if segments.len() != 2
+        let nested_ok = git_provider.as_deref().map(str::trim) == Some("gitlab");
+        if segments.len() < 2
+            || (segments.len() > 2 && !nested_ok)
             || segments
                 .iter()
                 .any(|s| s.is_empty() || *s == "." || *s == ".." || s.contains('\\'))
@@ -453,8 +469,14 @@ impl MultiDaemonState {
                 repos_base.join(p)
             }
             None => {
-                let name = segments[1];
-                repos_base.join(name)
+                let used: Vec<PathBuf> = runtime
+                    .repos
+                    .read()
+                    .await
+                    .iter()
+                    .map(|e| e.path.clone())
+                    .collect();
+                default_checkout_dir(&repos_base, slug, &used)
             }
         };
 
@@ -464,8 +486,33 @@ impl MultiDaemonState {
                 anyhow::bail!("repo {slug} already registered");
             }
         }
+        // Two repos in one directory would share a checkout, a config and a
+        // SQLite DB.
+        if let Some(other) = runtime
+            .repos
+            .read()
+            .await
+            .iter()
+            .find(|e| same_dir(&e.path, &path))
+        {
+            anyhow::bail!(
+                "repo path {} is already used by {}",
+                path.display(),
+                other.slug
+            );
+        }
 
-        let mut config = Config::load_for_repo(&path, slug)?;
+        let entry = crate::config::RepoEntry {
+            slug: slug.to_string(),
+            path: path.clone(),
+            apply: None,
+            enabled: true,
+            secret: None,
+            features: crate::config::RepoFeatures::default(),
+            git_provider,
+            git_url,
+        };
+        let mut config = Config::load_for_entry(&entry)?;
         std::fs::create_dir_all(&config.wshm_dir)?;
         config.web.resolve_password(&config.wshm_dir);
 
@@ -490,14 +537,7 @@ impl MultiDaemonState {
         // via the persistence hook (Pro → Postgres) or the TOML fallback.
         {
             let mut canonical = runtime.repos.write().await;
-            canonical.push(crate::config::RepoEntry {
-                slug: slug.to_string(),
-                path: path.clone(),
-                apply: None,
-                enabled: true,
-                secret: None,
-                features: crate::config::RepoFeatures::default(),
-            });
+            canonical.push(entry);
         }
         if let Err(e) = runtime.persist().await {
             runtime.repos.write().await.retain(|e| e.slug != slug);
@@ -755,27 +795,105 @@ fn ensure_checkout(entry: &crate::config::RepoEntry, features: &crate::config::R
     if !features.auto_pr || entry.path.join(".git").exists() {
         return;
     }
-    match std::env::var("GITHUB_TOKEN") {
-        Ok(token) => {
-            let url = format!("https://github.com/{}.git", entry.slug);
-            if let Some(parent) = entry.path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            match crate::github::git::clone_repo(&url, &entry.path, &token) {
-                Ok(_) => info!("Cloned {} into {}", entry.slug, entry.path.display()),
-                Err(e) => warn!(
-                    "Failed to clone {} into {} ({e}); daemon may degrade for this repo",
-                    entry.slug,
-                    entry.path.display()
-                ),
-            }
-        }
-        Err(_) => warn!(
-            "Repo {} not present at {} and GITHUB_TOKEN unset — skipping clone, daemon may degrade",
+    let Some((url, user, token)) = checkout_source(entry) else {
+        warn!(
+            "Repo {} not present at {} and no forge token to clone it — skipping clone, daemon may degrade",
+            entry.slug,
+            entry.path.display()
+        );
+        return;
+    };
+    if let Some(parent) = entry.path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    match crate::github::git::clone_repo_as(&url, &entry.path, user, &token) {
+        Ok(_) => info!("Cloned {} into {}", entry.slug, entry.path.display()),
+        Err(e) => warn!(
+            "Failed to clone {} into {} ({e}); daemon may degrade for this repo",
             entry.slug,
             entry.path.display()
         ),
     }
+}
+
+/// Clone URL, HTTP user and token for a registry entry's forge. GitHub
+/// keeps `GITHUB_TOKEN`; GitLab / Gitea / Forgejo use their forge token
+/// (secret store, then env) on the entry's `git_url` or the SaaS host.
+/// `None` without a token or for Azure DevOps (not cloned automatically).
+fn checkout_source(entry: &crate::config::RepoEntry) -> Option<(String, &'static str, String)> {
+    let mut config = crate::config::Config {
+        git_provider: entry.git_provider.clone(),
+        git_url: entry.git_url.clone(),
+        ..Default::default()
+    };
+    if let Some((owner, name)) = entry.slug.split_once('/') {
+        config.repo_owner = owner.to_string();
+        config.repo_name = name.to_string();
+    }
+    let (provider, url) = checkout_url(&config, &entry.slug);
+    match provider.as_str() {
+        // GITHUB_TOKEN only ever goes to github.com, whatever git_url says.
+        "github" => std::env::var("GITHUB_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                let url = format!("https://github.com/{}.git", entry.slug);
+                (url, "x-access-token", t)
+            }),
+        // GitLab takes any user name with a token as password; `oauth2` is
+        // the documented one.
+        "gitlab" => crate::git_provider::forge_token(&config, "gitlab").map(|t| (url, "oauth2", t)),
+        "gitea" | "forgejo" => {
+            crate::git_provider::forge_token(&config, &provider).map(|t| (url, "wshm", t))
+        }
+        _ => None,
+    }
+}
+
+/// Default checkout directory of a runtime-added repo, derived from the
+/// whole slug (`group/sub/proj` → `group__sub__proj`) so repos with the same
+/// name never share one. A `repos/<name>` git checkout of this very repo
+/// (the former default for `owner/name`) is kept when no entry uses it.
+fn default_checkout_dir(repos_base: &Path, slug: &str, used: &[PathBuf]) -> PathBuf {
+    let segments: Vec<&str> = slug.split('/').collect();
+    if let [_, name] = segments.as_slice() {
+        let legacy = repos_base.join(name);
+        if !used.iter().any(|u| same_dir(u, &legacy)) && checkout_is_of(&legacy, slug) {
+            return legacy;
+        }
+    }
+    repos_base.join(segments.join("__"))
+}
+
+/// Whether `dir` is a git checkout whose origin is `slug`.
+fn checkout_is_of(dir: &Path, slug: &str) -> bool {
+    let Ok(repo) = git2::Repository::open(dir) else {
+        return false;
+    };
+    let Ok(origin) = repo.find_remote("origin") else {
+        return false;
+    };
+    let url = origin.url().unwrap_or("").trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url).to_ascii_lowercase();
+    let slug = slug.to_ascii_lowercase();
+    url.ends_with(&format!("/{slug}")) || url.ends_with(&format!(":{slug}"))
+}
+
+/// Whether two registry paths name the same directory (also when one of
+/// them does not exist yet).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a.components().eq(b.components()),
+    }
+}
+
+/// `(provider id, https clone URL)` of `slug` on the configured forge.
+fn checkout_url(config: &crate::config::Config, slug: &str) -> (String, String) {
+    let provider = crate::git_provider::provider_id(config).to_string();
+    let base = crate::git_provider::forge_base_url(config, &provider);
+    let url = format!("{base}/{slug}.git");
+    (provider, url)
 }
 
 /// Feature flags a registry entry runs with. A features section left at its
@@ -912,7 +1030,7 @@ pub async fn run_multi_with_extensions(
         // Clone only when auto-fix needs a checkout and it is missing.
         ensure_checkout(entry, &entry.features);
 
-        let mut config = Config::load_for_repo(&entry.path, &entry.slug)?;
+        let mut config = Config::load_for_entry(entry)?;
 
         // Ensure .wshm dir exists
         std::fs::create_dir_all(&config.wshm_dir)?;
@@ -1173,6 +1291,8 @@ mod registry_sync_tests {
             enabled: true,
             secret: None,
             features: crate::config::RepoFeatures::default(),
+            git_provider: None,
+            git_url: None,
         }
     }
 
@@ -1325,6 +1445,47 @@ mod registry_sync_tests {
         let a = persisted.iter().find(|e| e.slug == "o/a").unwrap();
         assert!(a.features.auto_merge, "other pod's edit survived");
         assert!(persisted.iter().any(|e| e.slug == "o/new"));
+    }
+
+    #[tokio::test]
+    async fn added_repos_never_share_a_checkout_dir() {
+        let root = tmpdir("shared");
+        let store: Store = Arc::new(Mutex::new(Some(vec![entry("o/a", &root)])));
+        let p1 = pod(&store, &root);
+        let a = p1
+            .add_repo_on_forge("grp/one/proj", None, Some("gitlab".into()), None)
+            .await
+            .unwrap();
+        a.cancel();
+        let b = p1
+            .add_repo_on_forge("grp/two/proj", None, Some("gitlab".into()), None)
+            .await
+            .unwrap();
+        b.cancel();
+        let paths: Vec<PathBuf> = store
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.slug.ends_with("/proj"))
+            .map(|e| e.path)
+            .collect();
+        assert_eq!(paths.len(), 2);
+        assert_ne!(paths[0], paths[1]);
+        assert!(paths[0].ends_with("grp__one__proj"), "{paths:?}");
+        // An explicit path already used by another entry is refused.
+        let err = p1
+            .add_repo("x/y", Some(PathBuf::from("grp__one__proj")))
+            .await
+            .err()
+            .expect("shared path refused");
+        assert!(
+            format!("{err:#}").contains("already used by grp/one/proj"),
+            "{err:#}"
+        );
+        // Nested slugs are GitLab-only.
+        assert!(p1.add_repo("a/b/c", None).await.is_err());
     }
     fn canonical_slugs(m: &MultiDaemonState) -> Vec<String> {
         let rt = m.runtime.as_ref().unwrap();
@@ -1482,5 +1643,113 @@ mod registry_sync_tests {
             p.sync_registry().await.unwrap(),
             "not live yet: next cycle retries instead of no-op"
         );
+    }
+}
+
+#[cfg(test)]
+mod forge_entry_tests {
+    use super::*;
+    use crate::config::RepoEntry;
+
+    fn entry(slug: &str, provider: Option<&str>, url: Option<&str>) -> RepoEntry {
+        let mut e: RepoEntry = toml::from_str(&format!(
+            "slug = \"{slug}\"\npath = \"/nonexistent/wshm-forge-entry\""
+        ))
+        .unwrap();
+        e.git_provider = provider.map(String::from);
+        e.git_url = url.map(String::from);
+        e
+    }
+
+    #[test]
+    fn clone_urls_follow_the_entry_forge() {
+        let cfg = |e: &RepoEntry| Config::load_for_entry(e).unwrap();
+        let gl = entry("group/sub/proj", Some("gitlab"), None);
+        assert_eq!(
+            checkout_url(&cfg(&gl), &gl.slug),
+            (
+                "gitlab".into(),
+                "https://gitlab.com/group/sub/proj.git".into()
+            )
+        );
+        let sm = entry(
+            "team/app",
+            Some("gitlab"),
+            Some("https://gitlab.example.com/"),
+        );
+        assert_eq!(
+            checkout_url(&cfg(&sm), &sm.slug).1,
+            "https://gitlab.example.com/team/app.git"
+        );
+        let gh = entry("o/r", None, None);
+        assert_eq!(
+            checkout_url(&cfg(&gh), &gh.slug),
+            ("github".into(), "https://github.com/o/r.git".into())
+        );
+        assert!(checkout_source(&entry("o/p/r", Some("azure-devops"), None)).is_none());
+    }
+
+    #[test]
+    fn entry_forge_settings_reach_the_config_and_round_trip() {
+        let e = entry(
+            "group/sub/proj",
+            Some("gitlab"),
+            Some("https://gl.example.com"),
+        );
+        let c = Config::load_for_entry(&e).unwrap();
+        assert_eq!(crate::git_provider::provider_id(&c), "gitlab");
+        assert_eq!(c.git_url.as_deref(), Some("https://gl.example.com"));
+        assert_eq!(c.repo_slug(), "group/sub/proj");
+        let back: RepoEntry = toml::from_str(&toml::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back, e);
+        // Unset fields are not written (older registries stay unchanged).
+        let plain = toml::to_string(&entry("o/r", None, None)).unwrap();
+        assert!(
+            !plain.contains("git_provider") && !plain.contains("git_url"),
+            "{plain}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod checkout_dir_tests {
+    use super::*;
+
+    #[test]
+    fn default_dirs_follow_the_whole_slug() {
+        let base = std::env::temp_dir().join(format!("wshm-ckdir-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        // Nested GitLab paths with the same last segment never share a dir.
+        assert_eq!(
+            default_checkout_dir(&base, "group/a/proj", &[]),
+            base.join("group__a__proj")
+        );
+        assert_eq!(
+            default_checkout_dir(&base, "group/b/proj", &[]),
+            base.join("group__b__proj")
+        );
+        assert_eq!(
+            default_checkout_dir(&base, "acme/app", &[]),
+            base.join("acme__app")
+        );
+
+        // An existing repos/<name> checkout of this repo (former default)
+        // keeps being used; one of another repo is not.
+        let legacy = base.join("app");
+        let repo = git2::Repository::init(&legacy).unwrap();
+        repo.remote("origin", "https://github.com/acme/app.git")
+            .unwrap();
+        assert_eq!(default_checkout_dir(&base, "acme/app", &[]), legacy);
+        assert_eq!(
+            default_checkout_dir(&base, "other/app", &[]),
+            base.join("other__app")
+        );
+        // ...nor when another entry already uses it.
+        assert_eq!(
+            default_checkout_dir(&base, "acme/app", std::slice::from_ref(&legacy)),
+            base.join("acme__app")
+        );
+        assert!(same_dir(&legacy, &legacy.join(".")));
+        std::fs::remove_dir_all(&base).ok();
     }
 }

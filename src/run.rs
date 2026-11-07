@@ -339,7 +339,7 @@ pub async fn run_oss(cli: Cli) -> Result<()> {
                     .iter()
                     .find(|r| r.enabled)
                     .ok_or_else(|| anyhow::anyhow!("No enabled repos in global.toml"))?;
-                let config = crate::config::Config::load_for_repo(&first.path, &first.slug)?;
+                let config = crate::config::Config::load_for_entry(first)?;
                 let db: Arc<dyn DatabaseBackend> = Arc::new(crate::Database::open(&config)?);
                 crate::tui::run(&config, db.as_ref()).await?;
             }
