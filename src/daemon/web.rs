@@ -3649,16 +3649,13 @@ async fn api_add_repo(
                 .into_response();
         }
     }
+    // The forge token is sent to this URL: https only (http needs the
+    // explicit env opt-in), and a host other than the SaaS one only gets a
+    // token stored for it (see git_provider::forge_token).
     let git_url = field("git_url");
     if let Some(u) = git_url.as_deref() {
-        if !(u.starts_with("https://") || u.starts_with("http://"))
-            || u.contains(char::is_whitespace)
-        {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "git_url must be an http(s) URL"})),
-            )
-                .into_response();
+        if let Err(why) = validate_git_url(u) {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": why }))).into_response();
         }
     }
 
@@ -3693,6 +3690,32 @@ async fn api_add_repo(
             (code, Json(json!({"status": "error", "message": msg}))).into_response()
         }
     }
+}
+
+/// A runtime-added repo's `git_url`: an https URL with a host and no
+/// credentials, path or query; `http://` only with the env opt-in.
+fn validate_git_url(u: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(u).map_err(|_| "git_url must be an https URL".to_string())?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" if crate::git_provider::http_forge_allowed() => {}
+        "http" => {
+            return Err(format!(
+                "git_url must use https (plain http needs {}=1 on the daemon)",
+                crate::git_provider::ALLOW_HTTP_ENV
+            ))
+        }
+        _ => return Err("git_url must be an https URL".into()),
+    }
+    if parsed.host_str().is_none_or(str::is_empty)
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("git_url must be a plain base URL (https://host[:port][/path])".into());
+    }
+    Ok(())
 }
 
 /// DELETE /api/v1/repos/{slug} -- remove a repo at runtime (multi-repo mode
@@ -4447,7 +4470,7 @@ async fn api_secrets_put(
             // App fields, GitLab/Gitea/Forgejo/Azure DevOps tokens) rebuild
             // the forge provider; other keys are read on-demand by the
             // relevant pipeline so no reload is needed.
-            if crate::git_provider::FORGE_AUTH_KEYS.contains(&key.trim()) {
+            if crate::git_provider::is_forge_auth_key(key) {
                 tracing::debug!(
                     target: "wshm_core::secrets_trace",
                     "api_secrets_put: key={:?} is a GitHub auth key — triggering reload",
@@ -5033,5 +5056,22 @@ mod pipeline_api_tests {
             .unwrap()
             .iter()
             .any(|k| k == "analyze"));
+    }
+}
+
+#[cfg(test)]
+mod forge_url_tests {
+    use super::validate_git_url;
+
+    #[test]
+    fn git_url_must_be_a_plain_https_base() {
+        assert!(validate_git_url("https://gitlab.example.com").is_ok());
+        assert!(validate_git_url("https://gitlab.example.com:8443/gitlab").is_ok());
+        // No test sets WSHM_ALLOW_HTTP_FORGE.
+        assert!(validate_git_url("http://gitlab.example.com").is_err());
+        assert!(validate_git_url("https://user:pw@gitlab.example.com").is_err());
+        assert!(validate_git_url("https://gitlab.example.com/?x=1").is_err());
+        assert!(validate_git_url("ftp://gitlab.example.com").is_err());
+        assert!(validate_git_url("gitlab.example.com").is_err());
     }
 }
