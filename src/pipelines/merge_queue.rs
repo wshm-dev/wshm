@@ -27,7 +27,7 @@ struct QueueOutput {
 pub async fn run(
     config: &Config,
     db: &dyn DatabaseBackend,
-    _gh: &GhClient,
+    gh: &GhClient,
     args: &QueueArgs,
     json: bool,
     _exporter: Option<&ExportManager>,
@@ -78,14 +78,29 @@ pub async fn run(
                     );
                 }
             } else if top.score >= config.queue.merge_threshold {
-                info!("Would merge PR #{} (score: {})", top.pr.number, top.score);
-                if !json {
-                    println!(
-                        "\nMerging PR #{} (score: {} >= threshold: {})",
-                        top.pr.number, top.score, config.queue.merge_threshold
+                if !gh.supports_merge() {
+                    info!(
+                        "Merge queue: merging is not implemented on {} — PR #{} left open",
+                        gh.provider_name(),
+                        top.pr.number
                     );
-                    // TODO: actual merge via GitHub API
-                    println!("Warning: Merge not yet implemented. Coming in M4.");
+                    if !json {
+                        println!(
+                            "\nTop PR #{} qualifies (score: {} >= threshold: {}), but merging is not supported on {}.",
+                            top.pr.number,
+                            top.score,
+                            config.queue.merge_threshold,
+                            gh.provider_name()
+                        );
+                    }
+                } else {
+                    if !json {
+                        println!(
+                            "\nMerging PR #{} (score: {} >= threshold: {})",
+                            top.pr.number, top.score, config.queue.merge_threshold
+                        );
+                    }
+                    gh.merge_pr(top.pr.number, &config.queue.strategy).await?;
                 }
             } else if !json {
                 println!(

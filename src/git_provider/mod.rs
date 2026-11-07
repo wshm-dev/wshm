@@ -258,6 +258,19 @@ pub trait GitProvider: Send + Sync {
         draft: bool,
     ) -> Result<u64>;
 
+    /// Whether [`Self::merge_pr`] is implemented (merge queue `--apply`).
+    fn supports_merge(&self) -> bool {
+        false
+    }
+
+    /// Merge (complete) a pull request with `strategy` from `[queue]
+    /// strategy` (merge, squash, rebase, rebase-merge). Must go through
+    /// the platform's own checks (branch policies, required reviews).
+    async fn merge_pr(&self, number: u64, strategy: &str) -> Result<()> {
+        let _ = (number, strategy);
+        Err(unsupported(self.provider_name(), "merging a pull request"))
+    }
+
     // ── Comments ────────────────────────────────────────────────────────
 
     /// First comment containing `marker` (or the legacy `<!-- wshm -->`).
@@ -391,6 +404,7 @@ pub fn web_url_for_issue(config: &crate::config::Config, number: u64) -> Option<
             // Azure DevOps "issues" are work items, identified by ID across the whole org.
             // `repo_owner` here is the org, `repo_name` carries `project/repo`.
             let project = repo.split('/').next().unwrap_or(repo);
+            let (owner, project) = (azure_seg(owner), azure_seg(project));
             Some(format!("{base}/{owner}/{project}/_workitems/edit/{number}"))
         }
         _ => None,
@@ -411,12 +425,20 @@ pub fn web_url_for_pr(config: &crate::config::Config, number: u64) -> Option<Str
             let parts: Vec<&str> = repo.splitn(2, '/').collect();
             let project = parts.first().copied().unwrap_or(repo.as_str());
             let repo_only = parts.get(1).copied().unwrap_or(repo.as_str());
+            let (owner, project, repo_only) =
+                (azure_seg(owner), azure_seg(project), azure_seg(repo_only));
             Some(format!(
                 "{base}/{owner}/{project}/_git/{repo_only}/pullrequest/{number}"
             ))
         }
         _ => None,
     }
+}
+
+/// Azure DevOps names may contain spaces ("My Project"): one URL path
+/// segment each.
+fn azure_seg(s: &str) -> String {
+    urlencoding::encode(s).into_owned()
 }
 
 /// Resolve the public base URL for the configured forge, with sensible

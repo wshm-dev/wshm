@@ -179,6 +179,15 @@ impl Rest {
     }
 
     fn check(&self, method: &Method, url: &str, resp: Response) -> Result<Response> {
+        // Azure DevOps answers a missing/expired PAT with 203 and an HTML
+        // sign-in page: never take that body as data.
+        if resp.status == StatusCode::NON_AUTHORITATIVE_INFORMATION {
+            anyhow::bail!(
+                "{} API error (203, sign-in page: token invalid, expired or missing a scope) on {method} {}",
+                self.label,
+                redact(url)
+            );
+        }
         if !resp.status.is_success() {
             anyhow::bail!(
                 "{} API error ({}) on {method} {}: {}",

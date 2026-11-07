@@ -16,6 +16,7 @@ pub struct Reply {
     content_type: &'static str,
     headers: Vec<(String, String)>,
     query: Option<String>,
+    body_match: Option<String>,
 }
 
 impl Reply {
@@ -26,6 +27,7 @@ impl Reply {
             content_type: "application/json",
             headers: Vec::new(),
             query: None,
+            body_match: None,
         }
     }
 
@@ -36,6 +38,7 @@ impl Reply {
             content_type: "text/plain",
             headers: Vec::new(),
             query: None,
+            body_match: None,
         }
     }
 
@@ -52,6 +55,12 @@ impl Reply {
     /// Only match when the query string contains `fragment`.
     pub fn when_query(mut self, fragment: &str) -> Self {
         self.query = Some(fragment.to_string());
+        self
+    }
+
+    /// Only match when the request body contains `fragment`.
+    pub fn when_body(mut self, fragment: &str) -> Self {
+        self.body_match = Some(fragment.to_string());
         self
     }
 }
@@ -141,6 +150,7 @@ async fn handle(
             .collect(),
         body: String::from_utf8_lossy(&body).into_owned(),
     });
+    let text = String::from_utf8_lossy(&body);
     let reply = inner
         .rules
         .lock()
@@ -150,6 +160,7 @@ async fn handle(
             m == method.as_str()
                 && *p == path
                 && r.query.as_deref().is_none_or(|q| query.contains(q))
+                && r.body_match.as_deref().is_none_or(|b| text.contains(b))
         })
         .map(|(_, _, r)| r.clone());
     match reply {
