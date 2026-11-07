@@ -28,6 +28,7 @@ import BotIcon from '@lucide/svelte/icons/bot';
 import ChartAreaIcon from '@lucide/svelte/icons/chart-area';
 import SquareActivityIcon from '@lucide/svelte/icons/square-activity';
 import ShieldCheckIcon from '@lucide/svelte/icons/shield-check';
+import WorkflowIcon from '@lucide/svelte/icons/workflow';
 
 export type NavIcon = typeof LayoutDashboardIcon;
 
@@ -81,6 +82,7 @@ export const allNavItems: NavItem[] = [
 	{ href: '/improve', label: 'Improvements', icon: LightbulbIcon, section: 'Automation', keywords: 'improve ideas' },
 	{ href: '/queue', label: 'Merge Queue', icon: ListOrderedIcon, section: 'Automation', shortcut: 'q' },
 	{ href: '/actions', label: 'Actions', icon: ZapIcon, section: 'Automation' },
+	{ href: '/pipelines', label: 'Pipelines', icon: WorkflowIcon, section: 'Automation', keywords: 'templates routes steps workflow' },
 
 	{ href: '/summary', label: 'Summary', icon: GaugeIcon, section: 'Insights' },
 	{ href: '/pr-insights', label: 'PR Insights', icon: ChartLineIcon, section: 'Insights' },

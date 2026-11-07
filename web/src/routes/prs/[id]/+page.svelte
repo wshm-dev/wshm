@@ -4,6 +4,7 @@
 	import { fetchPulls, type PullRequest } from '$lib/api';
 	import * as Card from '$lib/components/ui/card';
 	import PrDetail from '$lib/components/PrDetail.svelte';
+	import RunGraph from '$lib/components/RunGraph.svelte';
 
 	let pr: PullRequest | null = $state(null);
 	let error: string | null = $state(null);
@@ -37,6 +38,7 @@
 		</h2>
 	</div>
 	<PrDetail {pr} />
+	<RunGraph repo={pr.repo} kind="pr" number={pr.number} />
 {:else}
 	<p class="text-muted-foreground">Loading...</p>
 {/if}
