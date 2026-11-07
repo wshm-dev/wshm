@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { selectedRepo } from '$lib/stores';
+	import { selectedRepo, itemRef } from '$lib/stores';
 	import { fetchChangelog, type ChangelogResult, type ChangelogSection } from '$lib/api';
 	import { Badge } from '$lib/components/ui/badge';
 
@@ -81,7 +81,7 @@
 				<div class="space-y-2 ml-7">
 					{#each (expanded[section.name] ? section.pull_requests : section.pull_requests.slice(0, INITIAL_VISIBLE)) as pr}
 						<div class="flex items-start gap-3 text-sm">
-							<span class="font-mono text-primary shrink-0">#{pr.number}</span>
+							<span class="font-mono text-primary shrink-0">{$itemRef(pr.number)}</span>
 							<div class="flex-1">
 								<span class="text-foreground">{pr.title}</span>
 								{#if pr.author}

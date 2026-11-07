@@ -1241,6 +1241,9 @@ struct RepoStatus {
     prs_new_7d: usize,
     last_sync: Option<String>,
     apply: bool,
+    /// Forge of the repo (github, gitlab, ...): the UI writes MR refs `!N`
+    /// on GitLab.
+    git_provider: String,
 }
 
 #[derive(Serialize)]
@@ -1433,6 +1436,7 @@ async fn api_status(
             prs_new_7d,
             last_sync: last_sync.clone(),
             apply: ds.apply(),
+            git_provider: ds.gh().provider_name().to_string(),
         };
 
         resp.open_issues += repo_status.open_issues;
@@ -2518,6 +2522,7 @@ async fn api_list_repos(State(state): State<Arc<WebState>>) -> impl IntoResponse
                 "apply": ds.apply(),
                 "wshm_dir": ds.config.wshm_dir.display().to_string(),
                 "features": ds.features(),
+                "git_provider": ds.gh().provider_name(),
             })
         })
         .collect();
@@ -3409,8 +3414,56 @@ async fn api_pr_groups_get(
         .clamp(1, 12);
 
     let groups = crate::pipelines::pr_groups::build_from(&prs, &name_stop, group_limit, sub_limit);
+    let groups = with_forge_urls(json!(groups), &snapshot, true);
     Json(json!({ "groups": groups, "groups_limit": group_limit, "subs_limit": sub_limit }))
         .into_response()
+}
+
+/// Add each `{number, repo}` item's web URL on its repo's forge (`url`,
+/// absent for an unknown provider), so the graph links to GitLab / Gitea /
+/// Azure DevOps as well as GitHub.
+fn with_forge_urls(
+    mut v: serde_json::Value,
+    repos: &[(String, Arc<super::DaemonState>)],
+    is_pr: bool,
+) -> serde_json::Value {
+    fn walk(v: &mut serde_json::Value, repos: &[(String, Arc<super::DaemonState>)], is_pr: bool) {
+        match v {
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, repos, is_pr);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                let target = match (map.get("number"), map.get("repo")) {
+                    (Some(n), Some(r)) => n.as_u64().zip(r.as_str().map(String::from)),
+                    _ => None,
+                };
+                if let Some((number, repo)) = target {
+                    let url = repos
+                        .iter()
+                        .find(|(slug, _)| *slug == repo)
+                        .and_then(|(_, ds)| {
+                            if is_pr {
+                                crate::git_provider::web_url_for_pr(&ds.config, number)
+                            } else {
+                                crate::git_provider::web_url_for_issue(&ds.config, number)
+                            }
+                        });
+                    if let Some(url) = url {
+                        map.insert("url".into(), json!(url));
+                    }
+                } else {
+                    for child in map.values_mut() {
+                        walk(child, repos, is_pr);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(&mut v, repos, is_pr);
+    v
 }
 
 /// GET /api/v1/issue-groups -- same subject hierarchy as pr-groups, but over
@@ -3469,6 +3522,7 @@ async fn api_issue_groups_get(
 
     let groups =
         crate::pipelines::pr_groups::build_from(&issues, &name_stop, group_limit, sub_limit);
+    let groups = with_forge_urls(json!(groups), &snapshot, false);
     Json(json!({ "groups": groups, "groups_limit": group_limit, "subs_limit": sub_limit }))
         .into_response()
 }
@@ -3574,7 +3628,45 @@ async fn api_add_repo(
     }
     let path = path_str.map(std::path::PathBuf::from);
 
-    match state.multi.add_repo(&slug, path).await {
+    // Forge of the repo (default github) and self-managed base URL.
+    let field = |k: &str| {
+        body.get(k)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    let git_provider = field("git_provider");
+    if let Some(p) = git_provider.as_deref() {
+        if !matches!(
+            p,
+            "github" | "gitlab" | "gitea" | "forgejo" | "azure-devops" | "azure"
+        ) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "git_provider must be one of github, gitlab, gitea, forgejo, azure-devops"})),
+            )
+                .into_response();
+        }
+    }
+    let git_url = field("git_url");
+    if let Some(u) = git_url.as_deref() {
+        if !(u.starts_with("https://") || u.starts_with("http://"))
+            || u.contains(char::is_whitespace)
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "git_url must be an http(s) URL"})),
+            )
+                .into_response();
+        }
+    }
+
+    match state
+        .multi
+        .add_repo_on_forge(&slug, path, git_provider, git_url)
+        .await
+    {
         Ok(state) => (
             StatusCode::CREATED,
             Json(json!({
@@ -3841,10 +3933,23 @@ async fn api_auth_status(State(state): State<Arc<WebState>>) -> impl IntoRespons
         None
     };
 
+    // Forges of tracked repos running without a token (anonymous,
+    // read-only): drives the UI banner, which is not only about GitHub.
+    let mut forge_tokens_missing: Vec<String> = Vec::new();
+    for ds in state.multi.repos.read().await.values() {
+        let gh = ds.gh();
+        let name = gh.provider_name().to_string();
+        if !gh.is_authenticated() && !forge_tokens_missing.contains(&name) {
+            forge_tokens_missing.push(name);
+        }
+    }
+    forge_tokens_missing.sort();
+
     Json(json!({
         "github": github,
         "github_kind": github_kind,
         "anthropic": anthropic_kind,
+        "forge_tokens_missing": forge_tokens_missing,
     }))
 }
 
