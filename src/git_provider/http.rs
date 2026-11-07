@@ -159,6 +159,19 @@ impl Rest {
             let resp = self
                 .send_once(method.clone(), url, body, content_type, accept)
                 .await?;
+            // Rate limited (GitLab.com, self-managed with limits on): wait
+            // what the server asks before the retry layer tries again.
+            if resp.status == StatusCode::TOO_MANY_REQUESTS {
+                if let Some(wait) = retry_after(&resp.headers) {
+                    tracing::warn!(
+                        "{} rate limited on {}: waiting {}s",
+                        self.label,
+                        redact(url),
+                        wait.as_secs()
+                    );
+                    tokio::time::sleep(wait).await;
+                }
+            }
             // Surface 5xx/429 as errors so the retry layer sees them.
             if resp.status.is_server_error() || resp.status == StatusCode::TOO_MANY_REQUESTS {
                 anyhow::bail!(
@@ -288,6 +301,22 @@ pub(crate) fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
         .and_then(|s| s.trim().parse().ok())
 }
 
+/// Longest wait honoured from a `Retry-After` header.
+const MAX_RETRY_AFTER_SECS: u64 = 60;
+
+/// Delay asked by a 429 answer: `Retry-After` in seconds, else GitLab's
+/// `RateLimit-Reset` (epoch seconds), capped at [`MAX_RETRY_AFTER_SECS`].
+pub(crate) fn retry_after(headers: &HeaderMap) -> Option<std::time::Duration> {
+    let secs = header_u64(headers, "retry-after").or_else(|| {
+        let reset = header_u64(headers, "ratelimit-reset")?;
+        let now = chrono::Utc::now().timestamp().max(0) as u64;
+        Some(reset.saturating_sub(now))
+    })?;
+    Some(std::time::Duration::from_secs(
+        secs.min(MAX_RETRY_AFTER_SECS),
+    ))
+}
+
 /// Parse an RFC 3339 timestamp (any offset) into UTC.
 pub(crate) fn parse_ts(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(ts)
@@ -381,6 +410,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ok["ok"], true);
+    }
+
+    #[test]
+    fn retry_after_is_read_and_capped() {
+        let mut h = HeaderMap::new();
+        assert_eq!(retry_after(&h), None);
+        h.insert("retry-after", "7".parse().unwrap());
+        assert_eq!(retry_after(&h), Some(std::time::Duration::from_secs(7)));
+        h.insert("retry-after", "3600".parse().unwrap());
+        assert_eq!(retry_after(&h), Some(std::time::Duration::from_secs(60)));
+        let mut h = HeaderMap::new();
+        let reset = chrono::Utc::now().timestamp() + 5;
+        h.insert("ratelimit-reset", reset.to_string().parse().unwrap());
+        let wait = retry_after(&h).unwrap().as_secs();
+        assert!((4..=5).contains(&wait), "{wait}");
+    }
+
+    #[tokio::test]
+    async fn rate_limited_reads_are_retried() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            "/limited",
+            Reply::json(serde_json::json!({"message": "429 Too Many Requests"}))
+                .status(429)
+                .header("retry-after", "0"),
+        );
+        let rest = Rest::new("T", Auth::None).unwrap();
+        let err = rest
+            .get_json(&format!("{}/limited", server.url()))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("429"), "{err:#}");
+        // Retried per the global policy (other tests may change it).
+        assert!(!server.requests().is_empty());
     }
 
     #[tokio::test]

@@ -52,6 +52,17 @@ pub enum Capability {
     /// [`GitProvider::fetch_comments_since`] is implemented (slash commands
     /// in polling mode without webhooks).
     CommentPolling,
+    /// [`GitProvider::merge_pr`] is implemented (merge queue `--apply`).
+    Merge,
+}
+
+/// What [`GitProvider::merge_pr`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// Merged now.
+    Merged,
+    /// Accepted, merged by the forge once CI succeeds.
+    Scheduled,
 }
 
 /// The conversation a comment belongs to. GitHub and Gitea share one number
@@ -258,6 +269,21 @@ pub trait GitProvider: Send + Sync {
         draft: bool,
     ) -> Result<u64>;
 
+    /// Merge a pull request. `sha` is the head the caller evaluated: the
+    /// merge is refused when the branch moved since. `when_ci_passes` lets
+    /// the forge merge once the running CI succeeds instead of now.
+    /// Requires [`Capability::Merge`].
+    async fn merge_pr(
+        &self,
+        number: u64,
+        sha: Option<&str>,
+        squash: bool,
+        when_ci_passes: bool,
+    ) -> Result<MergeOutcome> {
+        let _ = (number, sha, squash, when_ci_passes);
+        Err(unsupported(self.provider_name(), "merging pull requests"))
+    }
+
     // ── Comments ────────────────────────────────────────────────────────
 
     /// First comment containing `marker` (or the legacy `<!-- wshm -->`).
@@ -421,7 +447,7 @@ pub fn web_url_for_pr(config: &crate::config::Config, number: u64) -> Option<Str
 
 /// Resolve the public base URL for the configured forge, with sensible
 /// defaults for the SaaS instance of each provider.
-fn forge_base_url(config: &crate::config::Config, provider: &str) -> String {
+pub(crate) fn forge_base_url(config: &crate::config::Config, provider: &str) -> String {
     if let Some(custom) = config.git_url.as_deref() {
         let trimmed = custom.trim_end_matches('/');
         if !trimmed.is_empty() {

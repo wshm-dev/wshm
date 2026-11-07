@@ -18,7 +18,7 @@ use crate::db::pulls::PullRequest;
 use crate::github::issues::ensure_comment_marker;
 
 use super::http::{self, Auth, Rest};
-use super::{Capability, CommentRef, GitProvider, MergedPr, PolledComment, Thread};
+use super::{Capability, CommentRef, GitProvider, MergeOutcome, MergedPr, PolledComment, Thread};
 
 /// Concurrency for per-MR enrichment calls (approvals).
 const PER_MR_CONCURRENCY: usize = 6;
@@ -299,6 +299,75 @@ fn render_diffs(entries: &[Value]) -> String {
     out
 }
 
+/// Extra marker on review notes (summary and inline): keeps them apart from
+/// the analysis comment that [`GitProvider::find_comment_with_marker`]
+/// updates in place, since GitLab lists every MR note in one thread.
+fn review_marker(marker: &str) -> String {
+    let name = marker
+        .trim()
+        .trim_start_matches("<!--")
+        .trim_end_matches("-->")
+        .trim();
+    format!("<!-- {name}:review -->")
+}
+
+/// GitHub's ```suggestion fence replaces the commented line; GitLab's
+/// equivalent spells the range explicitly (`-0+0` = that line only).
+fn gitlab_suggestions(body: &str) -> String {
+    body.lines()
+        .map(|l| {
+            if l.trim_end() == "```suggestion" {
+                "```suggestion:-0+0"
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Old path and, for an unchanged line, old line number of `new_line` in
+/// `path`, read from the MR diff entries. `(path, None)` for an added line
+/// or when the line is not in the diff (GitLab then rejects the position).
+fn old_side(diffs: &[Value], path: &str, new_line: u64) -> (String, Option<u64>) {
+    let Some(entry) = diffs.iter().find(|d| d["new_path"].as_str() == Some(path)) else {
+        return (path.to_string(), None);
+    };
+    let old_path = entry["old_path"].as_str().unwrap_or(path).to_string();
+    let (mut old, mut new) = (0u64, 0u64);
+    for l in entry["diff"].as_str().unwrap_or("").lines() {
+        if let Some(rest) = l.strip_prefix("@@ ") {
+            // @@ -a[,b] +c[,d] @@
+            let mut parts = rest.split_whitespace();
+            let start = |p: Option<&str>| {
+                p.and_then(|s| s.get(1..)?.split(',').next()?.parse::<u64>().ok())
+                    .unwrap_or(1)
+            };
+            old = start(parts.next());
+            new = start(parts.next());
+            continue;
+        }
+        match l.chars().next() {
+            Some('+') => {
+                if new == new_line {
+                    return (old_path, None);
+                }
+                new += 1;
+            }
+            Some('-') => old += 1,
+            Some('\\') => {}
+            _ => {
+                if new == new_line {
+                    return (old_path, Some(old));
+                }
+                old += 1;
+                new += 1;
+            }
+        }
+    }
+    (old_path, None)
+}
+
 #[async_trait]
 impl GitProvider for GitLabProvider {
     fn provider_name(&self) -> &str {
@@ -330,7 +399,8 @@ impl GitProvider for GitLabProvider {
             Capability::ReviewDecisions
             | Capability::Reactions
             | Capability::CiStatus
-            | Capability::CommentPolling => true,
+            | Capability::CommentPolling
+            | Capability::Merge => true,
         }
     }
 
@@ -619,28 +689,48 @@ impl GitProvider for GitLabProvider {
             anyhow::bail!("GitLab: MR !{pr_number} has no diff_refs (empty or still preparing)");
         };
 
+        // A position on an unchanged (context) line needs its old line too,
+        // and a renamed file its old path: both come from the MR diffs.
+        let diffs = if comments.is_empty() {
+            Vec::new()
+        } else {
+            self.list_all(&format!("merge_requests/{pr_number}/diffs"))
+                .await
+                .unwrap_or_else(|e| {
+                    warn!("GitLab: MR !{pr_number} diffs unavailable, anchoring on new lines only: {e:#}");
+                    Vec::new()
+                })
+        };
+        let review_marker = review_marker(&self.marker);
+
         // Inline comments are diff-anchored discussions. A line outside the
         // diff is rejected by GitLab; keep it in the summary instead of
         // dropping it.
         let mut not_anchored = Vec::new();
         for (path, line, comment_body) in comments {
+            let (old_path, old_line) = old_side(&diffs, path, *line);
+            let mut position = json!({
+                "position_type": "text",
+                "base_sha": base,
+                "start_sha": start,
+                "head_sha": head,
+                "old_path": old_path,
+                "new_path": path,
+                "new_line": line,
+            });
+            if let Some(old) = old_line {
+                position["old_line"] = json!(old);
+            }
+            let note = format!(
+                "{}\n{review_marker}",
+                ensure_comment_marker(&gitlab_suggestions(comment_body), &self.marker)
+            );
             let res = self
                 .rest
                 .send_json(
                     Method::POST,
                     &self.url(&format!("merge_requests/{pr_number}/discussions")),
-                    &json!({
-                        "body": ensure_comment_marker(comment_body, &self.marker),
-                        "position": {
-                            "position_type": "text",
-                            "base_sha": base,
-                            "start_sha": start,
-                            "head_sha": head,
-                            "old_path": path,
-                            "new_path": path,
-                            "new_line": line,
-                        }
-                    }),
+                    &json!({ "body": note, "position": position }),
                 )
                 .await;
             if let Err(e) = res {
@@ -657,7 +747,12 @@ impl GitProvider for GitLabProvider {
             .send_json(
                 Method::POST,
                 &self.url(&format!("merge_requests/{pr_number}/notes")),
-                &json!({ "body": ensure_comment_marker(&summary, &self.marker) }),
+                &json!({
+                    "body": format!(
+                        "{}\n{review_marker}",
+                        ensure_comment_marker(&summary, &self.marker)
+                    )
+                }),
             )
             .await?;
         Ok(())
@@ -696,6 +791,42 @@ impl GitProvider for GitLabProvider {
             .context("GitLab: missing iid in create MR response")
     }
 
+    async fn merge_pr(
+        &self,
+        number: u64,
+        sha: Option<&str>,
+        squash: bool,
+        when_ci_passes: bool,
+    ) -> Result<MergeOutcome> {
+        self.rest.require_auth("GitLab merge")?;
+        let mut body = json!({ "squash": squash });
+        if let Some(sha) = sha {
+            // GitLab answers 409 when the source branch moved past `sha`.
+            body["sha"] = json!(sha);
+        }
+        if when_ci_passes {
+            // `auto_merge` replaces `merge_when_pipeline_succeeds` (deprecated
+            // in GitLab 17.11); older instances only know the latter and
+            // ignore the unknown parameter.
+            body["merge_when_pipeline_succeeds"] = json!(true);
+            body["auto_merge"] = json!(true);
+        }
+        let mr = self
+            .rest
+            .send_json(
+                Method::PUT,
+                &self.url(&format!("merge_requests/{number}/merge")),
+                &body,
+            )
+            .await
+            .with_context(|| format!("GitLab: merging MR !{number}"))?;
+        Ok(if mr["state"].as_str() == Some("merged") {
+            MergeOutcome::Merged
+        } else {
+            MergeOutcome::Scheduled
+        })
+    }
+
     async fn find_comment_with_marker(
         &self,
         thread: Thread,
@@ -703,11 +834,19 @@ impl GitProvider for GitLabProvider {
     ) -> Result<Option<CommentRef>> {
         let (kind, number) = Self::kind(thread);
         let mut found = None;
+        let review = review_marker(&self.marker);
         self.list(&format!("{kind}/{number}/notes?sort=asc"), |note| {
-            if note["system"].as_bool() == Some(true) {
+            // System notes, diff-anchored notes and review summaries are
+            // never the comment wshm updates in place (they carry the marker
+            // for the self-comment guard only).
+            let body = note["body"].as_str().unwrap_or("");
+            if note["system"].as_bool() == Some(true)
+                || note["type"].as_str() == Some("DiffNote")
+                || body.contains(&review)
+            {
                 return true;
             }
-            if http::has_marker(note["body"].as_str().unwrap_or(""), marker) {
+            if http::has_marker(body, marker) {
                 found = note["id"].as_u64();
                 return found.is_none();
             }
@@ -877,6 +1016,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn incremental_mr_sync_follows_pages_and_stops_at_since() {
+        let server = MockServer::start().await;
+        let mr = |iid: u64, state: &str, updated: &str| {
+            json!({"iid": iid, "title": "t", "state": state, "sha": format!("h{iid}"),
+                   "source_branch": "f", "target_branch": "main", "has_conflicts": iid == 2,
+                   "detailed_merge_status": "mergeable", "updated_at": updated})
+        };
+        server.on(
+            "GET",
+            &format!("{P}/merge_requests"),
+            Reply::json(json!([mr(3, "opened", "2026-03-03T00:00:00Z")]))
+                .header("x-next-page", "2")
+                .when_query("&page=1"),
+        );
+        server.on(
+            "GET",
+            &format!("{P}/merge_requests"),
+            Reply::json(json!([
+                mr(2, "merged", "2026-03-02T00:00:00Z"),
+                mr(1, "closed", "2026-02-01T00:00:00Z")
+            ]))
+            .header("x-next-page", "3")
+            .when_query("&page=2"),
+        );
+        let prs = provider(&server)
+            .fetch_pulls_incremental("all", Some("2026-03-01T00:00:00Z"))
+            .await
+            .unwrap();
+        // MR 1 is older than `since`: listing stops there (no page 3).
+        assert_eq!(prs.iter().map(|p| p.number).collect::<Vec<_>>(), vec![3, 2]);
+        assert_eq!(
+            (prs[0].state.as_str(), prs[1].state.as_str()),
+            ("open", "closed")
+        );
+        assert_eq!(prs[0].mergeable, Some(true));
+        assert_eq!(prs[1].mergeable, Some(false));
+        assert_eq!(prs[0].head_ref.as_deref(), Some("f"));
+        let reqs = server.requests();
+        assert_eq!(reqs.len(), 2);
+        assert!(
+            reqs[0].query.contains("state=all") && reqs[0].query.contains("order_by=updated_at")
+        );
+        assert!(reqs[0]
+            .query
+            .contains("updated_after=2026-03-01T00%3A00%3A00Z"));
+        assert!(reqs[1].query.contains("page=2"));
+    }
+
+    #[tokio::test]
     async fn labels_use_atomic_add_and_remove() {
         let server = MockServer::start().await;
         server.on(
@@ -950,6 +1138,18 @@ mod tests {
             &format!("{P}/merge_requests/7"),
             Reply::json(json!({"iid": 7, "diff_refs": {"base_sha": "b", "start_sha": "s", "head_sha": "h"}})),
         );
+        // src/a.rs: line 12 is added; line 14 is unchanged (old line 13).
+        // src/new.rs was renamed from src/old.rs.
+        server.on(
+            "GET",
+            &format!("{P}/merge_requests/7/diffs"),
+            Reply::json(json!([
+                {"old_path": "src/a.rs", "new_path": "src/a.rs",
+                 "diff": "@@ -10,4 +10,5 @@ fn x() {\n ctx10\n ctx11\n+added12\n ctx13\n ctx14\n"},
+                {"old_path": "src/old.rs", "new_path": "src/new.rs", "renamed_file": true,
+                 "diff": "@@ -1 +1 @@\n-a\n+b\n"}
+            ])),
+        );
         server.on(
             "POST",
             &format!("{P}/merge_requests/7/discussions"),
@@ -960,19 +1160,83 @@ mod tests {
             &format!("{P}/merge_requests/7/notes"),
             Reply::json(json!({})),
         );
+        let suggestion = "nit\n\n```suggestion\nlet y = 2;\n```";
         provider(&server)
-            .submit_review(7, "summary", &[("src/a.rs".into(), 12, "nit".into())])
+            .submit_review(
+                7,
+                "summary",
+                &[
+                    ("src/a.rs".into(), 12, suggestion.into()),
+                    ("src/a.rs".into(), 14, "ctx".into()),
+                    ("src/new.rs".into(), 1, "renamed".into()),
+                ],
+            )
             .await
             .unwrap();
         let reqs = server.requests();
-        let disc = reqs[1].json();
-        assert_eq!(disc["position"]["head_sha"], "h");
-        assert_eq!(disc["position"]["base_sha"], "b");
-        assert_eq!(disc["position"]["start_sha"], "s");
-        assert_eq!(disc["position"]["new_line"], 12);
-        assert_eq!(disc["position"]["new_path"], "src/a.rs");
-        assert_eq!(reqs[2].json(), json!({"body": "summary\n\n<!-- wshm -->"}));
-        assert!(disc["body"].as_str().unwrap().ends_with("<!-- wshm -->"));
+        assert_eq!(reqs[1].path, format!("{P}/merge_requests/7/diffs"));
+
+        let added = reqs[2].json();
+        let pos = &added["position"];
+        assert_eq!(
+            (
+                pos["base_sha"].as_str(),
+                pos["start_sha"].as_str(),
+                pos["head_sha"].as_str()
+            ),
+            (Some("b"), Some("s"), Some("h"))
+        );
+        assert_eq!(pos["position_type"], "text");
+        assert_eq!(pos["new_path"], "src/a.rs");
+        assert_eq!(pos["old_path"], "src/a.rs");
+        assert_eq!(pos["new_line"], 12);
+        assert!(pos.get("old_line").is_none(), "{pos}");
+        let body = added["body"].as_str().unwrap();
+        assert!(
+            body.contains("```suggestion:-0+0\nlet y = 2;\n```"),
+            "{body}"
+        );
+        assert!(body.contains("<!-- wshm -->") && body.ends_with("<!-- wshm:review -->"));
+
+        // Context line: both sides.
+        let ctx = &reqs[3].json()["position"];
+        assert_eq!(
+            (ctx["new_line"].as_u64(), ctx["old_line"].as_u64()),
+            (Some(14), Some(13))
+        );
+        // Renamed file: old path from the diff.
+        let renamed = &reqs[4].json()["position"];
+        assert_eq!(renamed["old_path"], "src/old.rs");
+        assert_eq!(renamed["new_path"], "src/new.rs");
+
+        assert_eq!(reqs[5].path, format!("{P}/merge_requests/7/notes"));
+        assert_eq!(
+            reqs[5].json(),
+            json!({"body": "summary\n\n<!-- wshm -->\n<!-- wshm:review -->"})
+        );
+    }
+
+    #[tokio::test]
+    async fn analysis_comment_never_overwrites_review_notes() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            &format!("{P}/merge_requests/3/notes"),
+            Reply::json(json!([
+                {"id": 20, "type": "DiffNote", "body": "inline\n\n<!-- wshm -->"},
+                {"id": 21, "body": "review\n\n<!-- wshm -->\n<!-- wshm:review -->"}
+            ])),
+        );
+        server.on(
+            "POST",
+            &format!("{P}/merge_requests/3/notes"),
+            Reply::json(json!({"id": 22})),
+        );
+        provider(&server).comment_pr(3, "analysis").await.unwrap();
+        let reqs = server.requests();
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(reqs[1].method, "POST");
+        assert_eq!(reqs[1].json(), json!({"body": "analysis\n\n<!-- wshm -->"}));
     }
 
     #[tokio::test]
@@ -997,7 +1261,7 @@ mod tests {
             .submit_review(7, "summary", &[("a.rs".into(), 99, "far".into())])
             .await
             .unwrap();
-        let body = server.requests()[2].json()["body"]
+        let body = server.requests()[3].json()["body"]
             .as_str()
             .unwrap()
             .to_string();
