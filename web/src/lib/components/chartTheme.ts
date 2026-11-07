@@ -1,4 +1,4 @@
-import { theme } from '$lib/stores';
+import { theme, palette } from '$lib/stores';
 
 /** Chart ink colors resolved from the shadcn theme tokens on <html>.
  *  Canvas accepts the oklch() strings these vars hold in every browser
@@ -17,12 +17,21 @@ export function chartInk() {
 /** Increments on every theme switch; read it in a chart's $effect so the
  *  chart is rebuilt with the other mode's ink colors. */
 export function onThemeChange(cb: () => void): () => void {
-	let first = true;
-	return theme.subscribe(() => {
-		if (first) {
-			first = false;
-			return;
-		}
-		cb();
-	});
+	// A color theme can re-tint surfaces too, so it also redraws charts.
+	const skipFirst = () => {
+		let first = true;
+		return () => {
+			if (first) {
+				first = false;
+				return;
+			}
+			cb();
+		};
+	};
+	const offTheme = theme.subscribe(skipFirst());
+	const offPalette = palette.subscribe(skipFirst());
+	return () => {
+		offTheme();
+		offPalette();
+	};
 }

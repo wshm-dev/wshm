@@ -13,7 +13,7 @@
 	import * as RadioGroup from '$lib/components/ui/radio-group';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { colorConfig, colorPresets, type ColorConfig } from '$lib/colors';
-	import { theme } from '$lib/stores';
+	import ThemePicker from '$lib/components/ThemePicker.svelte';
 	import { t, tr } from '$lib/i18n';
 
 	let translate = $state<(k: string) => string>((k) => k);
@@ -767,6 +767,7 @@
 		<Tabs.Trigger value="git-providers">{$t('settings.tabs.gitProviders')}</Tabs.Trigger>
 		<Tabs.Trigger value="ai-providers">{$t('settings.tabs.aiProviders')}</Tabs.Trigger>
 		<Tabs.Trigger value="license">{$t('settings.tabs.license')}</Tabs.Trigger>
+		<Tabs.Trigger value="theme">{$t('settings.tabs.theme')}</Tabs.Trigger>
 		<Tabs.Trigger value="appearance">{$t('settings.tabs.appearance')}</Tabs.Trigger>
 		<Tabs.Trigger value="configuration">{$t('settings.tabs.configuration')}</Tabs.Trigger>
 		<Tabs.Trigger value="reliability">{$t('settings.tabs.reliability')}</Tabs.Trigger>
@@ -1177,22 +1178,16 @@
 		</Card.Root>
 	</Tabs.Content>
 
+	<!-- ============================ THEME ============================= -->
+	<Tabs.Content value="theme" class="mt-2">
+		<ThemePicker />
+	</Tabs.Content>
+
 	<!-- ========================== APPEARANCE ========================== -->
 	<Tabs.Content value="appearance" class="mt-2">
 		<Card.Root class="mb-4">
 			<Card.Content>
-				<div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
-					<div>
-						<h3 class="text-base font-medium mb-3">{$t('settings.appearance.theme')}</h3>
-						<div class="flex gap-2">
-							<Button size="xs" variant={$theme === 'dark' ? 'default' : 'outline'} onclick={() => theme.set('dark')}>
-								{$t('settings.appearance.themeDark')}
-							</Button>
-							<Button size="xs" variant={$theme === 'light' ? 'default' : 'outline'} onclick={() => theme.set('light')}>
-								{$t('settings.appearance.themeLight')}
-							</Button>
-						</div>
-					</div>
+				<div>
 					<div>
 						<h3 class="text-base font-medium mb-3">{$t('settings.appearance.presets')}</h3>
 						<div class="flex gap-2 flex-wrap">

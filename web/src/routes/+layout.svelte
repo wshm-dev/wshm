@@ -2,7 +2,7 @@
 	import type { Snippet } from 'svelte';
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { selectedRepo, theme, collapseSidebarSignal, type Theme } from '$lib/stores';
+	import { selectedRepo, theme, themeMode, collapseSidebarSignal, type Theme } from '$lib/stores';
 	import {
 		fetchStatus,
 		fetchMe,
@@ -11,36 +11,61 @@
 		syncIncremental,
 		syncFull,
 		type RepoInfo,
+		type Status,
 		type Me,
 		type AuthStatus,
 		type LicenseInfo
 	} from '$lib/api';
 	import { canAccessRoute, can } from '$lib/permissions';
+	import { timeAgo } from '$lib/time';
+	import { goto, afterNavigate } from '$app/navigation';
+	import {
+		allNavItems,
+		sectionOrder,
+		settingsItem,
+		searchItem,
+		activeHref,
+		sectionIcons,
+		type NavItem
+	} from '$lib/nav';
+	import CommandPalette from '$lib/components/CommandPalette.svelte';
+	import SidebarCollapsedProbe from '$lib/components/SidebarCollapsedProbe.svelte';
 	import { Button } from '$lib/components/ui/button';
-	import * as Select from '$lib/components/ui/select';
 	import * as Alert from '$lib/components/ui/alert';
 	import * as Avatar from '$lib/components/ui/avatar';
 	import * as Sidebar from '$lib/components/ui/sidebar';
 	import * as Collapsible from '$lib/components/ui/collapsible';
+	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 	import XIcon from '@lucide/svelte/icons/x';
 	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
+	import ChevronsUpDownIcon from '@lucide/svelte/icons/chevrons-up-down';
+	import CheckIcon from '@lucide/svelte/icons/check';
+	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+	import RefreshCcwIcon from '@lucide/svelte/icons/refresh-ccw';
+	import SearchIcon from '@lucide/svelte/icons/search';
 	import LogOutIcon from '@lucide/svelte/icons/log-out';
 	import SunIcon from '@lucide/svelte/icons/sun';
+	import TimerIcon from '@lucide/svelte/icons/timer';
 	import MoonIcon from '@lucide/svelte/icons/moon';
 	import '../app.css';
 
 	let { children }: { children: Snippet } = $props();
 	let isLoginRoute = $derived($page.url.pathname === '/login');
-	let activeUrl = $derived($page.url.pathname);
 
 	let repos: RepoInfo[] = $state([]);
+	let status: Status | null = $state(null);
+	let selectedRepoValue: string = $state('');
+	selectedRepo.subscribe((v) => (selectedRepoValue = v ?? ''));
 	let sidebarOpen: boolean = $state(true);
 	let currentTheme: Theme = $state('dark');
 	let me: Me | null = $state(null);
 	let authStatus: AuthStatus | null = $state(null);
 	let license: LicenseInfo | null = $state(null);
 	let bannerOpen: boolean = $state(true);
+	let paletteOpen = $state(false);
+	/** Desktop sidebar reduced to icons (never true on mobile). */
+	let iconMode = $state(false);
 	theme.subscribe((t) => (currentTheme = t));
 
 	function meLabel(m: Me): string {
@@ -52,110 +77,104 @@
 	}
 
 	function toggleTheme() {
-		theme.set(currentTheme === 'dark' ? 'light' : 'dark');
+		themeMode.set(currentTheme === 'dark' ? 'light' : 'dark');
 	}
 
-	type IconName =
-		| 'dashboard' | 'summary' | 'issues' | 'prs' | 'prGraph' | 'review' | 'triage' | 'queue'
-		| 'changelog' | 'revert' | 'backups' | 'activity' | 'actions' | 'logs'
-		| 'search' | 'settings' | 'insights' | 'issueInsights';
-
-	type NavSection = 'Overview' | 'Work' | 'Insights' | 'System';
-
-	type NavItem = {
-		href: string;
-		label: string;
-		icon: IconName;
-		/** Sidebar section header this item is grouped under. */
-		section: NavSection;
-		/** When set, hide the item unless `license.features[id].enabled === true`. */
-		feature?: string;
-		/** Hide the item unless the daemon reports `is_pro`. For Pro-only
-		 *  pages that have no licence feature id of their own (the route
-		 *  does not exist at all in an OSS build, so the link would 404). */
-		proOnly?: boolean;
-	};
-
-	const allNavItems: NavItem[] = [
-		{ href: '/', label: 'Dashboard', icon: 'dashboard', section: 'Overview' },
-		{ href: '/summary', label: 'Summary', icon: 'summary', section: 'Overview' },
-		{ href: '/search', label: 'Search', icon: 'search', section: 'Work' },
-		{ href: '/issues', label: 'Issues', icon: 'issues', section: 'Work' },
-		{ href: '/prs', label: 'Pull Requests', icon: 'prs', section: 'Work' },
-		{ href: '/review', label: 'Code Review', icon: 'review', section: 'Work' },
-		{ href: '/review/radar', label: 'Review Radar', icon: 'review', section: 'Work' },
-		{ href: '/triage', label: 'Triage', icon: 'triage', section: 'Work' },
-		{ href: '/autofix', label: 'Auto-fix', icon: 'actions', section: 'Work' },
-		{ href: '/conflicts', label: 'Conflicts', icon: 'queue', section: 'Work' },
-		{ href: '/improve', label: 'Improvements', icon: 'insights', section: 'Work' },
-		{ href: '/queue', label: 'Merge Queue', icon: 'queue', section: 'Work' },
-		{ href: '/actions', label: 'Actions', icon: 'actions', section: 'Work' },
-		{ href: '/graphs', label: 'Graphs', icon: 'prGraph', section: 'Insights' },
-		{
-			href: '/pr-insights',
-			label: 'PR Insights',
-			icon: 'insights',
-			section: 'Insights'
-		},
-		{
-			href: '/issue-insights',
-			label: 'Issue Insights',
-			icon: 'issueInsights',
-			section: 'Insights'
-		},
-		{ href: '/usage', label: 'Usage', icon: 'activity', section: 'Insights' },
-		{ href: '/reports', label: 'Reports', icon: 'changelog', section: 'Insights' },
-		{ href: '/changelog', label: 'Changelog', icon: 'changelog', section: 'Insights' },
-		{ href: '/activity', label: 'Activity', icon: 'activity', section: 'Insights' },
-		{ href: '/history', label: 'History', icon: 'activity', section: 'Insights' },
-		{ href: '/logs', label: 'Logs', icon: 'logs', section: 'System' },
-		{ href: '/revert', label: 'Revert', icon: 'revert', section: 'System' },
-		{ href: '/backups', label: 'Backups', icon: 'backups', section: 'System' },
-		{ href: '/users', label: 'Users', icon: 'settings', section: 'System', proOnly: true },
-		{ href: '/settings', label: 'Settings', icon: 'settings', section: 'System' }
-	];
 	function isFeatureLicensed(featureId: string | undefined): boolean {
 		if (!featureId) return true;
 		const f = license?.features?.find((x) => x.id === featureId);
 		return f?.enabled === true;
 	}
-	let navItems = $derived(
-		allNavItems
-			.filter((i) => canAccessRoute(me?.role, i.href))
-			.filter((i) => isFeatureLicensed(i.feature))
-			.filter((i) => !i.proOnly || license?.is_pro === true)
-	);
-	const sectionOrder: NavSection[] = ['Overview', 'Work', 'Insights', 'System'];
-	let navSections = $derived(
+	function visible(i: NavItem): boolean {
+		return (
+			canAccessRoute(me?.role, i.href) &&
+			isFeatureLicensed(i.feature) &&
+			(!i.proOnly || license?.is_pro === true)
+		);
+	}
+	let navItems = $derived(allNavItems.filter(visible));
+	let showSettings = $derived(visible(settingsItem));
+	// Everything the palette can jump to, in sidebar order.
+	let paletteItems = $derived([
+		...navItems,
+		...(showSettings ? [settingsItem] : []),
+		searchItem
+	]);
+	let activeUrl = $derived(activeHref($page.url.pathname, paletteItems));
+
+	type Section = { name: string; items: { item: NavItem; children: NavItem[] }[] };
+	let navSections: Section[] = $derived(
 		sectionOrder
-			.map((name) => ({ name, items: navItems.filter((i) => i.section === name) }))
+			.map((name) => ({
+				name,
+				items: navItems
+					.filter((i) => i.section === name && !i.parent)
+					.map((item) => ({
+						item,
+						children: navItems.filter((c) => c.parent === item.href)
+					}))
+			}))
 			.filter((s) => s.items.length > 0)
 	);
 
-	// Per-section fold state (persisted). System starts folded to keep the
+	// Per-section fold state (persisted). Admin starts folded to keep the
 	// menu focused on daily work; a section containing the ACTIVE route is
 	// always shown expanded so the current page never disappears from the
 	// sidebar (it re-folds when you navigate away).
-	const NAV_FOLD_KEY = 'wshm-nav-folded-sections';
-	let foldedSections: Record<string, boolean> = $state({ System: true });
+	const NAV_FOLD_KEY = 'wshm-nav-folded-sections-v2';
+	let foldedSections: Record<string, boolean> = $state({ Admin: true });
 	function loadFoldedSections() {
 		try {
 			const raw = localStorage.getItem(NAV_FOLD_KEY);
-			if (raw) foldedSections = { System: true, ...JSON.parse(raw) };
+			if (raw) foldedSections = { Admin: true, ...JSON.parse(raw) };
 		} catch { /* ignore */ }
 	}
 	function setSectionOpen(name: string, open: boolean) {
 		foldedSections = { ...foldedSections, [name]: !open };
 		try { localStorage.setItem(NAV_FOLD_KEY, JSON.stringify(foldedSections)); } catch { /* ignore */ }
 	}
-	function sectionOpen(name: string, items: NavItem[]): boolean {
-		if (!foldedSections[name]) return true;
-		return items.some((i) => i.href === activeUrl);
+	function sectionOpen(section: Section): boolean {
+		if (!foldedSections[section.name]) return true;
+		return section.items.some(
+			(e) => e.item.href === activeUrl || e.children.some((c) => c.href === activeUrl)
+		);
 	}
 
 	function persistSidebarOpen(open: boolean) {
 		try { localStorage.setItem('wshm-sidebar-collapsed', String(!open)); } catch { /* ignore */ }
 	}
+
+	// Auto-collapse: once the pointer has been away from the expanded sidebar
+	// for AUTO_COLLAPSE_MS, fold it to icons. On by default, switchable from
+	// the user menu. Not persisted as "collapsed", so a reload re-expands it.
+	const AUTO_COLLAPSE_KEY = 'wshm-sidebar-autocollapse';
+	const AUTO_COLLAPSE_MS = 10_000;
+	let autoCollapse = $state(true);
+	let collapseTimer: ReturnType<typeof setTimeout> | undefined;
+	function stopCollapseTimer() {
+		clearTimeout(collapseTimer);
+		collapseTimer = undefined;
+	}
+	function armCollapseTimer() {
+		stopCollapseTimer();
+		if (!autoCollapse || !sidebarOpen) return;
+		collapseTimer = setTimeout(() => {
+			// Never fold under an open repo/user menu or the palette.
+			const menuOpen = document.querySelector('[data-slot="dropdown-menu-content"]');
+			if (paletteOpen || menuOpen) armCollapseTimer();
+			else sidebarOpen = false;
+		}, AUTO_COLLAPSE_MS);
+	}
+	function setAutoCollapse(on: boolean) {
+		autoCollapse = on;
+		try { localStorage.setItem(AUTO_COLLAPSE_KEY, String(on)); } catch { /* ignore */ }
+		if (on) armCollapseTimer();
+		else stopCollapseTimer();
+	}
+	// Re-arm whenever the sidebar is (re)opened.
+	$effect(() => {
+		if (sidebarOpen && !iconMode) armCollapseTimer();
+	});
 
 	async function handleLogout() {
 		try {
@@ -169,17 +188,85 @@
 		window.location.replace('/login');
 	}
 
+	// "G then <key>" jumps (Linear, GitHub). The G arms the sequence for
+	// one second; typing in a field never triggers it.
+	let gArmedUntil = 0;
+	function isTyping(t: EventTarget | null): boolean {
+		const el = t as HTMLElement | null;
+		return !!el && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName));
+	}
+	function onGlobalKeydown(e: KeyboardEvent) {
+		if (isLoginRoute) return;
+		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+			e.preventDefault();
+			paletteOpen = !paletteOpen;
+			return;
+		}
+		if (e.metaKey || e.ctrlKey || e.altKey || paletteOpen || isTyping(e.target)) return;
+		const key = e.key.toLowerCase();
+		if (Date.now() < gArmedUntil) {
+			gArmedUntil = 0;
+			const target = paletteItems.find((i) => i.shortcut === key);
+			if (target) {
+				e.preventDefault();
+				goto(target.href);
+			}
+		} else if (key === 'g') {
+			gArmedUntil = Date.now() + 1000;
+		}
+	}
+
+	// Recently visited pages, newest first, for the palette.
+	const RECENT_KEY = 'wshm-recent-pages';
+	let recentPages: string[] = $state([]);
+	afterNavigate(() => {
+		const href = activeHref($page.url.pathname, paletteItems);
+		if (!href || href === '/search') return;
+		recentPages = [href, ...recentPages.filter((h) => h !== href)].slice(0, 4);
+		try { localStorage.setItem(RECENT_KEY, JSON.stringify(recentPages)); } catch { /* ignore */ }
+	});
+
+	// Badge counts follow the repo picked in the switcher.
+	let counts = $derived.by(() => {
+		if (!status) return null;
+		if (selectedRepoValue === '') return status;
+		return status.repos.find((r) => r.slug === selectedRepoValue) ?? null;
+	});
+	function countFor(item: NavItem): number | null {
+		if (!item.count || !counts) return null;
+		const n = counts[item.count];
+		return typeof n === 'number' && n > 0 ? n : null;
+	}
+	function formatCount(n: number): string {
+		return n > 999 ? `${Math.floor(n / 1000)}k` : String(n);
+	}
+	// Status and RepoInfo both carry last_sync.
+	let lastSync = $derived(counts?.last_sync ?? null);
+
+	async function refreshStatus() {
+		try {
+			status = await fetchStatus();
+			repos = status.repos;
+		} catch { /* ignore */ }
+	}
+
+	let isMac = $state(true);
+
 	onMount(async () => {
+		isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 		try {
 			const saved = localStorage.getItem('wshm-sidebar-collapsed');
 			if (saved === 'true') sidebarOpen = false;
 		} catch { /* ignore */ }
 		loadFoldedSections();
-		theme.update((t) => t);
 		try {
-			const status = await fetchStatus();
-			repos = status.repos;
+			autoCollapse = localStorage.getItem(AUTO_COLLAPSE_KEY) !== 'false';
 		} catch { /* ignore */ }
+		try {
+			recentPages = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]');
+		} catch { /* ignore */ }
+		theme.update((t) => t);
+		await refreshStatus();
 		try {
 			me = await fetchMe();
 		} catch { /* ignore */ }
@@ -194,6 +281,15 @@
 		} catch { /* ignore */ }
 	});
 
+	// Keep the badge counts fresh while the app stays open.
+	onMount(() => {
+		const poll = setInterval(refreshStatus, 60_000);
+		return () => {
+			clearInterval(poll);
+			stopCollapseTimer();
+		};
+	});
+
 	function persistBannerDismiss() {
 		try { localStorage.setItem('wshm-anon-banner-dismissed', 'true'); } catch { /* ignore */ }
 	}
@@ -204,11 +300,12 @@
 	async function runSync(full: boolean) {
 		if (syncing) return;
 		syncing = true;
-		syncMsg = full ? 'Full sync...' : 'Sync...';
+		syncMsg = full ? 'Full sync…' : 'Syncing…';
 		try {
 			const r = full ? await syncFull() : await syncIncremental();
 			const ok = r.errors?.length === 0;
 			syncMsg = ok ? `Synced ${r.synced.length} repo(s)` : `Partial: ${r.errors?.length} error(s)`;
+			await refreshStatus();
 		} catch (e) {
 			syncMsg = e instanceof Error ? e.message : 'Sync failed';
 		}
@@ -216,10 +313,6 @@
 		setTimeout(() => { if (syncMsg) syncMsg = null; }, 4000);
 	}
 
-	let repoOptions = $derived([
-		{ value: '', name: 'All repos' },
-		...repos.map((r) => ({ value: r.slug, name: r.slug }))
-	]);
 	// Auto-collapse the sidebar when a content page requests it (e.g. the graph
 	// on interaction). Only reacts to real bumps (>0), so it never fires on load.
 	let lastCollapseSignal = 0;
@@ -230,83 +323,40 @@
 		}
 	});
 
-	let selectedRepoValue: string = $state('');
-	selectedRepo.subscribe((v) => (selectedRepoValue = v ?? ''));
 	$effect(() => {
 		selectedRepo.set(selectedRepoValue === '' ? null : selectedRepoValue);
 	});
+	let repoLabel = $derived(selectedRepoValue === '' ? 'All repos' : selectedRepoValue);
+	let repoSubtitle = $derived(
+		syncMsg ?? (lastSync ? `${repoLabel} · ${timeAgo(lastSync)}` : repoLabel)
+	);
 </script>
 
-{#snippet navIcon(icon: IconName)}
-	<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-		{#if icon === 'dashboard'}
-			<rect x="3" y="3" width="7" height="9" rx="1" />
-			<rect x="14" y="3" width="7" height="5" rx="1" />
-			<rect x="14" y="12" width="7" height="9" rx="1" />
-			<rect x="3" y="16" width="7" height="5" rx="1" />
-		{:else if icon === 'summary'}
-			<path d="M3 3v18h18" />
-			<path d="M7 14l4-4 4 4 5-7" />
-		{:else if icon === 'issues'}
-			<circle cx="12" cy="12" r="9" />
-			<path d="M12 8v4M12 16h.01" />
-		{:else if icon === 'prs'}
-			<circle cx="6" cy="6" r="2" />
-			<circle cx="6" cy="18" r="2" />
-			<circle cx="18" cy="18" r="2" />
-			<path d="M6 8v8" />
-			<path d="M11 6h5a2 2 0 0 1 2 2v8" />
-		{:else if icon === 'review'}
-			<path d="M9 12l2 2 4-4" />
-			<circle cx="12" cy="12" r="9" />
-		{:else if icon === 'triage'}
-			<path d="M3 6h18" />
-			<path d="M6 12h12" />
-			<path d="M10 18h4" />
-		{:else if icon === 'queue'}
-			<path d="M8 6h13M8 12h13M8 18h13" />
-			<circle cx="3.5" cy="6" r="1.5" />
-			<circle cx="3.5" cy="12" r="1.5" />
-			<circle cx="3.5" cy="18" r="1.5" />
-		{:else if icon === 'changelog'}
-			<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-			<polyline points="14 2 14 8 20 8" />
-			<path d="M8 13h8M8 17h5" />
-		{:else if icon === 'revert'}
-			<path d="M9 14L4 9l5-5" />
-			<path d="M4 9h11a5 5 0 0 1 0 10h-3" />
-		{:else if icon === 'backups'}
-			<ellipse cx="12" cy="5" rx="9" ry="3" />
-			<path d="M3 5v6c0 1.7 4 3 9 3s9-1.3 9-3V5" />
-			<path d="M3 11v6c0 1.7 4 3 9 3s9-1.3 9-3v-6" />
-		{:else if icon === 'activity'}
-			<polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-		{:else if icon === 'actions'}
-			<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-		{:else if icon === 'logs'}
-			<path d="M4 4h16v4H4z" />
-			<path d="M4 12h16v4H4z" />
-			<path d="M4 20h10" />
-		{:else if icon === 'prGraph'}
-			<circle cx="5" cy="6" r="2.5" />
-			<circle cx="19" cy="7" r="2.5" />
-			<circle cx="12" cy="18" r="2.5" />
-			<path d="M7.2 7.2 10 16M16.9 8.4 13.4 16.4M7.3 6.4h9.4" />
-		{:else if icon === 'insights'}
-			<circle cx="12" cy="12" r="9" />
-			<path d="M12 3v9l6.5 6.5" />
-		{:else if icon === 'issueInsights'}
-			<path d="M4 20V10" />
-			<path d="M12 20V4" />
-			<path d="M20 20v-7" />
-		{:else if icon === 'search'}
-			<circle cx="11" cy="11" r="7" />
-			<path d="M21 21l-4.3-4.3" />
-		{:else if icon === 'settings'}
-			<circle cx="12" cy="12" r="3" />
-			<path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 0 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 0 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 0 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 0 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
-		{/if}
-	</svg>
+<svelte:window onkeydown={onGlobalKeydown} />
+
+{#snippet navLink(item: NavItem)}
+	{@const Icon = item.icon}
+	{@const n = countFor(item)}
+	<Sidebar.MenuButton
+		isActive={activeUrl === item.href}
+		tooltipContent={item.shortcut ? `${item.label}  ·  G ${item.shortcut.toUpperCase()}` : item.label}
+		class="relative h-7 text-[0.8125rem] text-sidebar-foreground/75 hover:text-sidebar-foreground data-active:bg-primary/12 data-active:text-sidebar-foreground data-active:[&>svg]:text-primary data-active:before:absolute data-active:before:inset-y-1.5 data-active:before:left-0 data-active:before:w-0.5 data-active:before:rounded-full data-active:before:bg-primary {n !== null ? 'pr-10' : ''}"
+	>
+		{#snippet child({ props })}
+			<a href={item.href} aria-current={activeUrl === item.href ? 'page' : undefined} {...props}>
+				<Icon />
+				<span>{item.label}</span>
+			</a>
+		{/snippet}
+	</Sidebar.MenuButton>
+	{#if n !== null}
+		<Sidebar.MenuBadge
+			class="top-1 h-5 font-normal tabular-nums {item.countAttention
+				? 'bg-primary/15 text-primary'
+				: 'text-muted-foreground'}"
+			title="{n} {item.count?.replace('_', ' ')}"
+		>{formatCount(n)}</Sidebar.MenuBadge>
+	{/if}
 {/snippet}
 
 {#if isLoginRoute}
@@ -315,155 +365,272 @@
 <Sidebar.Provider
 	bind:open={sidebarOpen}
 	onOpenChange={persistSidebarOpen}
-	style="--sidebar-width: 13rem; --sidebar-width-icon: 3rem;"
+	style="--sidebar-width: 15rem; --sidebar-width-icon: 3rem;"
 >
-	<Sidebar.Root collapsible="icon">
-		<Sidebar.Header>
-			<div class="flex items-center gap-2 px-1 py-0.5">
-				<!-- Dark backdrop keeps the (dark) logo art visible on the light theme. -->
-				<img src="/wizard-icon.png" alt="wshm" class="h-7 w-7 flex-shrink-0 rounded-md bg-gray-900 p-0.5" />
-				<span class="truncate text-base font-bold group-data-[collapsible=icon]:hidden">wshm</span>
+	<Sidebar.Root collapsible="icon" onmouseenter={stopCollapseTimer} onmouseleave={armCollapseTimer}>
+		<Sidebar.Header class="gap-1.5">
+			<!-- Repo switcher: the "workspace" picker of Linear / Vercel. Sync
+			     lives here because it acts on the selected repos. -->
+			<div class="flex items-center gap-1">
+				<!-- The logo always goes home, also in icon mode. Dark backdrop keeps
+				     the (dark) logo art visible on the light theme. -->
+				<a
+					href="/"
+					title="Home (G D)"
+					aria-label="Home"
+					class="shrink-0 rounded-md p-1 ring-sidebar-ring transition-colors outline-hidden hover:bg-sidebar-accent focus-visible:ring-2 group-data-[collapsible=icon]:p-0"
+				>
+					<img src="/wizard-icon.png" alt="" class="size-8 rounded-md bg-gray-900 p-0.5" />
+				</a>
+			<Sidebar.Menu class="min-w-0 flex-1 group-data-[collapsible=icon]:hidden">
+				<Sidebar.MenuItem>
+					<DropdownMenu.Root>
+						<DropdownMenu.Trigger>
+							{#snippet child({ props })}
+								<Sidebar.MenuButton size="lg" class="h-10 data-[state=open]:bg-sidebar-accent" {...props}>
+									<div class="grid min-w-0 flex-1 text-left leading-tight">
+										<span class="truncate text-sm font-semibold">wshm</span>
+										<span class="truncate text-xs text-muted-foreground" title={lastSync ?? undefined}>{repoSubtitle}</span>
+									</div>
+									<ChevronsUpDownIcon class="ml-auto text-muted-foreground" />
+								</Sidebar.MenuButton>
+							{/snippet}
+						</DropdownMenu.Trigger>
+						<DropdownMenu.Content class="w-(--bits-dropdown-menu-anchor-width) min-w-56" align="start" sideOffset={4}>
+							<DropdownMenu.Label class="text-xs text-muted-foreground">Repositories</DropdownMenu.Label>
+							<DropdownMenu.Item onSelect={() => (selectedRepoValue = '')}>
+								<span class="flex-1 truncate">All repos</span>
+								{#if selectedRepoValue === ''}<CheckIcon class="size-4" />{/if}
+							</DropdownMenu.Item>
+							{#each repos as r (r.slug)}
+								<DropdownMenu.Item onSelect={() => (selectedRepoValue = r.slug)}>
+									<span class="flex-1 truncate">{r.slug}</span>
+									{#if selectedRepoValue === r.slug}<CheckIcon class="size-4" />{/if}
+								</DropdownMenu.Item>
+							{/each}
+							<DropdownMenu.Separator />
+							<DropdownMenu.Item
+								disabled={syncing || !can(me?.role, 'syncIncremental')}
+								onSelect={() => runSync(false)}
+								title={can(me?.role, 'syncIncremental') ? undefined : 'Requires member role'}
+							>
+								<RefreshCwIcon class="size-4" />
+								<span class="flex-1">Sync now</span>
+								<span class="text-xs text-muted-foreground">changes</span>
+							</DropdownMenu.Item>
+							<DropdownMenu.Item
+								disabled={syncing || !can(me?.role, 'syncFull')}
+								onSelect={() => runSync(true)}
+								title={can(me?.role, 'syncFull') ? undefined : 'Requires operator role'}
+							>
+								<RefreshCcwIcon class="size-4" />
+								<span class="flex-1">Full re-sync</span>
+								<span class="text-xs text-muted-foreground">slower</span>
+							</DropdownMenu.Item>
+						</DropdownMenu.Content>
+					</DropdownMenu.Root>
+				</Sidebar.MenuItem>
+			</Sidebar.Menu>
 			</div>
-			<div class="space-y-1.5 group-data-[collapsible=icon]:hidden">
-				<Select.Root type="single" bind:value={selectedRepoValue}>
-					<Select.Trigger size="sm" class="w-full text-xs">
-						{repoOptions.find((o) => o.value === selectedRepoValue)?.name ?? 'All repos'}
-					</Select.Trigger>
-					<Select.Content>
-						{#each repoOptions as o (o.value)}
-							<Select.Item value={o.value} label={o.name} />
-						{/each}
-					</Select.Content>
-				</Select.Root>
-				<div class="flex w-full gap-1">
-					<Button
-						variant="outline"
-						size="xs"
-						class="flex-1"
-						disabled={syncing || !can(me?.role, 'syncIncremental')}
-						onclick={() => runSync(false)}
-						title={can(me?.role, 'syncIncremental')
-							? 'Incremental sync (changes since last sync)'
-							: 'Requires member role'}
-					>{syncing ? '…' : 'Sync'}</Button>
-					<Button
-						variant="outline"
-						size="xs"
-						class="flex-1"
-						disabled={syncing || !can(me?.role, 'syncFull')}
-						onclick={() => runSync(true)}
-						title={can(me?.role, 'syncFull')
-							? 'Full re-sync (slower)'
-							: 'Requires operator role'}
-					>Full</Button>
-				</div>
-				{#if syncMsg}
-					<div class="truncate text-[0.65rem] text-muted-foreground" title={syncMsg}>{syncMsg}</div>
-				{/if}
+			<div class="flex items-center gap-1 group-data-[collapsible=icon]:flex-col">
+				<Sidebar.Menu class="min-w-0 flex-1">
+					<Sidebar.MenuItem>
+						<Sidebar.MenuButton
+							onclick={() => (paletteOpen = true)}
+							tooltipContent="Search ({isMac ? '⌘' : 'Ctrl+'}K)"
+							class="h-7 border border-sidebar-border text-[0.8125rem] text-muted-foreground group-data-[collapsible=icon]:border-0"
+						>
+							<SearchIcon />
+							<span class="flex-1">Search…</span>
+							<kbd class="pointer-events-none rounded border bg-background px-1 font-mono text-[0.625rem] group-data-[collapsible=icon]:hidden">
+								{isMac ? '⌘' : 'Ctrl'} K
+							</kbd>
+						</Sidebar.MenuButton>
+					</Sidebar.MenuItem>
+				</Sidebar.Menu>
+				<Sidebar.Trigger
+					class="shrink-0 text-muted-foreground hover:text-foreground"
+					title="Toggle sidebar ({isMac ? '⌘' : 'Ctrl+'}B)"
+				/>
 			</div>
 		</Sidebar.Header>
 
-		<Sidebar.Content>
+		<Sidebar.Content class="gap-0">
 			{#each navSections as section (section.name)}
-				<!-- In icon-collapsed mode the group labels (fold triggers) are not
-				     visible, so a folded section would leave orphaned, unreachable
-				     items: force every section open while collapsed. -->
-				<Collapsible.Root
-					open={!sidebarOpen || sectionOpen(section.name, section.items)}
-					onOpenChange={(o) => { if (sidebarOpen) setSectionOpen(section.name, o); }}
-					class="group/collapsible"
-				>
+				{#if section.name === 'Main'}
 					<Sidebar.Group class="py-1">
-						<Sidebar.GroupLabel class="text-[0.625rem] font-semibold tracking-wider uppercase">
-							{#snippet child({ props })}
-								<Collapsible.Trigger {...props}>
-									{section.name}
-									<ChevronRightIcon
-										class="ml-auto size-3 transition-transform group-data-[state=open]/collapsible:rotate-90"
-									/>
-								</Collapsible.Trigger>
-							{/snippet}
-						</Sidebar.GroupLabel>
-						<Collapsible.Content>
-							<Sidebar.GroupContent>
-								<Sidebar.Menu>
-									{#each section.items as item (item.href)}
-										<Sidebar.MenuItem>
-											<Sidebar.MenuButton isActive={activeUrl === item.href} tooltipContent={item.label}>
-												{#snippet child({ props })}
-													<a
-														href={item.href}
-														aria-current={activeUrl === item.href ? 'page' : undefined}
-														{...props}
-													>
-														{@render navIcon(item.icon)}
-														<span>{item.label}</span>
-													</a>
-												{/snippet}
-											</Sidebar.MenuButton>
-										</Sidebar.MenuItem>
-									{/each}
-								</Sidebar.Menu>
-							</Sidebar.GroupContent>
-						</Collapsible.Content>
+						<Sidebar.Menu>
+							{#each section.items as { item } (item.href)}
+								<Sidebar.MenuItem>{@render navLink(item)}</Sidebar.MenuItem>
+							{/each}
+						</Sidebar.Menu>
+						{#if iconMode}<Sidebar.Separator class="mx-auto mt-1 w-6!" />{/if}
 					</Sidebar.Group>
-				</Collapsible.Root>
+				{:else if iconMode}
+					<!-- Icon mode: one button per group, its pages in a flyout, so the
+					     groups stay readable and the rail never overflows. -->
+					{@const SectionIcon = sectionIcons[section.name as keyof typeof sectionIcons]}
+					{@const flat = section.items.flatMap((e) => [e.item, ...e.children])}
+					{@const groupActive = flat.some((i) => i.href === activeUrl)}
+					{@const groupCount = flat.reduce((acc, i) => acc + (i.countAttention ? (countFor(i) ?? 0) : 0), 0)}
+					<Sidebar.Group class="py-0.5">
+						<Sidebar.Menu>
+							<Sidebar.MenuItem>
+								<DropdownMenu.Root>
+									<DropdownMenu.Trigger>
+										{#snippet child({ props })}
+											<Sidebar.MenuButton
+												{...props}
+												isActive={groupActive}
+												title={section.name}
+												aria-label={section.name}
+												class="relative text-sidebar-foreground/75 hover:text-sidebar-foreground data-active:bg-primary/12 data-active:text-sidebar-foreground data-active:[&>svg]:text-primary data-active:before:absolute data-active:before:inset-y-1.5 data-active:before:left-0 data-active:before:w-0.5 data-active:before:rounded-full data-active:before:bg-primary data-[state=open]:bg-sidebar-accent"
+											>
+												<SectionIcon />
+												{#if groupCount > 0}
+													<span class="absolute top-1 right-1 size-1.5 rounded-full bg-primary"></span>
+												{/if}
+											</Sidebar.MenuButton>
+										{/snippet}
+									</DropdownMenu.Trigger>
+									<DropdownMenu.Content side="right" align="start" sideOffset={8} class="min-w-52">
+										<DropdownMenu.Label class="text-xs text-muted-foreground">{section.name}</DropdownMenu.Label>
+										{#each flat as i (i.href)}
+											{@const ItemIcon = i.icon}
+											{@const n = countFor(i)}
+											<DropdownMenu.Item
+												onSelect={() => goto(i.href)}
+												class={activeUrl === i.href ? 'bg-primary/12 text-foreground [&>svg]:text-primary' : ''}
+											>
+												<ItemIcon class="size-4 {i.parent ? 'ml-3' : ''}" />
+												<span class="flex-1">{i.label}</span>
+												{#if n !== null}
+													<span class="text-xs tabular-nums {i.countAttention ? 'text-primary' : 'text-muted-foreground'}">{formatCount(n)}</span>
+												{:else if i.shortcut}
+													<span class="text-xs text-muted-foreground">G {i.shortcut.toUpperCase()}</span>
+												{/if}
+											</DropdownMenu.Item>
+										{/each}
+									</DropdownMenu.Content>
+								</DropdownMenu.Root>
+							</Sidebar.MenuItem>
+						</Sidebar.Menu>
+					</Sidebar.Group>
+				{:else}
+					<Collapsible.Root
+						open={sectionOpen(section)}
+						onOpenChange={(o) => setSectionOpen(section.name, o)}
+						class="group/collapsible"
+					>
+						<Sidebar.Group class="py-1">
+							<Sidebar.GroupLabel class="h-7 text-xs font-medium text-muted-foreground hover:text-foreground">
+								{#snippet child({ props })}
+									<Collapsible.Trigger {...props}>
+										{section.name}
+										<ChevronRightIcon
+											class="ml-1 size-3 opacity-0 transition-[transform,opacity] group-hover/collapsible:opacity-100 group-data-[state=closed]/collapsible:opacity-100 group-data-[state=open]/collapsible:rotate-90"
+										/>
+									</Collapsible.Trigger>
+								{/snippet}
+							</Sidebar.GroupLabel>
+							<Collapsible.Content>
+								<Sidebar.GroupContent>
+									<Sidebar.Menu>
+										{#each section.items as { item, children: subs } (item.href)}
+											<Sidebar.MenuItem>
+												{@render navLink(item)}
+												{#if subs.length > 0}
+													<Sidebar.MenuSub class="mr-0 border-l-primary/30 bg-black/[0.04] py-1 dark:bg-black/25">
+														{#each subs as sub (sub.href)}
+															{@const SubIcon = sub.icon}
+															<Sidebar.MenuSubItem>
+																<Sidebar.MenuSubButton
+																	href={sub.href}
+																	isActive={activeUrl === sub.href}
+																	class="h-6 text-xs text-muted-foreground hover:text-sidebar-foreground data-active:bg-primary/12 data-active:font-medium data-active:text-primary data-active:[&>svg]:text-primary"
+																	aria-current={activeUrl === sub.href ? 'page' : undefined}
+																>
+																	<SubIcon />
+																	<span>{sub.label}</span>
+																</Sidebar.MenuSubButton>
+															</Sidebar.MenuSubItem>
+														{/each}
+													</Sidebar.MenuSub>
+												{/if}
+											</Sidebar.MenuItem>
+										{/each}
+									</Sidebar.Menu>
+								</Sidebar.GroupContent>
+							</Collapsible.Content>
+						</Sidebar.Group>
+					</Collapsible.Root>
+				{/if}
 			{/each}
 		</Sidebar.Content>
 
-		<Sidebar.Footer>
-			{#if me}
-				<div class="flex items-center gap-2 px-1" title={meLabel(me)}>
-					<Avatar.Root class="size-7 flex-shrink-0">
-						<Avatar.Fallback class="bg-primary text-xs font-semibold text-primary-foreground">
-							{meInitial(me)}
-						</Avatar.Fallback>
-					</Avatar.Root>
-					<div class="min-w-0 flex-1 group-data-[collapsible=icon]:hidden">
-						<div class="truncate text-xs">{meLabel(me)}</div>
-						<div class="text-[0.625rem] tracking-wider text-muted-foreground uppercase">
-							{me.auth_method === 'sso' ? 'SSO' : 'local'}
-						</div>
-					</div>
-				</div>
-			{/if}
-			<div class="flex items-center gap-1 group-data-[collapsible=icon]:flex-col">
-				<Button
-					variant="ghost"
-					size="icon-sm"
-					class="text-muted-foreground hover:text-foreground"
-					onclick={handleLogout}
-					title="Sign out"
-					aria-label="Sign out"
-				>
-					<LogOutIcon />
-				</Button>
-				<Button
-					variant="ghost"
-					size="icon-sm"
-					class="text-muted-foreground hover:text-foreground"
-					onclick={toggleTheme}
-					title={currentTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-					aria-label="Toggle theme"
-				>
-					{#if currentTheme === 'dark'}
-						<SunIcon />
-					{:else}
-						<MoonIcon />
-					{/if}
-				</Button>
-				<span
-					class="mono flex-1 text-center text-[0.625rem] text-muted-foreground group-data-[collapsible=icon]:hidden"
-					title={license?.is_pro ? 'wshm-pro' : 'wshm OSS'}
-				>v{license?.version ?? '…'}</span>
-				<Sidebar.Trigger
-					class="text-muted-foreground hover:text-foreground"
-					title="Toggle sidebar (⌘B)"
-				/>
-			</div>
+		<Sidebar.Footer class="gap-1 border-t border-sidebar-border">
+			<Sidebar.Menu>
+				{#if showSettings}
+					<Sidebar.MenuItem>{@render navLink(settingsItem)}</Sidebar.MenuItem>
+				{/if}
+				<Sidebar.MenuItem>
+					<DropdownMenu.Root>
+						<DropdownMenu.Trigger>
+							{#snippet child({ props })}
+								<Sidebar.MenuButton size="lg" class="data-[state=open]:bg-sidebar-accent" {...props}>
+									<Avatar.Root class="size-8 shrink-0 rounded-md">
+										<Avatar.Fallback class="rounded-md bg-primary text-xs font-semibold text-primary-foreground">
+											{me ? meInitial(me) : '?'}
+										</Avatar.Fallback>
+									</Avatar.Root>
+									<div class="grid min-w-0 flex-1 text-left leading-tight">
+										<span class="truncate text-sm">{me ? meLabel(me) : 'Not signed in'}</span>
+										<span class="truncate text-xs text-muted-foreground">
+											{me?.role ?? ''}{me?.role ? ' · ' : ''}{license?.is_pro ? 'Enterprise' : 'OSS'} v{license?.version ?? '…'}
+										</span>
+									</div>
+									<ChevronsUpDownIcon class="ml-auto text-muted-foreground" />
+								</Sidebar.MenuButton>
+							{/snippet}
+						</DropdownMenu.Trigger>
+						<DropdownMenu.Content class="w-(--bits-dropdown-menu-anchor-width) min-w-56" side="top" align="start" sideOffset={4}>
+							{#if me}
+								<DropdownMenu.Label class="font-normal">
+									<div class="truncate text-sm">{meLabel(me)}</div>
+									<div class="text-xs text-muted-foreground">
+										{me.auth_method === 'sso' ? 'Signed in with SSO' : 'Local account'}
+									</div>
+								</DropdownMenu.Label>
+								<DropdownMenu.Separator />
+							{/if}
+							<DropdownMenu.CheckboxItem
+								checked={autoCollapse}
+								onCheckedChange={(v) => setAutoCollapse(v === true)}
+								closeOnSelect={false}
+							>
+								<TimerIcon class="size-4" />
+								<span class="flex-1">Auto-collapse menu</span>
+								<span class="text-xs text-muted-foreground">10 s</span>
+							</DropdownMenu.CheckboxItem>
+							<DropdownMenu.Item onSelect={toggleTheme}>
+								{#if currentTheme === 'dark'}<SunIcon class="size-4" />{:else}<MoonIcon class="size-4" />{/if}
+								<span class="flex-1">{currentTheme === 'dark' ? 'Light mode' : 'Dark mode'}</span>
+							</DropdownMenu.Item>
+							<DropdownMenu.Separator />
+							<DropdownMenu.Item onSelect={handleLogout}>
+								<LogOutIcon class="size-4" />
+								<span>Sign out</span>
+							</DropdownMenu.Item>
+						</DropdownMenu.Content>
+					</DropdownMenu.Root>
+				</Sidebar.MenuItem>
+			</Sidebar.Menu>
 		</Sidebar.Footer>
 		<Sidebar.Rail />
 	</Sidebar.Root>
+
+	<SidebarCollapsedProbe bind:collapsed={iconMode} />
+	<CommandPalette bind:open={paletteOpen} items={paletteItems} recent={recentPages} />
 
 	<Sidebar.Inset class="min-w-0">
 		<main class="min-w-0 p-3">
