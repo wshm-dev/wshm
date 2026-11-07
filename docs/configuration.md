@@ -434,7 +434,7 @@ possible prompt injection.
 | `security` | A separate security review: a pattern scan of the added lines for committed secrets (no AI), then an AI pass on secrets, injections and permissions. Findings go to `verify`. | `ai` (true), `secrets` (true) |
 | `verify` | `voters` AI calls vote on every finding of the run; a finding is confirmed with `min_votes` votes (default: a majority of `voters`). When fewer voters than `min_votes` fit in the budget or answer, nothing is confirmed or posted and the reason is recorded (`status_check` then stays pending). Nits beyond `max_nits` are dropped. The confirmed findings are posted as one review (apply mode and `review_post_comments`), each finding once per PR (keyed by path, category, wording and the text of the targeted line; claimed in the DB before posting), and stored for the Review page. | `voters` (3, 1-5), `min_votes`, `max_nits` (3), `post` (true) |
 | `risk` | Classifies the change: `high` when a path matches `high_paths`, it changes more than `large_lines` lines, or an important security finding was made; `low` when every path matches `low_paths`; `medium` otherwise. Read by `when.risk` and `approval`. No AI. | `high_paths` (workflows, CI, Dockerfiles, migrations, auth, security, `*.pem`), `low_paths` (`*.md`, `docs/**`, `*.txt`, `*.rst`, `LICENSE*`), `large_lines` (1000), `security_high` (true) |
-| `approval` | Human approvals required per tier (default `low = 0`, `medium = 1`, `high = 2`), at least one when a path matches `always_human` or the author is not in `trusted_authors` (when set). Counts only approvals on the head commit by reviewers with write access (GitHub `author_association` OWNER, MEMBER or COLLABORATOR; Gitea / Forgejo `official` reviews); bots and the author never count. wshm itself only posts comment reviews, never approvals. Optionally keeps `label` on the PR while approvals are missing (apply mode). | `low`, `medium`, `high`, `always_human` (workflows, `CODEOWNERS`), `trusted_authors`, `label` |
+| `approval` | Human approvals required per tier (default `low = 0`, `medium = 1`, `high = 2`), at least one when a path matches `always_human` or the author is not in `trusted_authors` (when set). Counts only approvals on the head commit by reviewers with write access (GitHub `author_association` OWNER, MEMBER or COLLABORATOR; Gitea / Forgejo `official` reviews; GitLab Developer or above); bots and the author never count. wshm itself only posts comment reviews, never approvals. Optionally keeps `label` on the PR while approvals are missing (apply mode). | `low`, `medium`, `high`, `always_human` (workflows, `CODEOWNERS`), `trusted_authors`, `label` |
 | `status_check` | Always sets a commit status `context` on the PR head the review saw, so a required check is never left missing: `pending` while the review of that commit is not complete (review, verify or security skipped or failed, round cap, findings not verified), `failure` while important findings stay open (the verified ones when `verify` ran, else the last complete review of the same commit), `pending` while required approvals are missing or could not be counted (`approvals = true`), `success` otherwise. Use `after` (not `needs`) so it runs whatever the review steps did. Make it a required check in the branch protection to block the merge. Apply mode only; not set on forges without commit statuses or on items flagged as possible prompt injection. | `context` (`wshm/review`), `approvals` (true) |
 
 Severity: a finding on a line the PR did not add is `Pre-existing` (not held
@@ -442,9 +442,12 @@ against the author and never blocking); on an added line, `error` / `warning`
 are `Important` and the rest `Nit`.
 
 Forge support: commit statuses on GitHub, GitLab, Gitea and Forgejo (not Azure
-DevOps yet); approval counting on GitHub, Gitea and Forgejo. On GitLab,
-approvals are not counted, so `status_check` stays `pending` whenever the tier
-requires an approval: set the tiers to 0 or `approvals = false` there. A new
+DevOps yet); approval counting on GitHub, Gitea and Forgejo, and on GitLab
+only when the project removes all approvals when commits are added (GitLab
+approvals name no commit; approvers need Developer or above). Elsewhere on
+GitLab approvals are not counted, so `status_check` stays `pending` whenever
+the tier requires an approval: enable that setting, set the tiers to 0 or
+`approvals = false` there. A new
 commit re-runs the review on `pull_request.synchronize`; a submitted or
 dismissed review re-runs the approval and status steps.
 

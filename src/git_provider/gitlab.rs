@@ -414,9 +414,10 @@ impl GitProvider for GitLabProvider {
             | Capability::CiStatus
             | Capability::CommentPolling
             | Capability::CommitStatus
-            | Capability::Merge => true,
-            // Merge request approvals are not bound to a commit here.
-            Capability::PrApprovals => false,
+            | Capability::Merge
+            // Counted only where approvals reset on push (see
+            // fetch_pr_approvals): GitLab binds them to no commit.
+            | Capability::PrApprovals => true,
         }
     }
 
@@ -881,6 +882,31 @@ impl GitProvider for GitLabProvider {
             .collect())
     }
 
+    async fn fetch_pr_approvals(&self, number: u64) -> Result<Vec<super::PrApproval>> {
+        // GitLab approvals name no commit. They are only safe to count
+        // when the project drops them on every push (they then concern the
+        // head); otherwise an approval of an older commit would count, so
+        // this errs and the approval step reports them as not counted.
+        let settings = self.rest.get_json(&self.url("approvals")).await?;
+        if settings["reset_approvals_on_push"].as_bool() != Some(true) {
+            anyhow::bail!(
+                "approvals are kept on push (enable \"Remove all approvals when commits are added\")"
+            );
+        }
+        let mut out = Vec::new();
+        for login in self.fetch_pr_approvers(number).await? {
+            // Developer or above, like the merge gate.
+            let write_access = self.is_collaborator(&login).await.unwrap_or(false);
+            out.push(super::PrApproval {
+                login,
+                commit_sha: None,
+                bot: false,
+                write_access,
+            });
+        }
+        Ok(out)
+    }
+
     async fn find_wshm_comments(&self, thread: Thread, marker: &str) -> Result<Vec<CommentRef>> {
         // Unlike find_comment_with_marker: review notes and inline
         // discussions too (they are wshm's), system notes never.
@@ -1318,6 +1344,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_approvals_only_when_reset_on_push() {
+        let approvals = |server: &MockServer| {
+            server.on(
+                "GET",
+                &format!("{P}/merge_requests/4/approvals"),
+                Reply::json(json!({"approved_by": [
+                    {"user": {"username": "bob"}},
+                    {"user": {"username": "svc", "bot": true}}
+                ]})),
+            );
+        };
+        // Approvals survive pushes: not counted (an error, never a count).
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            &format!("{P}/approvals"),
+            Reply::json(json!({"reset_approvals_on_push": false})),
+        );
+        approvals(&server);
+        assert!(provider(&server).fetch_pr_approvals(4).await.is_err());
+
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            &format!("{P}/approvals"),
+            Reply::json(json!({"reset_approvals_on_push": true})),
+        );
+        approvals(&server);
+        server.on("GET", "/api/v4/users", Reply::json(json!([{"id": 42}])));
+        server.on(
+            "GET",
+            &format!("{P}/members/all/42"),
+            Reply::json(json!({"access_level": 30})),
+        );
+        let a = provider(&server).fetch_pr_approvals(4).await.unwrap();
+        assert_eq!(
+            a,
+            vec![super::super::PrApproval {
+                login: "bob".into(),
+                commit_sha: None,
+                bot: false,
+                write_access: true,
+            }]
+        );
+    }
+
+    #[tokio::test]
     async fn approvers_leave_out_bots() {
         let server = MockServer::start().await;
         server.on(
@@ -1530,7 +1603,7 @@ mod tests {
         server.on("POST", &format!("{P}/statuses/abc"), Reply::json(json!({})));
         let p = provider(&server);
         assert!(p.supports(Capability::CommitStatus));
-        assert!(!p.supports(Capability::PrApprovals));
+        assert!(p.supports(Capability::PrApprovals));
         p.set_commit_status(
             "abc",
             &crate::git_provider::CommitStatus {
