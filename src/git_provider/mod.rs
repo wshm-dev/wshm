@@ -58,6 +58,8 @@ pub enum Capability {
     /// [`GitProvider::fetch_pr_approvals`] is implemented (the `approval`
     /// pipeline step counts human approvals).
     PrApprovals,
+    /// [`GitProvider::merge_pr`] is implemented (merge queue `--apply`).
+    Merge,
 }
 
 /// State of a commit status set by [`GitProvider::set_commit_status`].
@@ -102,6 +104,15 @@ pub struct PrApproval {
     /// `author_association` OWNER / MEMBER / COLLABORATOR, Gitea
     /// `official`. Unknown = false (not counted).
     pub write_access: bool,
+}
+
+/// What [`GitProvider::merge_pr`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// The pull request is merged.
+    Merged,
+    /// The forge answered but the pull request is still not merged.
+    NotMerged,
 }
 
 /// The conversation a comment belongs to. GitHub and Gitea share one number
@@ -322,6 +333,25 @@ pub trait GitProvider: Send + Sync {
         draft: bool,
     ) -> Result<u64>;
 
+    /// Merge a pull request now. `sha` is the head the caller evaluated:
+    /// the merge is refused when the branch moved since. Never scheduled
+    /// on CI. Callers go through the merge-queue policy
+    /// (`pipelines::merge_queue`), which checks CI, approvals, conflicts
+    /// and the injection guard first. Requires [`Capability::Merge`].
+    async fn merge_pr(&self, number: u64, sha: Option<&str>, squash: bool) -> Result<MergeOutcome> {
+        let _ = (number, sha, squash);
+        Err(unsupported(self.provider_name(), "merging pull requests"))
+    }
+
+    /// Logins that approved the pull request, bot accounts left out where
+    /// the forge says so. Used by the merge-queue approval gate (which
+    /// also checks each approver's access). Required with
+    /// [`Capability::Merge`].
+    async fn fetch_pr_approvers(&self, number: u64) -> Result<Vec<String>> {
+        let _ = number;
+        Err(unsupported(self.provider_name(), "PR approvals"))
+    }
+
     // ── Comments ────────────────────────────────────────────────────────
 
     /// First comment containing `marker` (or the legacy `<!-- wshm -->`).
@@ -333,6 +363,14 @@ pub trait GitProvider: Send + Sync {
 
     /// Replace a comment's body.
     async fn update_comment(&self, comment: &CommentRef, body: &str) -> Result<()>;
+
+    /// One comment read back from the platform (author and text as the
+    /// platform has them, never as a webhook payload claims). `Ok(None)`
+    /// when it does not exist or was deleted.
+    async fn fetch_comment(&self, comment: &CommentRef) -> Result<Option<PolledComment>> {
+        let _ = comment;
+        Err(unsupported(self.provider_name(), "reading one comment"))
+    }
 
     /// Delete a comment. Already-deleted is not an error.
     async fn delete_comment(&self, comment: &CommentRef) -> Result<()>;
@@ -502,6 +540,7 @@ pub fn web_url_for_issue(config: &crate::config::Config, number: u64) -> Option<
             // Azure DevOps "issues" are work items, identified by ID across the whole org.
             // `repo_owner` here is the org, `repo_name` carries `project/repo`.
             let project = repo.split('/').next().unwrap_or(repo);
+            let (owner, project) = (azure_seg(owner), azure_seg(project));
             Some(format!("{base}/{owner}/{project}/_workitems/edit/{number}"))
         }
         _ => None,
@@ -522,12 +561,20 @@ pub fn web_url_for_pr(config: &crate::config::Config, number: u64) -> Option<Str
             let parts: Vec<&str> = repo.splitn(2, '/').collect();
             let project = parts.first().copied().unwrap_or(repo.as_str());
             let repo_only = parts.get(1).copied().unwrap_or(repo.as_str());
+            let (owner, project, repo_only) =
+                (azure_seg(owner), azure_seg(project), azure_seg(repo_only));
             Some(format!(
                 "{base}/{owner}/{project}/_git/{repo_only}/pullrequest/{number}"
             ))
         }
         _ => None,
     }
+}
+
+/// Azure DevOps names may contain spaces ("My Project"): one URL path
+/// segment each.
+fn azure_seg(s: &str) -> String {
+    urlencoding::encode(s).into_owned()
 }
 
 /// Resolve the public base URL for the configured forge, with sensible

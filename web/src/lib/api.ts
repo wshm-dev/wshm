@@ -768,6 +768,8 @@ export interface PrGroupPr {
 	number: number;
 	title: string;
 	repo: string;
+	/** Web URL on the repo's forge, when the server could build it. */
+	url?: string;
 }
 /** A secondary subject inside a grand groupe. */
 export interface PrSubGroup {

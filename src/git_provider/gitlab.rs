@@ -334,6 +334,7 @@ impl GitProvider for GitLabProvider {
             | Capability::CommitStatus => true,
             // Merge request approvals are not bound to a commit here.
             Capability::PrApprovals => false,
+            Capability::Merge => false,
         }
     }
 

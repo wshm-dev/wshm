@@ -61,6 +61,8 @@ impl GitProvider for GitHubProvider {
             | Capability::PrApprovals => true,
             // The poller uses the events API instead.
             Capability::CommentPolling => false,
+            // Not wired for GitHub yet: the merge queue only reports.
+            Capability::Merge => false,
         }
     }
 

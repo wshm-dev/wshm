@@ -362,6 +362,7 @@ impl GitProvider for GiteaProvider {
             | Capability::CommentPolling
             | Capability::CommitStatus
             | Capability::PrApprovals => true,
+            Capability::Merge => false,
         }
     }
 

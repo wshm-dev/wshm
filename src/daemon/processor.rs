@@ -365,7 +365,26 @@ async fn handle_comment(state: &DaemonState, event: &WebhookEvent) -> anyhow::Re
     };
 
     // Parse the comment body from the payload
-    let payload: serde_json::Value = serde_json::from_str(&event.payload)?;
+    let mut payload: serde_json::Value = serde_json::from_str(&event.payload)?;
+    // Forges whose deliveries cannot prove who wrote what (Azure DevOps):
+    // the author and text are read back from the API by comment id.
+    if let Some(c) = super::azure_hooks::comment_to_verify(&payload) {
+        match state.gh().fetch_comment(&c).await {
+            Ok(Some(found)) if found.number == number => {
+                payload["comment"]["body"] = serde_json::json!(found.body);
+                payload["comment"]["user"]["login"] = serde_json::json!(found.author);
+                payload["sender"]["login"] = serde_json::json!(found.author);
+            }
+            Ok(_) => {
+                info!("Ignoring comment {c} on #{number}: not found through the API");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Ignoring comment {c} on #{number}: cannot read it back: {e:#}");
+                return Ok(());
+            }
+        }
+    }
     let comment_body = payload
         .get("comment")
         .and_then(|c| c.get("body"))
