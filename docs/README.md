@@ -8,6 +8,7 @@
 |-------|-------------|
 | [Getting Started](getting-started.md) | Install, configure, first run |
 | [Configuration](configuration.md) | Full config.toml reference |
+| [GitLab](gitlab.md) | GitLab.com and self-managed: token, repo setup, webhook |
 | [License & Activation](license.md) | Editions, license activation, vault integration |
 | [Vault Integration](vault.md) | HashiCorp Vault, AWS, GCP secret managers (Enterprise) |
 | [Open source vs Enterprise](pro-features.md) | Code review, auto-fix, conflicts, changelog, reports and the Enterprise additions |
