@@ -38,7 +38,7 @@ webhook_secret = "your-github-webhook-secret"
 apply = true
 ```
 
-**GitHub Webhook Setup:**
+**GitHub Webhook Setup** (Azure DevOps: see [service hooks](azure-devops.md#service-hooks-webhook-mode)):
 1. Repo Settings > Webhooks > Add webhook
 2. Payload URL: `https://your-server.com/webhook`
 3. Content type: `application/json`
