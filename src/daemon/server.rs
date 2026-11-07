@@ -123,11 +123,23 @@ async fn handle_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let (event_type, action, payload) =
-        match validate_webhook(state.secret.as_deref(), &headers, &body) {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
+    // Azure DevOps service hooks are routed (to this repo, when it is an
+    // azure-devops one) and authenticated by their own secret.
+    let validated = match super::azure_hooks::parse(&headers, &body) {
+        Some(p) => {
+            let config = &state.daemon.config;
+            let slugs: Vec<String> = azure_repo(config)
+                .then(|| config.repo_slug())
+                .into_iter()
+                .collect();
+            super::azure_hooks::validate(&headers, p, &slugs)
+        }
+        None => validate_webhook(state.secret.as_deref(), &headers, &body),
+    };
+    let (event_type, action, payload) = match validated {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
     // Replay protection: dedupe on the forge delivery UUID within REPLAY_TTL.
     // GitHub sends it in x-github-delivery; Gitea/Forgejo (used by wshm-pro)
@@ -170,6 +182,9 @@ async fn handle_webhook(
         && !super::azure_hooks::targets(&payload, &config.repo_slug())
     {
         return provider_mismatch(&config.repo_slug());
+    }
+    if super::azure_hooks::is_unchanged_push(&payload, state.daemon.db.as_ref()) {
+        return unchanged_push(&config.repo_slug());
     }
 
     // Filter: only process relevant events
@@ -399,11 +414,25 @@ async fn handle_webhook_multi(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let (event_type, action, payload) =
-        match validate_webhook(state.secret.as_deref(), &headers, &body) {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
+    // Azure DevOps service hooks: routed among the azure-devops repos,
+    // then authenticated with the target repo's secret.
+    let validated = match super::azure_hooks::parse(&headers, &body) {
+        Some(p) => {
+            let slugs: Vec<String> = {
+                let g = state.multi.repos.read().await;
+                g.iter()
+                    .filter(|(_, d)| azure_repo(&d.config))
+                    .map(|(s, _)| s.clone())
+                    .collect()
+            };
+            super::azure_hooks::validate(&headers, p, &slugs)
+        }
+        None => validate_webhook(state.secret.as_deref(), &headers, &body),
+    };
+    let (event_type, action, payload) = match validated {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
     // Replay protection: dedupe on the forge delivery UUID within REPLAY_TTL.
     // GitHub sends it in x-github-delivery; Gitea/Forgejo (used by wshm-pro)
@@ -449,14 +478,6 @@ async fn handle_webhook_multi(
     };
 
     let repos_guard = state.multi.repos.read().await;
-    // Azure DevOps names are case-insensitive and work item events carry
-    // a project, not a repository.
-    let repo_slug = if payload.get("wshm_azure").is_some() && !repos_guard.contains_key(&repo_slug)
-    {
-        super::azure_hooks::route(&payload, repos_guard.keys()).unwrap_or(repo_slug)
-    } else {
-        repo_slug
-    };
     let daemon = match repos_guard.get(&repo_slug) {
         Some(d) => Arc::clone(d),
         None => {
@@ -474,6 +495,9 @@ async fn handle_webhook_multi(
     // the one that repo's forge actually emits.
     if !format_matches_provider(&headers, &daemon.config) {
         return provider_mismatch(&repo_slug);
+    }
+    if super::azure_hooks::is_unchanged_push(&payload, daemon.db.as_ref()) {
+        return unchanged_push(&repo_slug);
     }
 
     // Filter relevant events
@@ -564,13 +588,6 @@ fn validate_webhook(
     // the rest of the pipeline expects.
     if let Some(gl_event) = headers.get("x-gitlab-event").and_then(|v| v.to_str().ok()) {
         return validate_gitlab_webhook(gl_event, headers, body);
-    }
-    // Azure DevOps service hooks carry no event header: recognised by
-    // their JSON, authenticated by their own secret (see azure_hooks).
-    if !headers.contains_key("x-github-event") {
-        if let Some(payload) = super::azure_hooks::parse(body) {
-            return super::azure_hooks::validate(headers, payload);
-        }
     }
 
     // Validate HMAC signature. Without a configured secret the endpoint
@@ -751,6 +768,24 @@ fn delivery_id<'a>(headers: &'a HeaderMap, payload: &'a Value) -> &'a str {
         .and_then(|v| v.to_str().ok())
         .or_else(|| payload["wshm_delivery_id"].as_str())
         .unwrap_or("")
+}
+
+fn azure_repo(config: &crate::config::Config) -> bool {
+    matches!(
+        crate::git_provider::provider_id(config),
+        "azure-devops" | "azure"
+    )
+}
+
+/// An Azure PR update that did not move the head (see
+/// `azure_hooks::is_unchanged_push`): acknowledged, not processed.
+fn unchanged_push(repo: &str) -> axum::response::Response {
+    info!("[{repo}] Ignoring Azure DevOps PR update: head unchanged");
+    (
+        StatusCode::OK,
+        Json(json!({"status": "ignored", "reason": "head unchanged", "repo": repo})),
+    )
+        .into_response()
 }
 
 fn provider_mismatch(repo: &str) -> axum::response::Response {
@@ -976,13 +1011,14 @@ mod forge_webhook_tests {
     }
 
     #[test]
-    fn azure_service_hook_goes_through_validate_webhook() {
+    fn azure_body_never_passes_the_github_path() {
         // A body without an event header that is not an Azure delivery
         // keeps the GitHub path (signature, then event header).
         let body = Bytes::from(json!({"action": "opened"}).to_string());
         let r = validate_webhook(Some("k"), &headers(&[]), &body).unwrap_err();
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
-        // An Azure delivery is never accepted with the GitHub HMAC secret.
+        // The handlers send Azure deliveries to azure_hooks; the GitHub
+        // path never accepts one, not even with the HMAC secret as token.
         let azure = Bytes::from(
             json!({"publisherId": "tfs", "eventType": "workitem.created",
                    "resourceContainers": {"collection": {"baseUrl": "https://dev.azure.com/acme/"}},
