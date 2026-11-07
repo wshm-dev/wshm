@@ -331,6 +331,7 @@ impl GitProvider for GitLabProvider {
             | Capability::Reactions
             | Capability::CiStatus
             | Capability::CommentPolling => true,
+            Capability::Merge => false,
         }
     }
 

@@ -52,6 +52,17 @@ pub enum Capability {
     /// [`GitProvider::fetch_comments_since`] is implemented (slash commands
     /// in polling mode without webhooks).
     CommentPolling,
+    /// [`GitProvider::merge_pr`] is implemented (merge queue `--apply`).
+    Merge,
+}
+
+/// What [`GitProvider::merge_pr`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// The pull request is merged.
+    Merged,
+    /// The forge answered but the pull request is still not merged.
+    NotMerged,
 }
 
 /// The conversation a comment belongs to. GitHub and Gitea share one number
@@ -258,17 +269,23 @@ pub trait GitProvider: Send + Sync {
         draft: bool,
     ) -> Result<u64>;
 
-    /// Whether [`Self::merge_pr`] is implemented (merge queue `--apply`).
-    fn supports_merge(&self) -> bool {
-        false
+    /// Merge a pull request now. `sha` is the head the caller evaluated:
+    /// the merge is refused when the branch moved since. Never scheduled
+    /// on CI. Callers go through the merge-queue policy
+    /// (`pipelines::merge_queue`), which checks CI, approvals, conflicts
+    /// and the injection guard first. Requires [`Capability::Merge`].
+    async fn merge_pr(&self, number: u64, sha: Option<&str>, squash: bool) -> Result<MergeOutcome> {
+        let _ = (number, sha, squash);
+        Err(unsupported(self.provider_name(), "merging pull requests"))
     }
 
-    /// Merge (complete) a pull request with `strategy` from `[queue]
-    /// strategy` (merge, squash, rebase, rebase-merge). Must go through
-    /// the platform's own checks (branch policies, required reviews).
-    async fn merge_pr(&self, number: u64, strategy: &str) -> Result<()> {
-        let _ = (number, strategy);
-        Err(unsupported(self.provider_name(), "merging a pull request"))
+    /// Logins that approved the pull request, bot accounts left out where
+    /// the forge says so. Used by the merge-queue approval gate (which
+    /// also checks each approver's access). Required with
+    /// [`Capability::Merge`].
+    async fn fetch_pr_approvers(&self, number: u64) -> Result<Vec<String>> {
+        let _ = number;
+        Err(unsupported(self.provider_name(), "PR approvals"))
     }
 
     // ── Comments ────────────────────────────────────────────────────────
@@ -282,6 +299,14 @@ pub trait GitProvider: Send + Sync {
 
     /// Replace a comment's body.
     async fn update_comment(&self, comment: &CommentRef, body: &str) -> Result<()>;
+
+    /// One comment read back from the platform (author and text as the
+    /// platform has them, never as a webhook payload claims). `Ok(None)`
+    /// when it does not exist or was deleted.
+    async fn fetch_comment(&self, comment: &CommentRef) -> Result<Option<PolledComment>> {
+        let _ = comment;
+        Err(unsupported(self.provider_name(), "reading one comment"))
+    }
 
     /// Delete a comment. Already-deleted is not an error.
     async fn delete_comment(&self, comment: &CommentRef) -> Result<()>;
