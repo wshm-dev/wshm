@@ -341,26 +341,30 @@ async fn poll_forge_changes(
     for pr in gh.fetch_pulls_incremental("open", Some(&since)).await? {
         let head = pr.head_sha.clone().unwrap_or_default();
         let key = (slug.clone(), pr.number);
-        let previous = SEEN_HEADS
-            .lock()
-            .ok()
-            .and_then(|m| m.get(&key).cloned())
-            .or_else(|| {
-                state
-                    .db
-                    .get_pull(pr.number)
-                    .ok()
-                    .flatten()
-                    .and_then(|p| p.head_sha)
-            });
+        let seen = SEEN_HEADS.lock().ok().and_then(|m| m.get(&key).cloned());
+        // A head this process saw at the previous poll changed: a push
+        // happened in the window even when the forge has no PR "updated"
+        // date (Azure DevOps).
+        let seen_moved = seen
+            .as_deref()
+            .is_some_and(|p| !head.is_empty() && p != head);
+        let previous = seen.or_else(|| {
+            state
+                .db
+                .get_pull(pr.number)
+                .ok()
+                .flatten()
+                .and_then(|p| p.head_sha)
+        });
         if let Ok(mut m) = SEEN_HEADS.lock() {
             m.insert(key, head.clone());
         }
         let action = if in_window(&pr.created_at) {
             "opened"
-        } else if in_window(&pr.updated_at)
-            && !head.is_empty()
-            && previous.as_deref().is_some_and(|p| p != head)
+        } else if seen_moved
+            || (in_window(&pr.updated_at)
+                && !head.is_empty()
+                && previous.as_deref().is_some_and(|p| p != head))
         {
             "synchronize"
         } else {
