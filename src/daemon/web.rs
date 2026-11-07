@@ -3408,7 +3408,12 @@ async fn api_pr_groups_get(
         .unwrap_or(6)
         .clamp(1, 12);
 
-    let groups = crate::pipelines::pr_groups::build_from(&prs, &name_stop, group_limit, sub_limit);
+    let mut groups =
+        crate::pipelines::pr_groups::build_from(&prs, &name_stop, group_limit, sub_limit);
+    crate::pipelines::pr_groups::fill_urls(&mut groups, |repo, n| {
+        let ds = snapshot.iter().find(|(s, _)| s == repo)?;
+        crate::git_provider::web_url_for_pr(&ds.1.config, n)
+    });
     Json(json!({ "groups": groups, "groups_limit": group_limit, "subs_limit": sub_limit }))
         .into_response()
 }
@@ -3467,8 +3472,12 @@ async fn api_issue_groups_get(
         .unwrap_or(6)
         .clamp(1, 12);
 
-    let groups =
+    let mut groups =
         crate::pipelines::pr_groups::build_from(&issues, &name_stop, group_limit, sub_limit);
+    crate::pipelines::pr_groups::fill_urls(&mut groups, |repo, n| {
+        let ds = snapshot.iter().find(|(s, _)| s == repo)?;
+        crate::git_provider::web_url_for_issue(&ds.1.config, n)
+    });
     Json(json!({ "groups": groups, "groups_limit": group_limit, "subs_limit": sub_limit }))
         .into_response()
 }

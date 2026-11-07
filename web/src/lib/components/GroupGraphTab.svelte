@@ -27,9 +27,11 @@
 	let noun = $derived(kind === 'pr' ? 'PR' : 'issue');
 	let fetcher = $derived(kind === 'pr' ? fetchPrGroups : fetchIssueGroups);
 
-	// Link to GitHub rather than the in-app page: the graph groups ALL PRs incl.
+	// Link to the forge rather than the in-app page: the graph groups ALL PRs incl.
 	// closed ones (and can span repos), which the in-app PR view can't load.
+	// The server builds the URL for the repo's forge; GitHub is the fallback.
 	function itemUrl(pr: PrGroupPr): string {
+		if (pr.url) return pr.url;
 		const seg = kind === 'pr' ? 'pull' : 'issues';
 		return `https://github.com/${pr.repo}/${seg}/${pr.number}`;
 	}

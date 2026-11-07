@@ -1,3 +1,4 @@
+pub mod azure_hooks;
 pub mod commands;
 pub mod feature_routes;
 pub mod log_buffer;

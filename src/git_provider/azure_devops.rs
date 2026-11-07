@@ -22,7 +22,7 @@ use crate::db::pulls::PullRequest;
 use crate::github::issues::ensure_comment_marker;
 
 use super::http::{self, Auth, Rest};
-use super::{Capability, CommentRef, GitProvider, MergedPr, Thread};
+use super::{Capability, CommentRef, GitProvider, MergeOutcome, MergedPr, PolledComment, Thread};
 
 const API: &str = "7.1";
 /// Work item comments are still a preview API in 7.1.
@@ -36,6 +36,18 @@ const GENERIC_CONTRIBUTE: u64 = 4;
 /// processes.
 const CLOSED_STATES: [&str; 5] = ["Closed", "Done", "Removed", "Resolved", "Completed"];
 const PAGE: u32 = 100;
+/// Ids per WIQL query (the service caps a query at 20 000 results); larger
+/// sets are paged by id.
+const WIQL_PAGE: usize = 20_000;
+/// Policy evaluations are a preview API in 7.1.
+const POLICY_API: &str = "7.1-preview.1";
+/// Policy type of "Build validation" (Azure Pipelines runs on the PR).
+const BUILD_POLICY_TYPE: &str = "0609b952-1397-4640-95ec-e00a01b2c241";
+/// PR thread status: 1 active (inline findings), 4 closed (wshm's summary
+/// and analysis comments, so they never block a "comments must be
+/// resolved" branch policy).
+const THREAD_ACTIVE: u8 = 1;
+const THREAD_CLOSED: u8 = 4;
 const PER_PR_CONCURRENCY: usize = 6;
 const PER_PR_CAP: usize = 200;
 /// Files fetched to rebuild a PR diff (Azure has no unified-diff endpoint).
@@ -53,6 +65,12 @@ pub struct AzureDevOpsProvider {
     work_item_types: Vec<String>,
     /// Repo DB for the runtime override of `work_item_types`.
     db: Option<Arc<dyn DatabaseBackend>>,
+    /// Ids per WIQL page (a field so tests can page with a few items).
+    wiql_page: usize,
+    /// (repository id, project id), resolved once.
+    ids: tokio::sync::OnceCell<(String, String)>,
+    /// The PAT owner (identity id, unique name), resolved once.
+    me: tokio::sync::OnceCell<Option<(String, String)>>,
 }
 
 impl AzureDevOpsProvider {
@@ -109,6 +127,9 @@ impl AzureDevOpsProvider {
             slug: format!("{org}/{project_and_repo}"),
             work_item_types: crate::config::AzureDevOpsConfig::default().work_item_types,
             db: None,
+            wiql_page: WIQL_PAGE,
+            ids: tokio::sync::OnceCell::new(),
+            me: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -182,35 +203,118 @@ impl AzureDevOpsProvider {
 
     /// Identity service host: `vssps.dev.azure.com` on Services, the same
     /// host on Azure DevOps Server.
-    fn identities_url(&self, filter: &str) -> String {
+    fn identities_url(&self, filter: &str, membership: &str) -> String {
         let host = if self.base == "https://dev.azure.com" {
             format!("https://vssps.dev.azure.com/{}", enc(&self.org))
         } else {
             format!("{}/{}", self.base, enc(&self.org))
         };
         format!(
-            "{host}/_apis/identities?searchFilter=General&filterValue={}&queryMembership=None&api-version={API}",
+            "{host}/_apis/identities?searchFilter=General&filterValue={}&queryMembership={membership}&api-version={API}",
             enc(filter)
         )
     }
 
-    // ── work items ──────────────────────────────────────────────────────
-
-    async fn wiql_ids(&self, condition: &str) -> Result<Vec<u64>> {
-        let types = self.type_clause();
-        let query = format!(
-            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project{types}{condition} \
-             ORDER BY [System.ChangedDate] DESC"
-        );
-        let url = self.project_url("wit/wiql?timePrecision=true&$top=20000", API);
+    /// The identity whose account name or mail is exactly `name` (the
+    /// identity search is fuzzy: a near match must never stand in for the
+    /// user). `membership` = `None` or `ExpandedUp` (fills `memberOf`).
+    async fn find_identity(&self, name: &str, membership: &str) -> Result<Option<Value>> {
         let resp = self
             .rest
-            .send_json(Method::POST, &url, &json!({ "query": query }))
+            .get_json(&self.identities_url(name, membership))
             .await?;
-        Ok(resp["workItems"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|w| w["id"].as_u64()).collect())
-            .unwrap_or_default())
+        Ok(resp["value"].as_array().and_then(|a| {
+            a.iter()
+                .find(|i| {
+                    ["Account", "Mail"].iter().any(|k| {
+                        i["properties"][k]["$value"]
+                            .as_str()
+                            .is_some_and(|v| v.eq_ignore_ascii_case(name))
+                    })
+                })
+                .cloned()
+        }))
+    }
+
+    /// (repository id, project id), fetched once.
+    async fn repo_ids(&self) -> Result<(String, String)> {
+        self.ids
+            .get_or_try_init(|| async {
+                let repo = self.rest.get_json(&self.repo_url("")).await?;
+                match (repo["id"].as_str(), repo["project"]["id"].as_str()) {
+                    (Some(r), Some(p)) => Ok((r.to_string(), p.to_string())),
+                    _ => anyhow::bail!("Azure DevOps: repository id/project id missing"),
+                }
+            })
+            .await
+            .cloned()
+    }
+
+    /// The PAT owner (identity id, unique name) from `connectionData`,
+    /// fetched once. `None` when anonymous or unresolvable.
+    async fn me(&self) -> Option<(String, String)> {
+        if !self.rest.is_authenticated() {
+            return None;
+        }
+        self.me
+            .get_or_init(|| async {
+                let url = format!("{}/{}/_apis/connectionData", self.base, enc(&self.org));
+                match self.rest.get_json(&url).await {
+                    Ok(v) => {
+                        let u = &v["authenticatedUser"];
+                        let id = u["id"].as_str()?.to_string();
+                        let name = u["properties"]["Account"]["$value"]
+                            .as_str()
+                            .or_else(|| u["providerDisplayName"].as_str())?
+                            .to_string();
+                        Some((id, name))
+                    }
+                    Err(e) => {
+                        warn!("Azure DevOps: cannot resolve the PAT owner: {e:#}");
+                        None
+                    }
+                }
+            })
+            .await
+            .clone()
+    }
+
+    // ── work items ──────────────────────────────────────────────────────
+
+    /// Ids matching `condition`, newest id first. WIQL has no continuation
+    /// token and caps a query at 20 000 results, so pages are chained by
+    /// id (`[System.Id] < last id of the previous page`).
+    async fn wiql_ids(&self, condition: &str) -> Result<Vec<u64>> {
+        let types = self.type_clause();
+        let url = self.project_url(
+            &format!("wit/wiql?timePrecision=true&$top={}", self.wiql_page),
+            API,
+        );
+        let mut out: Vec<u64> = Vec::new();
+        for _ in 0..http::MAX_PAGES {
+            let keyset = out
+                .last()
+                .map(|id| format!(" AND [System.Id] < {id}"))
+                .unwrap_or_default();
+            let query = format!(
+                "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project{types}{condition}{keyset} \
+                 ORDER BY [System.Id] DESC"
+            );
+            let resp = self
+                .rest
+                .send_json(Method::POST, &url, &json!({ "query": query }))
+                .await?;
+            let page: Vec<u64> = resp["workItems"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|w| w["id"].as_u64()).collect())
+                .unwrap_or_default();
+            let full = page.len() >= self.wiql_page;
+            out.extend(page);
+            if !full {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     async fn work_items(&self, ids: &[u64]) -> Result<Vec<Value>> {
@@ -338,10 +442,16 @@ impl AzureDevOpsProvider {
         Ok(resp["value"].as_array().cloned().unwrap_or_default())
     }
 
-    async fn post_thread(&self, pr: u64, content: &str, context: Option<Value>) -> Result<()> {
+    async fn post_thread(
+        &self,
+        pr: u64,
+        content: &str,
+        context: Option<Value>,
+        status: u8,
+    ) -> Result<()> {
         let mut body = json!({
             "comments": [{"parentCommentId": 0, "content": content, "commentType": 1}],
-            "status": 1,
+            "status": status,
         });
         if let Some(ctx) = context {
             body["threadContext"] = ctx;
@@ -367,13 +477,42 @@ impl AzureDevOpsProvider {
     }
 
     async fn identity_id(&self, name: &str) -> Result<String> {
-        let resp = self.rest.get_json(&self.identities_url(name)).await?;
-        resp["value"]
-            .as_array()
-            .and_then(|a| a.first())
-            .and_then(|i| i["id"].as_str())
-            .map(String::from)
+        self.find_identity(name, "None")
+            .await?
+            .and_then(|i| i["id"].as_str().map(String::from))
             .with_context(|| format!("Azure DevOps identity '{name}' not found"))
+    }
+
+    /// Move a work item to the first state of its type in one of
+    /// `categories` (tried in order): state names depend on the process
+    /// ("Closed", "Done", "Removed", ...), state categories do not.
+    async fn close_in_category(&self, number: u64, categories: &[&str]) -> Result<()> {
+        let item = self
+            .work_item(number)
+            .await?
+            .with_context(|| format!("Azure DevOps work item {number} not found in project"))?;
+        let kind = item["fields"]["System.WorkItemType"]
+            .as_str()
+            .context("work item type missing")?;
+        let states = self
+            .rest
+            .get_json(&self.project_url(&format!("wit/workitemtypes/{}/states", enc(kind)), API))
+            .await?;
+        let list = states["value"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let state = categories
+            .iter()
+            .find_map(|c| list.iter().find(|s| s["category"] == *c))
+            .and_then(|s| s["name"].as_str())
+            .with_context(|| format!("no {categories:?} state for work item type {kind}"))?;
+        if item["fields"]["System.State"].as_str() == Some(state) {
+            return Ok(());
+        }
+        self.patch_work_item(
+            number,
+            json!([{"op": "add", "path": "/fields/System.State", "value": state}]),
+        )
+        .await?;
+        Ok(())
     }
 
     async fn upsert_comment(&self, thread: Thread, body: &str) -> Result<()> {
@@ -387,7 +526,7 @@ impl AzureDevOpsProvider {
             return self.update_comment(&existing, &body).await;
         }
         match thread {
-            Thread::Pull(n) => self.post_thread(n, &body, None).await,
+            Thread::Pull(n) => self.post_thread(n, &body, None, THREAD_CLOSED).await,
             Thread::Issue(n) => {
                 self.rest
                     .send_json(
@@ -407,6 +546,59 @@ impl AzureDevOpsProvider {
 
 fn enc(s: &str) -> String {
     urlencoding::encode(s).into_owned()
+}
+
+/// Identity descriptors come as `"type;identifier"` strings, or as
+/// `{identityType, identifier}` objects in some API versions.
+fn descriptor_str(v: &Value) -> Option<String> {
+    v.as_str().map(String::from).or_else(|| {
+        Some(format!(
+            "{};{}",
+            v["identityType"].as_str()?,
+            v["identifier"].as_str()?
+        ))
+    })
+}
+
+/// WIQL date literal (UTC, `Z` suffix) of an RFC 3339 timestamp.
+fn wiql_date(ts: &str) -> Option<String> {
+    http::parse_ts(ts).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
+/// Plain text of a work item comment (HTML), for command parsing.
+pub(crate) fn html_to_text(html: &str) -> String {
+    let mut s = html.to_string();
+    for br in ["<br>", "<br/>", "<br />", "</div>", "</p>"] {
+        s = s.replace(br, "\n");
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+        .trim()
+        .to_string()
+}
+
+/// CI bucket of a build-validation policy evaluation.
+fn policy_bucket(status: &str) -> Option<&'static str> {
+    match status {
+        "approved" => Some("success"),
+        "rejected" | "broken" => Some("failure"),
+        "queued" | "running" => Some("pending"),
+        _ => None,
+    }
 }
 
 fn split_tags(tags: &str) -> Vec<String> {
@@ -548,6 +740,25 @@ impl GitProvider for AzureDevOpsProvider {
             Capability::ReviewDecisions | Capability::CiStatus => true,
             // No reactions on PRs; no repo-wide comment feed to poll.
             Capability::Reactions | Capability::CommentPolling => false,
+            // Direct completion pinned to the scored head; approvals
+            // (fetch_pr_approvers) from reviewer votes of users with
+            // Contribute.
+            Capability::Merge => true,
+        }
+    }
+
+    async fn self_username(&self) -> Option<String> {
+        self.me().await.map(|(_, name)| name)
+    }
+
+    async fn fetch_repo_private(&self) -> Result<bool> {
+        let project = self
+            .rest
+            .get_json(&self.org_url(&format!("projects/{}", enc(&self.project)), API))
+            .await?;
+        match project["visibility"].as_str() {
+            Some(v) => Ok(!v.eq_ignore_ascii_case("public")),
+            None => anyhow::bail!("Azure DevOps: project visibility missing"),
         }
     }
 
@@ -556,19 +767,16 @@ impl GitProvider for AzureDevOpsProvider {
             " AND [System.State] NOT IN ({})",
             CLOSED_STATES.map(|s| format!("'{s}'")).join(", ")
         );
-        if let Some(s) = since.and_then(http::parse_ts) {
-            cond.push_str(&format!(
-                " AND [System.ChangedDate] >= '{}'",
-                s.to_rfc3339()
-            ));
+        if let Some(s) = since.and_then(wiql_date) {
+            cond.push_str(&format!(" AND [System.ChangedDate] >= '{s}'"));
         }
         self.issues_where(&cond).await
     }
 
     async fn fetch_all_issues(&self, since: Option<&str>) -> Result<Vec<Issue>> {
         let cond = since
-            .and_then(http::parse_ts)
-            .map(|s| format!(" AND [System.ChangedDate] >= '{}'", s.to_rfc3339()))
+            .and_then(wiql_date)
+            .map(|s| format!(" AND [System.ChangedDate] >= '{s}'"))
             .unwrap_or_default();
         self.issues_where(&cond).await
     }
@@ -625,30 +833,14 @@ impl GitProvider for AzureDevOpsProvider {
     }
 
     async fn close_issue(&self, number: u64) -> Result<()> {
-        // The closed state name depends on the process and type ("Closed",
-        // "Done", ...): use the type's first state in the Completed category.
-        let item = self
-            .work_item(number)
-            .await?
-            .with_context(|| format!("Azure DevOps work item {number} not found in project"))?;
-        let kind = item["fields"]["System.WorkItemType"]
-            .as_str()
-            .context("work item type missing")?;
-        let states = self
-            .rest
-            .get_json(&self.project_url(&format!("wit/workitemtypes/{}/states", enc(kind)), API))
-            .await?;
-        let state = states["value"]
-            .as_array()
-            .and_then(|a| a.iter().find(|s| s["category"] == "Completed"))
-            .and_then(|s| s["name"].as_str())
-            .with_context(|| format!("no Completed state for work item type {kind}"))?;
-        self.patch_work_item(
-            number,
-            json!([{"op": "add", "path": "/fields/System.State", "value": state}]),
-        )
-        .await?;
-        Ok(())
+        self.close_in_category(number, &["Completed"]).await
+    }
+
+    async fn close_issue_not_planned(&self, number: u64) -> Result<()> {
+        // Duplicates go to the "Removed" category when the process has one
+        // (Agile/Scrum/CMMI "Removed"), else to "Completed" (Basic).
+        self.close_in_category(number, &["Removed", "Completed"])
+            .await
     }
 
     async fn label_issue(&self, number: u64, labels: &[String]) -> Result<()> {
@@ -844,19 +1036,55 @@ impl GitProvider for AzureDevOpsProvider {
             .take(PER_PR_CAP)
             .filter_map(|pr| pr["pullRequestId"].as_u64())
             .collect();
+        // Azure Pipelines build validation is a branch policy, not a PR
+        // status: its result is read from the policy evaluations of the PR.
+        let project_id = match self.repo_ids().await {
+            Ok((_, p)) => Some(p),
+            Err(e) => {
+                warn!("Azure DevOps: build policies not read (no project id): {e:#}");
+                None
+            }
+        };
+        let project_id = project_id.as_deref();
         let jobs = targets.into_iter().map(|id| async move {
             let url = self.repo_url(&format!("pullRequests/{id}/statuses"));
-            (id, self.rest.get_json(&url).await)
+            let statuses = self.rest.get_json(&url).await;
+            let builds = match project_id {
+                Some(p) => {
+                    let artifact = format!("vstfs:///CodeReview/CodeReviewId/{p}/{id}");
+                    let url = self.project_url(
+                        &format!("policy/evaluations?artifactId={}", enc(&artifact)),
+                        POLICY_API,
+                    );
+                    match self.rest.get_json(&url).await {
+                        Ok(v) => v["value"].as_array().cloned().unwrap_or_default(),
+                        Err(e) => {
+                            warn!("Azure DevOps PR {id}: policy evaluations unavailable: {e:#}");
+                            Vec::new()
+                        }
+                    }
+                }
+                None => Vec::new(),
+            };
+            (id, statuses, builds)
         });
         let results: Vec<_> = futures::stream::iter(jobs)
             .buffer_unordered(PER_PR_CONCURRENCY)
             .collect()
             .await;
         let mut map = HashMap::new();
-        for (id, res) in results {
+        for (id, res, builds) in results {
+            // One PR's failure must not drop every other PR's state.
+            let statuses = match res {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("Azure DevOps PR {id}: statuses unavailable: {e:#}");
+                    Value::Null
+                }
+            };
             // Latest status per context (genre/name).
             let mut latest: HashMap<String, (u64, String)> = HashMap::new();
-            for s in res?["value"]
+            for s in statuses["value"]
                 .as_array()
                 .map(Vec::as_slice)
                 .unwrap_or_default()
@@ -872,10 +1100,19 @@ impl GitProvider for AzureDevOpsProvider {
                     latest.insert(ctx, (sid, state));
                 }
             }
-            let buckets: Vec<&str> = latest
+            let mut buckets: Vec<&str> = latest
                 .values()
                 .filter_map(|(_, st)| http::ci_bucket(st))
                 .collect();
+            buckets.extend(
+                builds
+                    .iter()
+                    .filter(|e| {
+                        e["configuration"]["type"]["id"] == BUILD_POLICY_TYPE
+                            && e["configuration"]["isEnabled"].as_bool() != Some(false)
+                    })
+                    .filter_map(|e| policy_bucket(e["status"].as_str().unwrap_or(""))),
+            );
             let combined = if buckets.contains(&"failure") {
                 Some("failure")
             } else if buckets.contains(&"pending") {
@@ -958,11 +1195,181 @@ impl GitProvider for AzureDevOpsProvider {
                     "rightFileStart": {"line": line, "offset": 1},
                     "rightFileEnd": {"line": line, "offset": 1},
                 })),
+                THREAD_ACTIVE,
             )
             .await?;
         }
-        self.post_thread(pr_number, &ensure_comment_marker(body, &self.marker), None)
-            .await
+        self.post_thread(
+            pr_number,
+            &ensure_comment_marker(body, &self.marker),
+            None,
+            THREAD_CLOSED,
+        )
+        .await
+    }
+
+    async fn merge_pr(&self, number: u64, sha: Option<&str>, squash: bool) -> Result<MergeOutcome> {
+        // Direct completion only, pinned to the scored head: Azure checks
+        // `lastMergeSourceCommit` and refuses the completion when the
+        // source branch moved. No auto-complete: it would merge a later
+        // state wshm never evaluated.
+        self.rest.require_auth("Azure DevOps complete PR")?;
+        let sha = sha
+            .filter(|s| !s.is_empty())
+            .with_context(|| format!("Azure DevOps PR {number}: refused, no scored head"))?;
+        let pr = self
+            .rest
+            .get_json_opt(&self.repo_url(&format!("pullrequests/{number}")))
+            .await?
+            .with_context(|| format!("Azure DevOps PR {number} not found"))?;
+        if pr["status"] != "active" {
+            anyhow::bail!("Azure DevOps PR {number} is not active ({})", pr["status"]);
+        }
+        if pr["isDraft"].as_bool() == Some(true) {
+            anyhow::bail!("Azure DevOps PR {number} is a draft: not completed");
+        }
+        if pr["mergeStatus"] == "conflicts" {
+            anyhow::bail!("Azure DevOps PR {number} has merge conflicts");
+        }
+        let live = pr["lastMergeSourceCommit"]["commitId"]
+            .as_str()
+            .unwrap_or("");
+        if !live.eq_ignore_ascii_case(sha) {
+            anyhow::bail!(
+                "Azure DevOps PR {number}: refused, head moved since it was scored ({sha} → {live})"
+            );
+        }
+        let strategy = if squash { "squash" } else { "noFastForward" };
+        let resp = self
+            .rest
+            .send_json(
+                Method::PATCH,
+                &self.repo_url(&format!("pullrequests/{number}")),
+                &json!({
+                    "status": "completed",
+                    "lastMergeSourceCommit": {"commitId": sha},
+                    "completionOptions": {
+                        "mergeStrategy": strategy,
+                        "deleteSourceBranch": false,
+                        "transitionWorkItems": false,
+                    },
+                }),
+            )
+            .await?;
+        // The merge is asynchronous: the answer can still show the PR
+        // active (merge in progress, or blocked by a policy).
+        if resp["status"] == "completed" {
+            info!("Azure DevOps PR {number}: completed ({strategy})");
+            Ok(MergeOutcome::Merged)
+        } else {
+            info!(
+                "Azure DevOps PR {number}: completion requested ({strategy}), not merged yet \
+                 (status {}, mergeStatus {})",
+                resp["status"], resp["mergeStatus"]
+            );
+            Ok(MergeOutcome::NotMerged)
+        }
+    }
+
+    async fn fetch_pr_approvers(&self, number: u64) -> Result<Vec<String>> {
+        // Votes: 10 approved, 5 approved with suggestions. Groups vote
+        // through their members' votes and are never an approver
+        // themselves; the author and wshm's own account never count.
+        let pr = self
+            .rest
+            .get_json_opt(&self.repo_url(&format!("pullrequests/{number}")))
+            .await?
+            .with_context(|| format!("Azure DevOps PR {number} not found"))?;
+        let author = pr["createdBy"]["uniqueName"].as_str().unwrap_or("");
+        let author_id = pr["createdBy"]["id"].as_str().unwrap_or("");
+        let me = self.me().await;
+        let mut out = Vec::new();
+        for r in pr["reviewers"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+            if r["vote"].as_i64().unwrap_or(0) < 5 || r["isContainer"].as_bool() == Some(true) {
+                continue;
+            }
+            let Some(name) = r["uniqueName"].as_str().filter(|n| !n.is_empty()) else {
+                continue;
+            };
+            let id = r["id"].as_str().unwrap_or("");
+            if name.eq_ignore_ascii_case(author) || (!id.is_empty() && id == author_id) {
+                continue;
+            }
+            if me
+                .as_ref()
+                .is_some_and(|(mid, mname)| mid == id || mname.eq_ignore_ascii_case(name))
+            {
+                continue;
+            }
+            match self.is_collaborator(name).await {
+                Ok(true) => out.push(name.to_string()),
+                Ok(false) => {
+                    info!("Azure DevOps PR {number}: approval by {name} ignored (no write access)")
+                }
+                Err(e) => warn!("Azure DevOps PR {number}: approval by {name} ignored: {e:#}"),
+            }
+        }
+        Ok(out)
+    }
+
+    async fn fetch_comment(&self, comment: &CommentRef) -> Result<Option<PolledComment>> {
+        match comment.thread {
+            Thread::Pull(n) => {
+                let tid = comment.parent_id.context("PR comment without thread id")?;
+                let Some(c) = self
+                    .rest
+                    .get_json_opt(&self.repo_url(&format!(
+                        "pullRequests/{n}/threads/{tid}/comments/{}",
+                        comment.id
+                    )))
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                if c["isDeleted"].as_bool() == Some(true) || c["commentType"] == "system" {
+                    return Ok(None);
+                }
+                Ok(Some(PolledComment {
+                    id: comment.id,
+                    number: n,
+                    is_pr: true,
+                    author: c["author"]["uniqueName"].as_str().unwrap_or("").to_string(),
+                    body: c["content"].as_str().unwrap_or("").to_string(),
+                    created_at: c["publishedDate"].as_str().unwrap_or("").to_string(),
+                }))
+            }
+            Thread::Issue(n) => {
+                let Some(c) = self
+                    .rest
+                    .get_json_opt(&self.project_url(
+                        &format!("wit/workItems/{n}/comments/{}", comment.id),
+                        COMMENTS_API,
+                    ))
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                // Ids are organization-wide: the comment must be on this
+                // work item, and the work item in this project.
+                if c["isDeleted"].as_bool() == Some(true)
+                    || c["workItemId"].as_u64().is_some_and(|w| w != n)
+                    || self.work_item(n).await?.is_none()
+                {
+                    return Ok(None);
+                }
+                Ok(Some(PolledComment {
+                    id: comment.id,
+                    number: n,
+                    is_pr: false,
+                    author: c["createdBy"]["uniqueName"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                    body: html_to_text(c["text"].as_str().unwrap_or("")),
+                    created_at: c["createdDate"].as_str().unwrap_or("").to_string(),
+                }))
+            }
+        }
     }
 
     async fn create_pr(
@@ -1112,63 +1519,103 @@ impl GitProvider for AzureDevOpsProvider {
     }
 
     async fn is_collaborator(&self, username: &str) -> Result<bool> {
-        // Deny unless the user's ACL on this repository grants
-        // GenericContribute (push). Only explicit ACEs for the identity are
-        // visible this way — rights obtained solely through group
-        // membership are not, so those users are denied: list them in
-        // [fix] allowed_users instead.
+        // "Collaborator" = may push (Git "Contribute") to this repository,
+        // evaluated from the access control lists of the repository and
+        // of its parents (`repoV2/{project}`, `repoV2`) for the user and
+        // every group it belongs to (nested, from the identity's
+        // `memberOf`): a Contribute deny at any level wins, otherwise an
+        // allow at a level the repository inherits from grants. Anything
+        // that cannot be fully evaluated denies.
         if username.is_empty() || username.contains(['?', '&', '#']) {
             anyhow::bail!("Invalid Azure DevOps user name: {username}");
         }
-        let identities = self.rest.get_json(&self.identities_url(username)).await?;
-        let Some(descriptor) = identities["value"]
-            .as_array()
-            .and_then(|a| a.first())
-            .and_then(|i| i["descriptor"].as_str())
-            .map(String::from)
-        else {
+        let Some(user) = self.find_identity(username, "ExpandedUp").await? else {
+            info!("Azure DevOps: no identity named exactly '{username}' — denied");
             return Ok(false);
         };
-        let repo = self.rest.get_json(&self.repo_url("")).await?;
-        let (Some(repo_id), Some(project_id)) =
-            (repo["id"].as_str(), repo["project"]["id"].as_str())
-        else {
-            anyhow::bail!("Azure DevOps: repository id/project id missing");
+        let Some(descriptor) = descriptor_str(&user["descriptor"]) else {
+            return Ok(false);
         };
-        let token = format!("repoV2/{project_id}/{repo_id}");
-        let url = self.org_url(
-            &format!(
-                "accesscontrollists/{GIT_NAMESPACE}?token={}&descriptors={}&includeExtendedInfo=true",
-                enc(&token),
-                enc(&descriptor)
-            ),
-            API,
-        );
-        let acls = self.rest.get_json(&url).await?;
-        let allowed = acls["value"]
-            .as_array()
-            .map(|a| {
-                a.iter().any(|acl| {
-                    acl["acesDictionary"].as_object().is_some_and(|aces| {
-                        aces.values().any(|ace| {
-                            let allow = ace["extendedInfo"]["effectiveAllow"]
-                                .as_u64()
-                                .or_else(|| ace["allow"].as_u64())
-                                .unwrap_or(0);
-                            let deny = ace["extendedInfo"]["effectiveDeny"]
-                                .as_u64()
-                                .or_else(|| ace["deny"].as_u64())
-                                .unwrap_or(0);
-                            allow & GENERIC_CONTRIBUTE != 0 && deny & GENERIC_CONTRIBUTE == 0
-                        })
-                    })
-                })
-            })
-            .unwrap_or(false);
+        let Some(member_of) = user["memberOf"].as_array() else {
+            info!("Azure DevOps: group membership of {username} unknown — denied");
+            return Ok(false);
+        };
+        let mut subjects = vec![descriptor];
+        for m in member_of {
+            match descriptor_str(m) {
+                Some(d) => subjects.push(d),
+                None => {
+                    info!("Azure DevOps: unreadable group of {username} — denied");
+                    return Ok(false);
+                }
+            }
+        }
+        let (repo_id, project_id) = self.repo_ids().await?;
+        let tokens = [
+            format!("repoV2/{project_id}/{repo_id}"),
+            format!("repoV2/{project_id}"),
+            "repoV2".to_string(),
+        ];
+        let (mut denied, mut allowed, mut inherits) = (false, false, true);
+        for token in &tokens {
+            let url = self.org_url(
+                &format!(
+                    "accesscontrollists/{GIT_NAMESPACE}?token={}&includeExtendedInfo=true&recurse=false",
+                    enc(token)
+                ),
+                API,
+            );
+            let (acls, headers) = self.rest.get_json_with_headers(&url).await?;
+            if headers.contains_key("x-ms-continuationtoken") {
+                info!("Azure DevOps: paged access control list for {token} — denied");
+                return Ok(false);
+            }
+            let Some(list) = acls["value"].as_array() else {
+                info!("Azure DevOps: unreadable access control list for {token} — denied");
+                return Ok(false);
+            };
+            let level_inherits = inherits;
+            for acl in list {
+                if acl["token"]
+                    .as_str()
+                    .is_some_and(|t| !t.eq_ignore_ascii_case(token))
+                {
+                    continue;
+                }
+                if acl["inheritPermissions"].as_bool() == Some(false) {
+                    inherits = false;
+                }
+                let Some(aces) = acl["acesDictionary"].as_object() else {
+                    continue;
+                };
+                for (key, ace) in aces {
+                    let who = ace["descriptor"].as_str().unwrap_or(key);
+                    if !subjects.iter().any(|d| d.eq_ignore_ascii_case(who)) {
+                        continue;
+                    }
+                    let bits = |effective: &str, explicit: &str| {
+                        ace[explicit].as_u64().unwrap_or(0)
+                            | ace["extendedInfo"][effective].as_u64().unwrap_or(0)
+                    };
+                    if bits("effectiveDeny", "deny") & GENERIC_CONTRIBUTE != 0 {
+                        denied = true;
+                    }
+                    if level_inherits && bits("effectiveAllow", "allow") & GENERIC_CONTRIBUTE != 0 {
+                        allowed = true;
+                    }
+                }
+            }
+        }
+        if denied {
+            info!(
+                "Azure DevOps: Contribute denied on {} for {username} — not a collaborator",
+                self.repo
+            );
+            return Ok(false);
+        }
         if !allowed {
             info!(
-                "Azure DevOps: no explicit Contribute ACE for {username} on {} — denied \
-                 (use [fix] allowed_users for group-based access)",
+                "Azure DevOps: {username} has no Contribute right on {} — denied",
                 self.repo
             );
         }
@@ -1250,7 +1697,7 @@ mod tests {
         );
         let q = reqs[0].json()["query"].as_str().unwrap().to_string();
         assert!(
-            q.contains("[System.ChangedDate] >= '2026-05-01T00:00:00+00:00'"),
+            q.contains("[System.ChangedDate] >= '2026-05-01T00:00:00Z'"),
             "{q}"
         );
         assert!(reqs[1].query.contains("ids=3,4"));
@@ -1336,6 +1783,11 @@ mod tests {
         let inline = reqs[0].json();
         assert_eq!(inline["threadContext"]["filePath"], "/src/a.rs");
         assert_eq!(inline["threadContext"]["rightFileStart"]["line"], 8);
+        assert_eq!(inline["threadContext"]["rightFileEnd"]["line"], 8);
+        // Findings are active threads; the summary is closed so it never
+        // blocks a "comments must be resolved" policy.
+        assert_eq!(inline["status"], THREAD_ACTIVE);
+        assert_eq!(reqs[1].json()["status"], THREAD_CLOSED);
         assert_eq!(inline["comments"][0]["content"], "nit\n\n<!-- wshm -->");
         assert_eq!(
             reqs[1].json()["comments"][0]["content"],
@@ -1419,66 +1871,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collaborator_denied_without_explicit_contribute() {
-        let server = MockServer::start().await;
-        let base = server.url();
-        let p = provider(&server);
-        // Not dev.azure.com → identities on the same host.
-        server.on(
-            "GET",
-            "/acme/_apis/identities",
-            Reply::json(json!({"value": [{"id": "u1", "descriptor": "d1"}]})),
-        );
-        server.on(
-            "GET",
-            R,
-            Reply::json(json!({"id": "r1", "project": {"id": "p1"}})),
-        );
-        server.on(
-            "GET",
-            &format!("/acme/_apis/accesscontrollists/{GIT_NAMESPACE}"),
-            Reply::json(
-                json!({"value": [{"acesDictionary": {"d1": {"allow": 2, "deny": 0,
-                "extendedInfo": {"effectiveAllow": 2}}}}]}),
-            ),
-        );
-        assert!(!p.is_collaborator("bob@x.io").await.unwrap(), "{base}");
-        let acl_req = server
-            .requests()
-            .into_iter()
-            .find(|r| r.path.contains("accesscontrollists"))
-            .unwrap();
-        assert!(acl_req.query.contains("token=repoV2%2Fp1%2Fr1"));
-        assert!(acl_req.query.contains("descriptors=d1"));
-
-        let server = MockServer::start().await;
-        server.on(
-            "GET",
-            "/acme/_apis/identities",
-            Reply::json(json!({"value": [{"descriptor": "d1"}]})),
-        );
-        server.on(
-            "GET",
-            R,
-            Reply::json(json!({"id": "r1", "project": {"id": "p1"}})),
-        );
-        server.on(
-            "GET",
-            &format!("/acme/_apis/accesscontrollists/{GIT_NAMESPACE}"),
-            Reply::json(json!({"value": [{"acesDictionary": {"d1": {"allow": 6, "deny": 0}}}]})),
-        );
-        assert!(provider(&server).is_collaborator("bob@x.io").await.unwrap());
-
-        let server = MockServer::start().await;
-        server.on(
-            "GET",
-            "/acme/_apis/identities",
-            Reply::json(json!({"value": []})),
-        );
-        assert!(!provider(&server).is_collaborator("ghost").await.unwrap());
-    }
-
-    #[tokio::test]
     async fn work_item_types_filter_with_db_override() {
         let server = MockServer::start().await;
         server.on(
@@ -1557,5 +1949,777 @@ mod tests {
         assert!(!p.supports_mermaid());
         assert!(!p.supports(Capability::CommentPolling));
         assert_eq!(p.repo_slug(), "o/p");
+    }
+
+    #[tokio::test]
+    async fn wiql_pages_by_id_past_the_query_cap() {
+        let server = MockServer::start().await;
+        // Page 2 (keyset after id 8) first: rules match in order.
+        server.on(
+            "POST",
+            "/acme/Proj/_apis/wit/wiql",
+            Reply::json(json!({"workItems": [{"id": 5}]})).when_body("[System.Id] < 8"),
+        );
+        server.on(
+            "POST",
+            "/acme/Proj/_apis/wit/wiql",
+            Reply::json(json!({"workItems": [{"id": 9}, {"id": 8}]})),
+        );
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/wit/workitems",
+            Reply::json(
+                json!({"value": [{"id": 9, "fields": {}}, {"id": 8, "fields": {}},
+                                          {"id": 5, "fields": {}}]}),
+            ),
+        );
+        let mut p = provider(&server);
+        p.wiql_page = 2;
+        let issues = p.fetch_issues(None).await.unwrap();
+        assert_eq!(issues.len(), 3);
+        let reqs = server.requests();
+        let wiql: Vec<String> = reqs
+            .iter()
+            .filter(|r| r.method == "POST")
+            .map(|r| r.json()["query"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(wiql.len(), 2, "{wiql:?}");
+        assert!(wiql[0].contains("ORDER BY [System.Id] DESC"), "{}", wiql[0]);
+        assert!(!wiql[0].contains("[System.Id] <"));
+        assert!(wiql[1].contains("AND [System.Id] < 8"), "{}", wiql[1]);
+        assert!(reqs.iter().any(|r| r.query.contains("$top=2")));
+        let batch = reqs.iter().find(|r| r.method == "GET").unwrap();
+        assert!(batch.query.contains("ids=9,8,5"), "{}", batch.query);
+    }
+
+    #[tokio::test]
+    async fn tag_removal_patches_the_remaining_tags() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/wit/workitems/9",
+            Reply::json(json!({"id": 9, "rev": 2, "fields": {
+                "System.Tags": "bug; wshm:triaged; p1", "System.TeamProject": "Proj"}})),
+        );
+        server.on(
+            "PATCH",
+            "/acme/Proj/_apis/wit/workitems/9",
+            Reply::json(json!({"id": 9})),
+        );
+        let p = provider(&server);
+        p.remove_label(9, "WSHM:Triaged").await.unwrap();
+        // Absent tag: no write at all.
+        p.remove_label(9, "nope").await.unwrap();
+        let patches: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|r| r.method == "PATCH")
+            .collect();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(
+            patches[0].json(),
+            json!([{"op": "test", "path": "/rev", "value": 2},
+                   {"op": "add", "path": "/fields/System.Tags", "value": "bug; p1"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn work_item_comment_created_then_updated_by_marker() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/wit/workItems/3/comments",
+            Reply::json(json!({"comments": [{"id": 1, "text": "hi"}]})),
+        );
+        server.on(
+            "POST",
+            "/acme/Proj/_apis/wit/workItems/3/comments",
+            Reply::json(json!({"id": 2})),
+        );
+        let p = provider(&server);
+        p.comment_issue(3, "triaged").await.unwrap();
+        let reqs = server.requests();
+        let post = reqs.iter().find(|r| r.method == "POST").unwrap();
+        assert!(post.query.contains("format=markdown"));
+        assert!(post.query.contains("api-version=7.1-preview.4"));
+        assert_eq!(post.json(), json!({"text": "triaged\n\n<!-- wshm -->"}));
+
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/wit/workItems/3/comments",
+            Reply::json(json!({"comments": [
+                {"id": 1, "text": "old <!-- wshm -->", "isDeleted": true},
+                {"id": 4, "text": "triaged <!-- wshm -->"}]})),
+        );
+        server.on(
+            "PATCH",
+            "/acme/Proj/_apis/wit/workItems/3/comments/4",
+            Reply::json(json!({"id": 4})),
+        );
+        provider(&server).comment_issue(3, "again").await.unwrap();
+        let reqs = server.requests();
+        assert!(!reqs.iter().any(|r| r.method == "POST"));
+        let patch = reqs.iter().find(|r| r.method == "PATCH").unwrap();
+        assert_eq!(patch.json(), json!({"text": "again\n\n<!-- wshm -->"}));
+    }
+
+    #[tokio::test]
+    async fn new_pr_comment_is_a_closed_thread() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            &format!("{R}/pullRequests/5/threads"),
+            Reply::json(json!({"value": [
+                {"id": 70, "isDeleted": true, "comments": [{"id": 1, "content": "<!-- wshm -->"}]}
+            ]})),
+        );
+        server.on(
+            "POST",
+            &format!("{R}/pullRequests/5/threads"),
+            Reply::json(json!({"id": 71})),
+        );
+        provider(&server).comment_pr(5, "analysis").await.unwrap();
+        let post = server
+            .requests()
+            .into_iter()
+            .find(|r| r.method == "POST")
+            .unwrap();
+        assert_eq!(post.json()["status"], THREAD_CLOSED);
+        assert_eq!(
+            post.json()["comments"][0]["content"],
+            "analysis\n\n<!-- wshm -->"
+        );
+        assert!(post.json().get("threadContext").is_none());
+    }
+
+    fn connection_data(server: &MockServer) {
+        server.on(
+            "GET",
+            "/acme/_apis/connectionData",
+            Reply::json(json!({"authenticatedUser": {"id": "me-1",
+                "properties": {"Account": {"$value": "wshm-bot@x.io"}}}})),
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_status_maps_to_mergeable() {
+        for (status, expected) in [
+            ("succeeded", Some(true)),
+            ("conflicts", Some(false)),
+            ("queued", None),
+            ("rejectedByPolicy", None),
+            ("failure", None),
+        ] {
+            let server = MockServer::start().await;
+            server.on(
+                "GET",
+                &format!("{R}/pullrequests/5"),
+                Reply::json(json!({"pullRequestId": 5, "status": "active", "mergeStatus": status})),
+            );
+            let got = provider(&server).fetch_pr_mergeable(5).await.unwrap();
+            assert_eq!(got, expected, "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ci_reads_build_policies_and_statuses() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            &format!("{R}/pullrequests"),
+            Reply::json(json!({"value": [{"pullRequestId": 5, "status": "active"},
+                                          {"pullRequestId": 6, "status": "active"},
+                                          {"pullRequestId": 7, "status": "active"}]})),
+        );
+        server.on(
+            "GET",
+            R,
+            Reply::json(json!({"id": "r1", "project": {"id": "p1"}})),
+        );
+        for id in [5, 6, 7] {
+            server.on(
+                "GET",
+                &format!("{R}/pullRequests/{id}/statuses"),
+                Reply::json(json!({"value": if id == 7 {
+                    json!([{"id": 1, "state": "succeeded", "context": {"genre": "g", "name": "lint"}}])
+                } else { json!([]) }})),
+            );
+        }
+        let build = |status: &str| {
+            json!({"status": status, "configuration": {"isEnabled": true,
+                   "type": {"id": BUILD_POLICY_TYPE}}})
+        };
+        let reviewers = json!({"status": "rejected", "configuration": {"isEnabled": true,
+                               "type": {"id": "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd"}}});
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/policy/evaluations",
+            Reply::json(json!({"value": [build("rejected")]})).when_query("p1%2F5"),
+        );
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/policy/evaluations",
+            Reply::json(json!({"value": [build("running"), reviewers]})).when_query("p1%2F6"),
+        );
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/policy/evaluations",
+            Reply::json(json!({"value": [build("approved")]})).when_query("p1%2F7"),
+        );
+        let ci = provider(&server).fetch_ci_statuses().await.unwrap();
+        assert_eq!(ci[&5].as_deref(), Some("failure"));
+        // A rejected reviewer policy is not CI.
+        assert_eq!(ci[&6].as_deref(), Some("pending"));
+        assert_eq!(ci[&7].as_deref(), Some("success"));
+        let eval = server
+            .requests()
+            .into_iter()
+            .find(|r| r.path.ends_with("policy/evaluations"))
+            .unwrap();
+        assert!(
+            eval.query
+                .contains("artifactId=vstfs%3A%2F%2F%2FCodeReview%2FCodeReviewId%2Fp1%2F"),
+            "{}",
+            eval.query
+        );
+        assert!(eval.query.contains("api-version=7.1-preview.1"));
+    }
+
+    #[tokio::test]
+    async fn duplicate_close_prefers_the_removed_category() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/wit/workitems/9",
+            Reply::json(json!({"id": 9, "fields": {"System.WorkItemType": "Bug",
+                "System.State": "Active", "System.TeamProject": "Proj"}})),
+        );
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/wit/workitemtypes/Bug/states",
+            Reply::json(json!({"value": [
+                {"name": "New", "category": "Proposed"},
+                {"name": "Closed", "category": "Completed"},
+                {"name": "Removed", "category": "Removed"}]})),
+        );
+        server.on(
+            "PATCH",
+            "/acme/Proj/_apis/wit/workitems/9",
+            Reply::json(json!({"id": 9})),
+        );
+        let p = provider(&server);
+        p.close_issue_not_planned(9).await.unwrap();
+        p.close_issue(9).await.unwrap();
+        let states: Vec<Value> = server
+            .requests()
+            .into_iter()
+            .filter(|r| r.method == "PATCH")
+            .map(|r| r.json()[0]["value"].clone())
+            .collect();
+        assert_eq!(states, vec![json!("Removed"), json!("Closed")]);
+    }
+
+    #[tokio::test]
+    async fn sign_in_page_is_an_auth_error() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            &format!("{R}/pullrequests/5"),
+            Reply::text("<html>Sign in</html>").status(203),
+        );
+        let err = provider(&server).fetch_pull(5).await.unwrap_err();
+        assert!(format!("{err:#}").contains("203"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn project_visibility() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            "/acme/_apis/projects/Proj",
+            Reply::json(json!({"visibility": "public"})),
+        );
+        assert!(!provider(&server).fetch_repo_private().await.unwrap());
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            "/acme/_apis/projects/Proj",
+            Reply::json(json!({"visibility": "private"})),
+        );
+        assert!(provider(&server).fetch_repo_private().await.unwrap());
+    }
+
+    fn active_pr(server: &MockServer, extra: Value) {
+        let mut pr = json!({"pullRequestId": 5, "status": "active", "mergeStatus": "succeeded",
+                            "lastMergeSourceCommit": {"commitId": "abc"}});
+        for (k, v) in extra.as_object().unwrap() {
+            pr[k] = v.clone();
+        }
+        server.on("GET", &format!("{R}/pullrequests/5"), Reply::json(pr));
+    }
+
+    #[tokio::test]
+    async fn merge_completes_pinned_to_the_scored_head() {
+        let server = MockServer::start().await;
+        active_pr(&server, json!({}));
+        server.on(
+            "PATCH",
+            &format!("{R}/pullrequests/5"),
+            Reply::json(json!({"pullRequestId": 5, "status": "completed"})),
+        );
+        let p = provider(&server);
+        assert!(p.supports(Capability::Merge));
+        assert_eq!(
+            p.merge_pr(5, Some("abc"), true).await.unwrap(),
+            MergeOutcome::Merged
+        );
+        let patch = server
+            .requests()
+            .into_iter()
+            .find(|r| r.method == "PATCH")
+            .unwrap();
+        // Direct completion with the scored head (Azure checks it), never
+        // auto-complete.
+        assert_eq!(
+            patch.json(),
+            json!({"status": "completed", "lastMergeSourceCommit": {"commitId": "abc"},
+                   "completionOptions": {"mergeStrategy": "squash", "deleteSourceBranch": false,
+                                         "transitionWorkItems": false}})
+        );
+        assert!(patch.json().get("autoCompleteSetBy").is_none());
+
+        // Still active in the answer (asynchronous merge, or a policy
+        // blocks it): not merged; merge commit strategy.
+        let server = MockServer::start().await;
+        active_pr(&server, json!({}));
+        server.on(
+            "PATCH",
+            &format!("{R}/pullrequests/5"),
+            Reply::json(json!({"pullRequestId": 5, "status": "active"})),
+        );
+        assert_eq!(
+            provider(&server)
+                .merge_pr(5, Some("abc"), false)
+                .await
+                .unwrap(),
+            MergeOutcome::NotMerged
+        );
+        let patch = server
+            .requests()
+            .into_iter()
+            .find(|r| r.method == "PATCH")
+            .unwrap();
+        assert_eq!(
+            patch.json()["completionOptions"]["mergeStrategy"],
+            "noFastForward"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_refuses_moved_heads_and_unsafe_states() {
+        for (extra, sha, why) in [
+            (
+                json!({"lastMergeSourceCommit": {"commitId": "xyz"}}),
+                Some("abc"),
+                "head moved",
+            ),
+            (
+                json!({"mergeStatus": "conflicts"}),
+                Some("abc"),
+                "conflicts",
+            ),
+            (json!({"isDraft": true}), Some("abc"), "draft"),
+            (json!({"status": "completed"}), Some("abc"), "not active"),
+            (json!({}), None, "no scored head"),
+        ] {
+            let server = MockServer::start().await;
+            active_pr(&server, extra);
+            let err = provider(&server).merge_pr(5, sha, false).await.unwrap_err();
+            assert!(format!("{err:#}").contains(why), "{err:#}");
+            assert!(!server.requests().iter().any(|r| r.method == "PATCH"));
+        }
+        // Anonymous: refused before any request.
+        let server = MockServer::start().await;
+        let anon = AzureDevOpsProvider::with_rest(
+            Rest::new("Azure DevOps", Auth::None).unwrap(),
+            &server.url(),
+            "acme",
+            "Proj/web",
+            "<!-- wshm -->".into(),
+        );
+        assert!(anon.merge_pr(5, Some("abc"), false).await.is_err());
+        assert!(server.requests().is_empty());
+    }
+
+    /// An identity found by exact account name, with its groups.
+    fn identity(server: &MockServer, account: &str, member_of: Value) {
+        server.on(
+            "GET",
+            "/acme/_apis/identities",
+            Reply::json(json!({"value": [{
+                "id": format!("id-{account}"), "descriptor": format!("d-{account}"),
+                "memberOf": member_of,
+                "properties": {"Account": {"$value": account}}}]}))
+            .when_query(&format!("filterValue={}", enc(account))),
+        );
+    }
+
+    /// ACLs of the repository, project and root tokens, plus the repo ids.
+    fn acls(server: &MockServer, repo: Value, project: Value, root: Value) {
+        server.on(
+            "GET",
+            R,
+            Reply::json(json!({"id": "r1", "project": {"id": "p1"}})),
+        );
+        let path = format!("/acme/_apis/accesscontrollists/{GIT_NAMESPACE}");
+        for (fragment, token, acl) in [
+            ("token=repoV2%2Fp1%2Fr1&", "repoV2/p1/r1", repo),
+            ("token=repoV2%2Fp1&", "repoV2/p1", project),
+            ("token=repoV2&", "repoV2", root),
+        ] {
+            let mut acl = acl;
+            acl["token"] = json!(token);
+            server.on(
+                "GET",
+                &path,
+                Reply::json(json!({"value": [acl]})).when_query(fragment),
+            );
+        }
+    }
+
+    fn aces(v: Value) -> Value {
+        json!({"acesDictionary": v})
+    }
+
+    #[tokio::test]
+    async fn collaborator_through_a_group_allow_on_a_parent_token() {
+        let server = MockServer::start().await;
+        identity(&server, "bob@x.io", json!(["g-team", "g-contrib"]));
+        acls(
+            &server,
+            aces(json!({})),
+            aces(json!({"g-contrib": {"descriptor": "g-contrib", "allow": 6, "deny": 0}})),
+            aces(json!({})),
+        );
+        assert!(provider(&server).is_collaborator("bob@x.io").await.unwrap());
+        let reqs = server.requests();
+        let user_q = reqs
+            .iter()
+            .find(|r| r.query.contains("bob%40x.io"))
+            .unwrap();
+        assert!(user_q.query.contains("queryMembership=ExpandedUp"));
+        let acl_reqs: Vec<_> = reqs
+            .iter()
+            .filter(|r| r.path.contains("accesscontrollists"))
+            .collect();
+        // Repository, project and root tokens, all ACEs (no descriptor
+        // filter: no URL length limit on large memberships).
+        assert_eq!(acl_reqs.len(), 3);
+        assert!(acl_reqs.iter().all(|r| !r.query.contains("descriptors=")));
+        assert!(acl_reqs.iter().all(|r| r.query.contains("recurse=false")));
+    }
+
+    #[tokio::test]
+    async fn collaborator_denies_win_at_any_level() {
+        // A nested group of the user is denied at the root.
+        let server = MockServer::start().await;
+        identity(&server, "bob@x.io", json!(["g-contrib", "g-nested"]));
+        acls(
+            &server,
+            aces(json!({"d-bob@x.io": {"allow": 4, "deny": 0}})),
+            aces(json!({"g-contrib": {"allow": 4, "deny": 0}})),
+            aces(json!({"g-nested": {"allow": 0, "deny": 4}})),
+        );
+        assert!(!provider(&server).is_collaborator("bob@x.io").await.unwrap());
+
+        // Effective deny reported by the service for the user.
+        let server = MockServer::start().await;
+        identity(&server, "bob@x.io", json!(["g-contrib"]));
+        acls(
+            &server,
+            aces(json!({"d-bob@x.io": {"allow": 0, "deny": 0,
+                                        "extendedInfo": {"effectiveDeny": 4}}})),
+            aces(json!({"g-contrib": {"allow": 4, "deny": 0}})),
+            aces(json!({})),
+        );
+        assert!(!provider(&server).is_collaborator("bob@x.io").await.unwrap());
+
+        // A deny on some other group of the project does not concern bob.
+        let server = MockServer::start().await;
+        identity(&server, "bob@x.io", json!(["g-contrib"]));
+        acls(
+            &server,
+            aces(json!({"g-other": {"allow": 0, "deny": 4}})),
+            aces(json!({"g-contrib": {"allow": 4, "deny": 0}})),
+            aces(json!({})),
+        );
+        assert!(provider(&server).is_collaborator("bob@x.io").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn collaborator_allow_rules() {
+        // Explicit allow for the user on the repository.
+        let server = MockServer::start().await;
+        identity(&server, "bob@x.io", json!([]));
+        acls(
+            &server,
+            aces(json!({"d-bob@x.io": {"allow": 6, "deny": 0}})),
+            aces(json!({})),
+            aces(json!({})),
+        );
+        assert!(provider(&server).is_collaborator("bob@x.io").await.unwrap());
+
+        // Read only: denied.
+        let server = MockServer::start().await;
+        identity(&server, "bob@x.io", json!(["g-readers"]));
+        acls(
+            &server,
+            aces(json!({})),
+            aces(json!({"g-readers": {"allow": 2, "deny": 0}})),
+            aces(json!({})),
+        );
+        assert!(!provider(&server).is_collaborator("bob@x.io").await.unwrap());
+
+        // The repository does not inherit: a project-level allow is moot.
+        let server = MockServer::start().await;
+        identity(&server, "bob@x.io", json!(["g-contrib"]));
+        let mut repo = aces(json!({}));
+        repo["inheritPermissions"] = json!(false);
+        acls(
+            &server,
+            repo,
+            aces(json!({"g-contrib": {"allow": 4, "deny": 0}})),
+            aces(json!({})),
+        );
+        assert!(!provider(&server).is_collaborator("bob@x.io").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn collaborator_incomplete_evaluation_denies() {
+        // Group membership unknown (no memberOf).
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            "/acme/_apis/identities",
+            Reply::json(json!({"value": [{"descriptor": "d-bob",
+                "properties": {"Account": {"$value": "bob@x.io"}}}]})),
+        );
+        assert!(!provider(&server).is_collaborator("bob@x.io").await.unwrap());
+        assert!(!server
+            .requests()
+            .iter()
+            .any(|r| r.path.contains("accesscontrollists")));
+
+        // An unreadable group entry.
+        let server = MockServer::start().await;
+        identity(&server, "bob@x.io", json!([42]));
+        assert!(!provider(&server).is_collaborator("bob@x.io").await.unwrap());
+
+        // A paged access control list.
+        let server = MockServer::start().await;
+        identity(&server, "bob@x.io", json!(["g-contrib"]));
+        server.on(
+            "GET",
+            R,
+            Reply::json(json!({"id": "r1", "project": {"id": "p1"}})),
+        );
+        server.on(
+            "GET",
+            &format!("/acme/_apis/accesscontrollists/{GIT_NAMESPACE}"),
+            Reply::json(json!({"value": [{"token": "repoV2/p1/r1",
+                "acesDictionary": {"g-contrib": {"allow": 4, "deny": 0}}}]}))
+            .header("x-ms-continuationtoken", "next"),
+        );
+        assert!(!provider(&server).is_collaborator("bob@x.io").await.unwrap());
+
+        // An ACL call failing (here: the root token is not answered).
+        let server = MockServer::start().await;
+        identity(&server, "bob@x.io", json!(["g-contrib"]));
+        server.on(
+            "GET",
+            R,
+            Reply::json(json!({"id": "r1", "project": {"id": "p1"}})),
+        );
+        server.on(
+            "GET",
+            &format!("/acme/_apis/accesscontrollists/{GIT_NAMESPACE}"),
+            Reply::json(json!({"value": [{"token": "repoV2/p1/r1",
+                "acesDictionary": {"d-bob@x.io": {"allow": 4, "deny": 0}}}]}))
+            .when_query("token=repoV2%2Fp1%2Fr1&"),
+        );
+        assert!(provider(&server).is_collaborator("bob@x.io").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn collaborator_needs_an_exact_identity() {
+        // The identity search is fuzzy: "bob" also returns bobby.
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            "/acme/_apis/identities",
+            Reply::json(
+                json!({"value": [{"descriptor": "d-bobby", "memberOf": ["g-contrib"],
+                "properties": {"Account": {"$value": "bobby@x.io"}}}]}),
+            ),
+        );
+        assert!(!provider(&server).is_collaborator("bob").await.unwrap());
+        assert!(!server
+            .requests()
+            .iter()
+            .any(|r| r.path.contains("accesscontrollists")));
+        assert!(provider(&server).is_collaborator("a&b").await.is_err());
+    }
+
+    #[test]
+    fn descriptors_as_strings_or_objects() {
+        assert_eq!(descriptor_str(&json!("T;1")).as_deref(), Some("T;1"));
+        assert_eq!(
+            descriptor_str(&json!({"identityType": "T", "identifier": "1"})).as_deref(),
+            Some("T;1")
+        );
+        assert_eq!(descriptor_str(&json!(null)), None);
+    }
+
+    #[tokio::test]
+    async fn approvers_are_voters_with_write_access() {
+        let server = MockServer::start().await;
+        connection_data(&server);
+        active_pr(
+            &server,
+            json!({
+                "createdBy": {"id": "id-author", "uniqueName": "author@x.io"},
+                "reviewers": [
+                    {"id": "id-author", "uniqueName": "author@x.io", "vote": 10},
+                    {"id": "me-1", "uniqueName": "wshm-bot@x.io", "vote": 10},
+                    {"id": "grp", "uniqueName": "[Proj]\\Reviewers", "vote": 10, "isContainer": true},
+                    {"id": "id-alice", "uniqueName": "alice@x.io", "vote": 10},
+                    {"id": "id-carol", "uniqueName": "carol@x.io", "vote": 5},
+                    {"id": "id-dave", "uniqueName": "dave@x.io", "vote": -5},
+                    {"id": "id-erin", "uniqueName": "erin@x.io", "vote": 0},
+                    {"id": "id-mallory", "uniqueName": "mallory@x.io", "vote": 10}
+                ]
+            }),
+        );
+        identity(&server, "alice@x.io", json!(["g-contrib"]));
+        identity(&server, "carol@x.io", json!(["g-contrib"]));
+        identity(&server, "mallory@x.io", json!(["g-readers"]));
+        acls(
+            &server,
+            aces(json!({})),
+            aces(json!({"g-contrib": {"allow": 4, "deny": 0},
+                        "g-readers": {"allow": 2, "deny": 0}})),
+            aces(json!({})),
+        );
+        let p = provider(&server);
+        let approvers = p.fetch_pr_approvers(5).await.unwrap();
+        assert_eq!(approvers, vec!["alice@x.io", "carol@x.io"]);
+        // Neither the author nor wshm itself was even checked.
+        let reqs = server.requests();
+        assert!(!reqs.iter().any(|r| r.query.contains("author%40x.io")));
+        assert!(!reqs.iter().any(|r| r.query.contains("wshm-bot%40x.io")));
+    }
+
+    #[tokio::test]
+    async fn comments_are_read_back_from_the_api() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            &format!("{R}/pullRequests/7/threads/41/comments/3"),
+            Reply::json(
+                json!({"id": 3, "content": "/wshm review", "commentType": "text",
+                               "author": {"uniqueName": "bob@x.io"},
+                               "publishedDate": "2026-05-01T00:00:00Z"}),
+            ),
+        );
+        server.on(
+            "GET",
+            &format!("{R}/pullRequests/7/threads/41/comments/4"),
+            Reply::json(json!({"id": 4, "content": "x", "isDeleted": true})),
+        );
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/wit/workItems/42/comments/77",
+            Reply::json(json!({"id": 77, "workItemId": 42,
+                               "text": "<div>/wshm fix &amp; go</div>",
+                               "createdBy": {"uniqueName": "carol@x.io"}})),
+        );
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/wit/workitems/42",
+            Reply::json(json!({"id": 42, "fields": {"System.TeamProject": "Proj"}})),
+        );
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/wit/workItems/43/comments/78",
+            Reply::json(json!({"id": 78, "workItemId": 43, "text": "/wshm fix",
+                               "createdBy": {"uniqueName": "eve@x.io"}})),
+        );
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/wit/workitems/43",
+            Reply::json(json!({"id": 43, "fields": {"System.TeamProject": "Other"}})),
+        );
+        let p = provider(&server);
+        let pr = |id| CommentRef {
+            thread: Thread::Pull(7),
+            id,
+            parent_id: Some(41),
+        };
+        let c = p.fetch_comment(&pr(3)).await.unwrap().unwrap();
+        assert_eq!(
+            (c.author.as_str(), c.body.as_str()),
+            ("bob@x.io", "/wshm review")
+        );
+        assert!(c.is_pr);
+        assert!(p.fetch_comment(&pr(4)).await.unwrap().is_none(), "deleted");
+        assert!(p.fetch_comment(&pr(5)).await.unwrap().is_none(), "missing");
+        let wi = |n, id| CommentRef {
+            thread: Thread::Issue(n),
+            id,
+            parent_id: None,
+        };
+        let c = p.fetch_comment(&wi(42, 77)).await.unwrap().unwrap();
+        assert_eq!(
+            (c.author.as_str(), c.body.as_str()),
+            ("carol@x.io", "/wshm fix & go")
+        );
+        // A work item of another project (ids are organization-wide).
+        assert!(p.fetch_comment(&wi(43, 78)).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn ci_keeps_other_prs_when_one_fails() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            &format!("{R}/pullrequests"),
+            Reply::json(json!({"value": [{"pullRequestId": 5, "status": "active"},
+                                          {"pullRequestId": 6, "status": "active"}]})),
+        );
+        server.on(
+            "GET",
+            R,
+            Reply::json(json!({"id": "r1", "project": {"id": "p1"}})),
+        );
+        server.on(
+            "GET",
+            &format!("{R}/pullRequests/5/statuses"),
+            Reply::json(json!({"value": [{"id": 1, "state": "failed",
+                                          "context": {"genre": "g", "name": "lint"}}]})),
+        );
+        server.on(
+            "GET",
+            &format!("{R}/pullRequests/6/statuses"),
+            Reply::json(json!({"message": "denied"})).status(403),
+        );
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/policy/evaluations",
+            Reply::json(json!({"value": []})),
+        );
+        let ci = provider(&server).fetch_ci_statuses().await.unwrap();
+        assert_eq!(ci[&5].as_deref(), Some("failure"));
+        assert!(!ci.contains_key(&6));
     }
 }

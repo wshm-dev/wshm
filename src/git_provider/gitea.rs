@@ -360,6 +360,7 @@ impl GitProvider for GiteaProvider {
             | Capability::Reactions
             | Capability::CiStatus
             | Capability::CommentPolling => true,
+            Capability::Merge => false,
         }
     }
 

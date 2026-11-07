@@ -341,26 +341,37 @@ async fn poll_forge_changes(
     for pr in gh.fetch_pulls_incremental("open", Some(&since)).await? {
         let head = pr.head_sha.clone().unwrap_or_default();
         let key = (slug.clone(), pr.number);
-        let previous = SEEN_HEADS
-            .lock()
+        let seen = SEEN_HEADS.lock().ok().and_then(|m| m.get(&key).cloned());
+        // A head this process saw at the previous poll changed: a push
+        // happened in the window even when the forge has no PR "updated"
+        // date (Azure DevOps).
+        let seen_moved = seen
+            .as_deref()
+            .is_some_and(|p| !head.is_empty() && p != head);
+        let db_head = state
+            .db
+            .get_pull(pr.number)
             .ok()
-            .and_then(|m| m.get(&key).cloned())
-            .or_else(|| {
-                state
-                    .db
-                    .get_pull(pr.number)
-                    .ok()
-                    .flatten()
-                    .and_then(|p| p.head_sha)
-            });
+            .flatten()
+            .and_then(|p| p.head_sha);
+        // No updated date (Azure DevOps: updated_at is the creation date):
+        // the cached head decides, which survives restarts and is the same
+        // for every pod. Fired once per head by this process.
+        let moved_vs_db = pr.updated_at == pr.created_at
+            && !head.is_empty()
+            && db_head.as_deref().is_some_and(|d| d != head)
+            && seen.as_deref() != Some(head.as_str());
+        let previous = seen.or(db_head);
         if let Ok(mut m) = SEEN_HEADS.lock() {
             m.insert(key, head.clone());
         }
         let action = if in_window(&pr.created_at) {
             "opened"
-        } else if in_window(&pr.updated_at)
-            && !head.is_empty()
-            && previous.as_deref().is_some_and(|p| p != head)
+        } else if seen_moved
+            || moved_vs_db
+            || (in_window(&pr.updated_at)
+                && !head.is_empty()
+                && previous.as_deref().is_some_and(|p| p != head))
         {
             "synchronize"
         } else {
@@ -537,6 +548,65 @@ mod tests {
             .get_sync_entry(POLLER_SYNC_KEY)
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn push_without_updated_date_is_detected_from_the_cached_head() {
+        // Azure DevOps PRs have no "updated" date (updated_at = creation),
+        // and a restarted process has no in-memory head: the DB decides.
+        let server = MockServer::start().await;
+        server.on(
+            "POST",
+            "/acme/Proj/_apis/wit/wiql",
+            Reply::json(json!({"workItems": []})),
+        );
+        server.on(
+            "GET",
+            "/acme/Proj/_apis/git/repositories/push-test/pullrequests",
+            Reply::json(json!({"value": [
+                {"pullRequestId": 8, "status": "active", "creationDate": "2026-04-01T00:00:00Z",
+                 "lastMergeSourceCommit": {"commitId": "new"}},
+                {"pullRequestId": 9, "status": "active", "creationDate": "2026-04-01T00:00:00Z",
+                 "lastMergeSourceCommit": {"commitId": "same"}}
+            ]})),
+        );
+        let config = crate::config::Config {
+            git_provider: Some("azure-devops".into()),
+            repo_owner: "acme".into(),
+            repo_name: "Proj/push-test".into(),
+            ..Default::default()
+        };
+        let gh = Arc::new(
+            crate::git_provider::azure_devops::AzureDevOpsProvider::with_rest(
+                Rest::new("Azure DevOps", Auth::None).unwrap(),
+                &server.url(),
+                "acme",
+                "Proj/push-test",
+                config.branding.comment_marker(),
+            ),
+        );
+        let db = Arc::new(crate::Database::open_memory().unwrap());
+        for p in
+            crate::git_provider::GitProvider::fetch_pulls_incremental(gh.as_ref(), "open", None)
+                .await
+                .unwrap()
+        {
+            let mut p = p;
+            p.head_sha = Some(if p.number == 8 { "old" } else { "same" }.into());
+            db.upsert_pull(&p).unwrap();
+        }
+        let state = DaemonState::new(db, gh, Arc::new(config), false);
+        let mut cursor = Some(format!("{FORGE_CURSOR_PREFIX}2026-05-01T10:00:00Z"));
+        let events = poll_events(&state, &mut cursor).await.unwrap();
+        let sync: Vec<Option<u64>> = events
+            .iter()
+            .filter(|e| e.action == "synchronize")
+            .map(|e| e.number)
+            .collect();
+        assert_eq!(sync, vec![Some(8)]);
+        // Same head at the next poll (DB not refreshed yet): not again.
+        let again = poll_events(&state, &mut cursor).await.unwrap();
+        assert!(!again.iter().any(|e| e.action == "synchronize"));
     }
 }
 
