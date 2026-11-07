@@ -145,7 +145,7 @@ impl Rest {
 
     /// Send with the retry policy matching the method: POST is not
     /// idempotent, so it is only retried when the request provably never
-    /// reached the server.
+    /// reached the server or was refused by rate limiting (429).
     pub async fn send(
         &self,
         method: Method,
@@ -154,15 +154,34 @@ impl Rest {
         content_type: Option<&str>,
         accept: Option<&str>,
     ) -> Result<Response> {
+        let writes = method == Method::POST;
+        self.send_with(method, url, body, content_type, accept, writes)
+            .await
+    }
+
+    /// `writes`: retry only connect failures and 429 (never a 5xx, which
+    /// may follow a processed request).
+    async fn send_with(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<&Value>,
+        content_type: Option<&str>,
+        accept: Option<&str>,
+        writes: bool,
+    ) -> Result<Response> {
         let what = format!("{} {method}", self.label);
+        let max = crate::retry::effective_max_attempts();
+        let attempt = std::sync::atomic::AtomicU32::new(0);
         let op = || async {
+            let n = attempt.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             let resp = self
                 .send_once(method.clone(), url, body, content_type, accept)
                 .await?;
             // Rate limited (GitLab.com, self-managed with limits on): wait
-            // what the server asks before the retry layer tries again.
+            // what the server asks, only when the retry layer will retry.
             if resp.status == StatusCode::TOO_MANY_REQUESTS {
-                if let Some(wait) = retry_after(&resp.headers) {
+                if let Some(wait) = wait_before_retry(n, max, &resp.headers) {
                     tracing::warn!(
                         "{} rate limited on {}: waiting {}s",
                         self.label,
@@ -184,11 +203,22 @@ impl Rest {
             }
             Ok(resp)
         };
-        if method == Method::POST {
-            crate::retry::with_retry_connect_only(&what, op).await
+        if writes {
+            crate::retry::with_retry_writes(&what, op).await
         } else {
             crate::retry::with_retry(&what, op).await
         }
+    }
+
+    /// [`Self::send_json`] with the write retry policy whatever the method:
+    /// for a non-idempotent PUT (merge) that must not be re-issued after a
+    /// 5xx.
+    pub async fn send_json_once(&self, method: Method, url: &str, body: &Value) -> Result<Value> {
+        let resp = self
+            .send_with(method.clone(), url, Some(body), None, None, true)
+            .await?;
+        let resp = self.check(&method, url, resp)?;
+        self.parse(url, &resp.text)
     }
 
     fn check(&self, method: &Method, url: &str, resp: Response) -> Result<Response> {
@@ -317,6 +347,19 @@ pub(crate) fn retry_after(headers: &HeaderMap) -> Option<std::time::Duration> {
     ))
 }
 
+/// Delay before re-issuing attempt `attempt` (1-based) of `max` after a
+/// 429: `None` on the last attempt, where no retry follows.
+pub(crate) fn wait_before_retry(
+    attempt: u32,
+    max: u32,
+    headers: &HeaderMap,
+) -> Option<std::time::Duration> {
+    if attempt >= max {
+        return None;
+    }
+    retry_after(headers)
+}
+
 /// Parse an RFC 3339 timestamp (any offset) into UTC.
 pub(crate) fn parse_ts(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(ts)
@@ -425,6 +468,54 @@ mod tests {
         h.insert("ratelimit-reset", reset.to_string().parse().unwrap());
         let wait = retry_after(&h).unwrap().as_secs();
         assert!((4..=5).contains(&wait), "{wait}");
+    }
+
+    #[test]
+    fn rate_limit_wait_only_before_a_retry() {
+        let mut h = HeaderMap::new();
+        h.insert("retry-after", "9".parse().unwrap());
+        assert_eq!(
+            wait_before_retry(1, 3, &h),
+            Some(std::time::Duration::from_secs(9))
+        );
+        assert_eq!(wait_before_retry(3, 3, &h), None);
+        assert_eq!(wait_before_retry(1, 1, &h), None);
+    }
+
+    #[tokio::test]
+    async fn throttled_posts_are_retried_but_server_errors_are_not() {
+        // Every policy the test suite installs allows >= 3 attempts.
+        let server = MockServer::start().await;
+        server.on(
+            "POST",
+            "/create",
+            Reply::json(serde_json::json!({"message": "429 Too Many Requests"}))
+                .status(429)
+                .header("retry-after", "0"),
+        );
+        server.on(
+            "PUT",
+            "/merge",
+            Reply::json(serde_json::json!({"message": "oops"})).status(502),
+        );
+        let rest = Rest::new("T", Auth::None).unwrap();
+        let body = serde_json::json!({});
+        assert!(rest
+            .send_json(Method::POST, &format!("{}/create", server.url()), &body)
+            .await
+            .is_err());
+        let posts = server.requests().len();
+        assert!(posts >= 2, "429 on POST must be retried, got {posts}");
+        assert!(rest
+            .send_json_once(Method::PUT, &format!("{}/merge", server.url()), &body)
+            .await
+            .is_err());
+        let puts = server
+            .requests()
+            .iter()
+            .filter(|r| r.method == "PUT")
+            .count();
+        assert_eq!(puts, 1, "a write is not re-issued after a 5xx");
     }
 
     #[tokio::test]
