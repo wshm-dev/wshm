@@ -299,6 +299,19 @@ fn render_diffs(entries: &[Value]) -> String {
     out
 }
 
+/// GitLab bot accounts: project / group access tokens
+/// (`project_<id>_bot_<hash>`, `group_<id>_bot...`), service accounts and
+/// the ghost user. They never count as approvers.
+fn is_bot_username(username: &str) -> bool {
+    let u = username.to_ascii_lowercase();
+    u.is_empty()
+        || u == "ghost"
+        || u.ends_with("[bot]")
+        || u.ends_with("_bot")
+        || u.contains("_bot_")
+        || u.starts_with("service_account_")
+}
+
 /// Extra marker on review notes (summary and inline): keeps them apart from
 /// the analysis comment that [`GitProvider::find_comment_with_marker`]
 /// updates in place, since GitLab lists every MR note in one thread.
@@ -791,40 +804,80 @@ impl GitProvider for GitLabProvider {
             .context("GitLab: missing iid in create MR response")
     }
 
-    async fn merge_pr(
-        &self,
-        number: u64,
-        sha: Option<&str>,
-        squash: bool,
-        when_ci_passes: bool,
-    ) -> Result<MergeOutcome> {
+    async fn merge_pr(&self, number: u64, sha: Option<&str>, squash: bool) -> Result<MergeOutcome> {
         self.rest.require_auth("GitLab merge")?;
         let mut body = json!({ "squash": squash });
         if let Some(sha) = sha {
             // GitLab answers 409 when the source branch moved past `sha`.
             body["sha"] = json!(sha);
         }
-        if when_ci_passes {
-            // `auto_merge` replaces `merge_when_pipeline_succeeds` (deprecated
-            // in GitLab 17.11); older instances only know the latter and
-            // ignore the unknown parameter.
-            body["merge_when_pipeline_succeeds"] = json!(true);
-            body["auto_merge"] = json!(true);
-        }
-        let mr = self
-            .rest
-            .send_json(
-                Method::PUT,
-                &self.url(&format!("merge_requests/{number}/merge")),
-                &body,
-            )
-            .await
-            .with_context(|| format!("GitLab: merging MR !{number}"))?;
+        let url = self.url(&format!("merge_requests/{number}/merge"));
+        // Not re-issued after a 5xx: the merge may have happened anyway.
+        // The MR state then says what really happened.
+        let mr = match self.rest.send_json_once(Method::PUT, &url, &body).await {
+            Ok(mr) => mr,
+            Err(e) => {
+                let live = self
+                    .rest
+                    .get_json(&self.url(&format!("merge_requests/{number}")))
+                    .await;
+                if let Ok(live) = live {
+                    if live["state"].as_str() == Some("merged") {
+                        warn!("GitLab: merge of MR !{number} answered an error but the MR is merged: {e:#}");
+                        return Ok(MergeOutcome::Merged);
+                    }
+                }
+                return Err(e)
+                    .with_context(|| format!("GitLab: merging MR !{number} (not merged)"));
+            }
+        };
         Ok(if mr["state"].as_str() == Some("merged") {
             MergeOutcome::Merged
         } else {
-            MergeOutcome::Scheduled
+            MergeOutcome::NotMerged
         })
+    }
+
+    async fn fetch_pr_approvers(&self, number: u64) -> Result<Vec<String>> {
+        let approvals = self
+            .rest
+            .get_json(&self.url(&format!("merge_requests/{number}/approvals")))
+            .await?;
+        Ok(approvals["approved_by"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .map(|a| &a["user"])
+            .filter(|u| {
+                u["bot"].as_bool() != Some(true)
+                    && !is_bot_username(u["username"].as_str().unwrap_or(""))
+            })
+            .filter_map(|u| u["username"].as_str().map(String::from))
+            .collect())
+    }
+
+    async fn find_wshm_comments(&self, thread: Thread, marker: &str) -> Result<Vec<CommentRef>> {
+        // Unlike find_comment_with_marker: review notes and inline
+        // discussions too (they are wshm's), system notes never.
+        let (kind, number) = Self::kind(thread);
+        let mut out = Vec::new();
+        self.list(&format!("{kind}/{number}/notes?sort=asc"), |note| {
+            if note["system"].as_bool() != Some(true)
+                && http::has_marker(note["body"].as_str().unwrap_or(""), marker)
+            {
+                if let Some(id) = note["id"].as_u64() {
+                    out.push(CommentRef {
+                        thread,
+                        id,
+                        parent_id: None,
+                    });
+                }
+            }
+            true
+        })
+        .await?;
+        Ok(out)
     }
 
     async fn find_comment_with_marker(
@@ -1213,6 +1266,49 @@ mod tests {
         assert_eq!(
             reqs[5].json(),
             json!({"body": "summary\n\n<!-- wshm -->\n<!-- wshm:review -->"})
+        );
+    }
+
+    #[tokio::test]
+    async fn revert_lookup_finds_review_and_inline_notes() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            &format!("{P}/merge_requests/3/notes"),
+            Reply::json(json!([
+                {"id": 19, "system": true, "body": "<!-- wshm -->"},
+                {"id": 20, "type": "DiffNote", "body": "inline\n\n<!-- wshm -->\n<!-- wshm:review -->"},
+                {"id": 21, "body": "review\n\n<!-- wshm -->\n<!-- wshm:review -->"},
+                {"id": 22, "body": "analysis\n\n<!-- wshm -->"},
+                {"id": 23, "body": "a human"}
+            ])),
+        );
+        let found = provider(&server)
+            .find_wshm_comments(Thread::Pull(3), "<!-- wshm -->")
+            .await
+            .unwrap();
+        assert_eq!(
+            found.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![20, 21, 22]
+        );
+    }
+
+    #[tokio::test]
+    async fn approvers_leave_out_bots() {
+        let server = MockServer::start().await;
+        server.on(
+            "GET",
+            &format!("{P}/merge_requests/4/approvals"),
+            Reply::json(json!({"approved_by": [
+                {"user": {"username": "bob"}},
+                {"user": {"username": "project_9_bot_ab12"}},
+                {"user": {"username": "group_3_bot"}},
+                {"user": {"username": "svc", "bot": true}}
+            ]})),
+        );
+        assert_eq!(
+            provider(&server).fetch_pr_approvers(4).await.unwrap(),
+            vec!["bob"]
         );
     }
 
