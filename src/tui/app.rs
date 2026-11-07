@@ -1034,6 +1034,8 @@ impl App {
                     enabled: true,
                     secret: None,
                     features: crate::config::RepoFeatures::default(),
+                    git_provider: None,
+                    git_url: None,
                 });
                 let _ = global.save(config_path);
                 self.load_repos();

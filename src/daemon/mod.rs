@@ -362,7 +362,7 @@ impl MultiDaemonState {
         features: crate::config::RepoFeatures,
     ) -> Result<Arc<DaemonState>> {
         ensure_checkout(entry, &features);
-        let mut config = Config::load_for_repo(&entry.path, &entry.slug)?;
+        let mut config = Config::load_for_entry(entry)?;
         std::fs::create_dir_all(&config.wshm_dir)?;
         config.web.resolve_password(&config.wshm_dir);
         let db = match &runtime.db_factory {
@@ -416,6 +416,20 @@ impl MultiDaemonState {
     /// When `path` is None, defaults to `<global_config_parent>/repos/<name>`
     /// so dynamic adds land on the same volume as the daemon's config.
     pub async fn add_repo(&self, slug: &str, path: Option<PathBuf>) -> Result<Arc<DaemonState>> {
+        self.add_repo_on_forge(slug, path, None, None).await
+    }
+
+    /// [`Self::add_repo`] for a repo on another forge than GitHub
+    /// (`git_provider`, and `git_url` for a self-managed instance), recorded
+    /// in the registry entry. GitLab slugs may carry subgroups
+    /// (`group/sub/repo`).
+    pub async fn add_repo_on_forge(
+        &self,
+        slug: &str,
+        path: Option<PathBuf>,
+        git_provider: Option<String>,
+        git_url: Option<String>,
+    ) -> Result<Arc<DaemonState>> {
         let runtime = self
             .runtime
             .as_ref()
@@ -426,7 +440,9 @@ impl MultiDaemonState {
         // separator, so a value like "owner/.." can never become a directory
         // component of ".." when we derive the on-disk path from it.
         let segments: Vec<&str> = slug.split('/').collect();
-        if segments.len() != 2
+        let nested_ok = git_provider.as_deref().map(str::trim) == Some("gitlab");
+        if segments.len() < 2
+            || (segments.len() > 2 && !nested_ok)
             || segments
                 .iter()
                 .any(|s| s.is_empty() || *s == "." || *s == ".." || s.contains('\\'))
@@ -453,7 +469,7 @@ impl MultiDaemonState {
                 repos_base.join(p)
             }
             None => {
-                let name = segments[1];
+                let name = segments[segments.len() - 1];
                 repos_base.join(name)
             }
         };
@@ -465,7 +481,17 @@ impl MultiDaemonState {
             }
         }
 
-        let mut config = Config::load_for_repo(&path, slug)?;
+        let entry = crate::config::RepoEntry {
+            slug: slug.to_string(),
+            path: path.clone(),
+            apply: None,
+            enabled: true,
+            secret: None,
+            features: crate::config::RepoFeatures::default(),
+            git_provider,
+            git_url,
+        };
+        let mut config = Config::load_for_entry(&entry)?;
         std::fs::create_dir_all(&config.wshm_dir)?;
         config.web.resolve_password(&config.wshm_dir);
 
@@ -490,14 +516,7 @@ impl MultiDaemonState {
         // via the persistence hook (Pro → Postgres) or the TOML fallback.
         {
             let mut canonical = runtime.repos.write().await;
-            canonical.push(crate::config::RepoEntry {
-                slug: slug.to_string(),
-                path: path.clone(),
-                apply: None,
-                enabled: true,
-                secret: None,
-                features: crate::config::RepoFeatures::default(),
-            });
+            canonical.push(entry);
         }
         if let Err(e) = runtime.persist().await {
             runtime.repos.write().await.retain(|e| e.slug != slug);
@@ -755,27 +774,63 @@ fn ensure_checkout(entry: &crate::config::RepoEntry, features: &crate::config::R
     if !features.auto_pr || entry.path.join(".git").exists() {
         return;
     }
-    match std::env::var("GITHUB_TOKEN") {
-        Ok(token) => {
-            let url = format!("https://github.com/{}.git", entry.slug);
-            if let Some(parent) = entry.path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            match crate::github::git::clone_repo(&url, &entry.path, &token) {
-                Ok(_) => info!("Cloned {} into {}", entry.slug, entry.path.display()),
-                Err(e) => warn!(
-                    "Failed to clone {} into {} ({e}); daemon may degrade for this repo",
-                    entry.slug,
-                    entry.path.display()
-                ),
-            }
-        }
-        Err(_) => warn!(
-            "Repo {} not present at {} and GITHUB_TOKEN unset — skipping clone, daemon may degrade",
+    let Some((url, user, token)) = checkout_source(entry) else {
+        warn!(
+            "Repo {} not present at {} and no forge token to clone it — skipping clone, daemon may degrade",
+            entry.slug,
+            entry.path.display()
+        );
+        return;
+    };
+    if let Some(parent) = entry.path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    match crate::github::git::clone_repo_as(&url, &entry.path, user, &token) {
+        Ok(_) => info!("Cloned {} into {}", entry.slug, entry.path.display()),
+        Err(e) => warn!(
+            "Failed to clone {} into {} ({e}); daemon may degrade for this repo",
             entry.slug,
             entry.path.display()
         ),
     }
+}
+
+/// Clone URL, HTTP user and token for a registry entry's forge. GitHub
+/// keeps `GITHUB_TOKEN`; GitLab / Gitea / Forgejo use their forge token
+/// (secret store, then env) on the entry's `git_url` or the SaaS host.
+/// `None` without a token or for Azure DevOps (not cloned automatically).
+fn checkout_source(entry: &crate::config::RepoEntry) -> Option<(String, &'static str, String)> {
+    let mut config = crate::config::Config {
+        git_provider: entry.git_provider.clone(),
+        git_url: entry.git_url.clone(),
+        ..Default::default()
+    };
+    if let Some((owner, name)) = entry.slug.split_once('/') {
+        config.repo_owner = owner.to_string();
+        config.repo_name = name.to_string();
+    }
+    let (provider, url) = checkout_url(&config, &entry.slug);
+    match provider.as_str() {
+        "github" => std::env::var("GITHUB_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty())
+            .map(|t| (url, "x-access-token", t)),
+        // GitLab takes any user name with a token as password; `oauth2` is
+        // the documented one.
+        "gitlab" => crate::git_provider::forge_token(&config, "gitlab").map(|t| (url, "oauth2", t)),
+        "gitea" | "forgejo" => {
+            crate::git_provider::forge_token(&config, &provider).map(|t| (url, "wshm", t))
+        }
+        _ => None,
+    }
+}
+
+/// `(provider id, https clone URL)` of `slug` on the configured forge.
+fn checkout_url(config: &crate::config::Config, slug: &str) -> (String, String) {
+    let provider = crate::git_provider::provider_id(config).to_string();
+    let base = crate::git_provider::forge_base_url(config, &provider);
+    let url = format!("{base}/{slug}.git");
+    (provider, url)
 }
 
 /// Feature flags a registry entry runs with. A features section left at its
@@ -912,7 +967,7 @@ pub async fn run_multi_with_extensions(
         // Clone only when auto-fix needs a checkout and it is missing.
         ensure_checkout(entry, &entry.features);
 
-        let mut config = Config::load_for_repo(&entry.path, &entry.slug)?;
+        let mut config = Config::load_for_entry(entry)?;
 
         // Ensure .wshm dir exists
         std::fs::create_dir_all(&config.wshm_dir)?;
@@ -1173,6 +1228,8 @@ mod registry_sync_tests {
             enabled: true,
             secret: None,
             features: crate::config::RepoFeatures::default(),
+            git_provider: None,
+            git_url: None,
         }
     }
 
@@ -1481,6 +1538,71 @@ mod registry_sync_tests {
         assert!(
             p.sync_registry().await.unwrap(),
             "not live yet: next cycle retries instead of no-op"
+        );
+    }
+}
+
+#[cfg(test)]
+mod forge_entry_tests {
+    use super::*;
+    use crate::config::RepoEntry;
+
+    fn entry(slug: &str, provider: Option<&str>, url: Option<&str>) -> RepoEntry {
+        let mut e: RepoEntry = toml::from_str(&format!(
+            "slug = \"{slug}\"\npath = \"/nonexistent/wshm-forge-entry\""
+        ))
+        .unwrap();
+        e.git_provider = provider.map(String::from);
+        e.git_url = url.map(String::from);
+        e
+    }
+
+    #[test]
+    fn clone_urls_follow_the_entry_forge() {
+        let cfg = |e: &RepoEntry| Config::load_for_entry(e).unwrap();
+        let gl = entry("group/sub/proj", Some("gitlab"), None);
+        assert_eq!(
+            checkout_url(&cfg(&gl), &gl.slug),
+            (
+                "gitlab".into(),
+                "https://gitlab.com/group/sub/proj.git".into()
+            )
+        );
+        let sm = entry(
+            "team/app",
+            Some("gitlab"),
+            Some("https://gitlab.example.com/"),
+        );
+        assert_eq!(
+            checkout_url(&cfg(&sm), &sm.slug).1,
+            "https://gitlab.example.com/team/app.git"
+        );
+        let gh = entry("o/r", None, None);
+        assert_eq!(
+            checkout_url(&cfg(&gh), &gh.slug),
+            ("github".into(), "https://github.com/o/r.git".into())
+        );
+        assert!(checkout_source(&entry("o/p/r", Some("azure-devops"), None)).is_none());
+    }
+
+    #[test]
+    fn entry_forge_settings_reach_the_config_and_round_trip() {
+        let e = entry(
+            "group/sub/proj",
+            Some("gitlab"),
+            Some("https://gl.example.com"),
+        );
+        let c = Config::load_for_entry(&e).unwrap();
+        assert_eq!(crate::git_provider::provider_id(&c), "gitlab");
+        assert_eq!(c.git_url.as_deref(), Some("https://gl.example.com"));
+        assert_eq!(c.repo_slug(), "group/sub/proj");
+        let back: RepoEntry = toml::from_str(&toml::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back, e);
+        // Unset fields are not written (older registries stay unchanged).
+        let plain = toml::to_string(&entry("o/r", None, None)).unwrap();
+        assert!(
+            !plain.contains("git_provider") && !plain.contains("git_url"),
+            "{plain}"
         );
     }
 }

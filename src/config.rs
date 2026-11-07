@@ -2208,6 +2208,16 @@ pub struct RepoEntry {
     /// are opt-in.
     #[serde(default)]
     pub features: RepoFeatures,
+
+    /// Forge of this repo ("gitlab", "gitea", "forgejo", "azure-devops";
+    /// default github). Takes precedence over the checkout's
+    /// `.wshm/config.toml`, and is what a missing checkout is cloned from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_provider: Option<String>,
+
+    /// Base URL of a self-managed forge (e.g. "https://gitlab.example.com").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_url: Option<String>,
 }
 
 /// Feature flags controlling what wshm does per repository. Defaults are
@@ -2490,11 +2500,32 @@ pub fn append_repo_to_global(
         enabled: true,
         secret: None,
         features: RepoFeatures::default(),
+        git_provider: None,
+        git_url: None,
     });
     global.save(path)
 }
 
 impl Config {
+    /// [`Self::load_for_repo`] for a registry entry: the entry's forge
+    /// settings (operator-controlled) override the checkout's.
+    pub fn load_for_entry(entry: &RepoEntry) -> Result<Self> {
+        let mut config = Self::load_for_repo(&entry.path, &entry.slug)?;
+        let set = |v: &Option<String>| {
+            v.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        };
+        if let Some(p) = set(&entry.git_provider) {
+            config.git_provider = Some(p);
+        }
+        if let Some(u) = set(&entry.git_url) {
+            config.git_url = Some(u);
+        }
+        Ok(config)
+    }
+
     /// Load a Config for a specific repo from its working directory.
     /// Used by multi-repo daemon — slug is provided, no git detection needed.
     pub fn load_for_repo(repo_path: &Path, slug: &str) -> Result<Self> {
@@ -2589,7 +2620,7 @@ impl Config {
             config.repo_name = parts[1].to_string();
         } else {
             // Try to detect from git remote first
-            match detect_repo() {
+            match detect_repo(&mut config) {
                 Ok((owner, name)) => {
                     config.repo_owner = owner;
                     config.repo_name = name;
@@ -3162,7 +3193,7 @@ fn gh_auth_token() -> Result<String, std::env::VarError> {
         .ok_or(std::env::VarError::NotPresent)
 }
 
-fn detect_repo() -> Result<(String, String)> {
+fn detect_repo(config: &mut Config) -> Result<(String, String)> {
     let repo = git2::Repository::open_from_env()
         .context("Not inside a git repository. Use --repo owner/repo")?;
 
@@ -3171,32 +3202,56 @@ fn detect_repo() -> Result<(String, String)> {
         .context("No 'origin' remote found. Use --repo owner/repo")?;
 
     let url = remote.url().context("Remote URL is not valid UTF-8")?;
-    parse_github_url(url)
+    let (host, owner, name) = parse_remote_url(url, config.git_provider.is_some())?;
+    // A gitlab.com checkout needs no `git_provider` line.
+    if config.git_provider.is_none() && host == "gitlab.com" {
+        config.git_provider = Some("gitlab".to_string());
+    }
+    Ok((owner, name))
 }
 
-fn parse_github_url(url: &str) -> Result<(String, String)> {
-    // Handle SSH: git@github.com:owner/repo.git
-    if let Some(path) = url.strip_prefix("git@github.com:") {
-        let path = path.strip_suffix(".git").unwrap_or(path);
-        let parts: Vec<&str> = path.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            return Ok((parts[0].to_string(), parts[1].to_string()));
-        }
-    }
-
-    // Handle HTTPS: https://github.com/owner/repo.git
-    if let Some(path) = url
-        .strip_prefix("https://github.com/")
-        .or_else(|| url.strip_prefix("http://github.com/"))
+/// `(host, owner, rest)` from an origin URL. Only github.com and gitlab.com
+/// are recognised unless `any_host` (a `git_provider` is configured, so a
+/// self-managed host is expected). The rest keeps nested GitLab groups
+/// (`group/sub/repo` → owner `group`, name `sub/repo`).
+fn parse_remote_url(url: &str, any_host: bool) -> Result<(String, String, String)> {
+    let url = url.trim();
+    let (host, path) = if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .or_else(|| url.strip_prefix("ssh://"))
     {
-        let path = path.strip_suffix(".git").unwrap_or(path);
-        let parts: Vec<&str> = path.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            return Ok((parts[0].to_string(), parts[1].to_string()));
-        }
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let host = authority.rsplit('@').next().unwrap_or(authority);
+        let host = host.split(':').next().unwrap_or(host);
+        (host, path)
+    } else if let Some((user_host, path)) = url.split_once(':') {
+        // scp-like: git@host:owner/repo.git
+        (user_host.rsplit('@').next().unwrap_or(user_host), path)
+    } else {
+        anyhow::bail!("Cannot parse owner/repo from remote URL: {url}");
+    };
+    let host = host.to_ascii_lowercase();
+    if !any_host && host != "github.com" && host != "gitlab.com" {
+        anyhow::bail!(
+            "Remote host {host} is not github.com or gitlab.com: set git_provider (and git_url) in .wshm/config.toml, or use --repo"
+        );
     }
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    match path.split_once('/') {
+        Some((owner, name)) if !owner.is_empty() && !name.is_empty() => {
+            Ok((host, owner.to_string(), name.to_string()))
+        }
+        _ => anyhow::bail!("Cannot parse owner/repo from remote URL: {url}"),
+    }
+}
 
-    anyhow::bail!("Cannot parse GitHub owner/repo from remote URL: {url}")
+#[cfg(test)]
+fn parse_github_url(url: &str) -> Result<(String, String)> {
+    let (host, owner, name) = parse_remote_url(url, false)?;
+    anyhow::ensure!(host == "github.com", "not a GitHub remote: {url}");
+    Ok((owner, name))
 }
 
 #[cfg(test)]
@@ -3215,6 +3270,32 @@ mod tests {
         let (owner, repo) = parse_github_url("https://github.com/user/project.git").unwrap();
         assert_eq!(owner, "user");
         assert_eq!(repo, "project");
+    }
+
+    #[test]
+    fn test_parse_gitlab_remotes() {
+        for url in [
+            "git@gitlab.com:group/sub/proj.git",
+            "https://gitlab.com/group/sub/proj.git",
+            "https://oauth2:tok@gitlab.com/group/sub/proj",
+            "ssh://git@gitlab.com:22/group/sub/proj.git",
+        ] {
+            let (host, owner, name) = parse_remote_url(url, false).unwrap();
+            assert_eq!(
+                (host.as_str(), owner.as_str(), name.as_str()),
+                ("gitlab.com", "group", "sub/proj"),
+                "{url}"
+            );
+        }
+        // Self-managed hosts only once a git_provider is configured.
+        let self_managed = "git@gitlab.example.com:team/app.git";
+        assert!(parse_remote_url(self_managed, false).is_err());
+        let (host, owner, name) = parse_remote_url(self_managed, true).unwrap();
+        assert_eq!(
+            (host.as_str(), owner.as_str(), name.as_str()),
+            ("gitlab.example.com", "team", "app")
+        );
+        assert!(parse_github_url("git@gitlab.com:a/b.git").is_err());
     }
 
     #[test]
