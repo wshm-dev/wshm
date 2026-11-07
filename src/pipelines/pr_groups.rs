@@ -24,6 +24,19 @@ pub struct PrRef {
     pub number: u64,
     pub title: String,
     pub repo: String,
+    /// Web URL on the repo's forge (see [`fill_urls`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Set the forge web URL of every item: `url(repo, number)`.
+pub fn fill_urls(groups: &mut [Group], url: impl Fn(&str, u64) -> Option<String>) {
+    for g in groups {
+        let subs = g.subgroups.iter_mut().flat_map(|s| s.prs.iter_mut());
+        for p in g.prs.iter_mut().chain(subs) {
+            p.url = url(&p.repo, p.number);
+        }
+    }
 }
 
 /// A secondary subject inside a grand groupe.
@@ -90,6 +103,7 @@ pub fn build_from(
                             number: *num,
                             title: title.clone(),
                             repo: repo.clone(),
+                            url: None,
                         });
                     }
                 }
@@ -109,6 +123,7 @@ pub fn build_from(
                 number: *num,
                 title: title.clone(),
                 repo: repo.clone(),
+                url: None,
             })
             .collect();
 
