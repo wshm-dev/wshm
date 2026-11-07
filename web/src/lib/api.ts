@@ -1268,3 +1268,127 @@ export interface UsageGithubResponse {
 export function fetchUsageGithub(): Promise<UsageGithubResponse> {
 	return apiGet<UsageGithubResponse>('/usage/github');
 }
+
+// ── Pipelines (#234) ────────────────────────────────────────────────
+
+/** A step as planned when the run started (the run graph). */
+export interface PlannedStep {
+	id: string;
+	uses: string;
+	needs?: string[];
+}
+
+export interface PipelineStepRun {
+	run_id: number;
+	seq: number;
+	step_id: string;
+	uses: string;
+	/** `done`, `skipped` or `failed`. */
+	status: string;
+	/** Skip reason or error message. */
+	reason: string | null;
+	summary: string | null;
+	findings: number;
+	ai_calls: number;
+	started_at: string;
+	finished_at: string;
+	duration_ms: number;
+}
+
+export interface PipelineRun {
+	id: number;
+	/** `issue`, `pr`, or `repo` (nightly review). */
+	item_kind: string;
+	item_number: number;
+	template: string;
+	trigger: string;
+	event_id: number | null;
+	head_sha: string | null;
+	/** `running`, `done` or `failed`. */
+	status: string;
+	error: string | null;
+	plan: PlannedStep[];
+	ai_calls: number;
+	started_at: string;
+	finished_at: string | null;
+	duration_ms: number | null;
+	steps: PipelineStepRun[];
+}
+
+async function repoJson<T>(slug: string, path: string, init?: RequestInit): Promise<T> {
+	const res = await fetch(`${BASE}/repos/${encodeURIComponent(slug)}${path}`, init);
+	const body = await res.json().catch(() => ({}));
+	if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+	return body as T;
+}
+
+/** Runs of one issue / PR, newest first. */
+export function fetchRuns(slug: string, item: number, kind: 'issue' | 'pr'): Promise<{ runs: PipelineRun[] }> {
+	return repoJson(slug, `/runs?item=${item}&kind=${kind}&limit=20`);
+}
+
+/** `when = { ... }` of a step or route. */
+export type PipelineCondition = Record<string, unknown>;
+
+export interface PipelineStepDef {
+	id: string;
+	uses: string;
+	needs?: string[];
+	when?: PipelineCondition;
+	on_failure?: 'abort' | 'continue';
+	timeout_secs?: number;
+	max_rounds?: number;
+	max_ai_calls?: number;
+	with?: Record<string, unknown>;
+}
+
+export interface PipelineTemplate {
+	name: string;
+	description?: string;
+	max_ai_calls?: number;
+	parallel?: boolean;
+	steps: PipelineStepDef[];
+}
+
+export interface PipelineRoute {
+	template: string;
+	priority: number;
+	when?: PipelineCondition;
+}
+
+export interface PipelinesConfig {
+	pipelines: PipelineTemplate[];
+	pipeline_routes: PipelineRoute[];
+	pipeline_runs: { retention_days: number; max_per_item: number };
+	pipeline_nightly?: Record<string, unknown>;
+}
+
+/** `GET /api/v1/repos/{slug}/pipelines`. */
+export interface PipelinesSettings {
+	effective: PipelinesConfig;
+	override: Record<string, unknown> | null;
+	toml: PipelinesConfig;
+	toml_error: string | null;
+	override_errors: string[];
+	template_errors: string[];
+	warnings: string[];
+	builtin: PipelineTemplate[];
+	/** Template of a run no conditional route matches. Absent before the
+	 *  review-steps release: then `standard`. */
+	default_template?: string;
+	step_kinds: string[];
+}
+
+export function fetchPipelines(slug: string): Promise<PipelinesSettings> {
+	return repoJson(slug, '/pipelines');
+}
+
+/** Set (object) or drop (`null`) the DB override. Rejected overrides
+ *  throw with the server's validation message. */
+export function updatePipelines(slug: string, override: Record<string, unknown> | null): Promise<PipelinesSettings> {
+	return repoJson(slug, '/pipelines', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json', ...CSRF_HEADERS },
+		body: JSON.stringify(override)
+	});
+}

@@ -19,6 +19,7 @@ const PAGE_REQUIREMENTS: Partial<Record<string, Role>> = {
 	'/revert': 'operator',
 	'/backups': 'operator',
 	'/settings': 'admin',
+	'/pipelines': 'admin',
 	'/users': 'admin'
 };
 
