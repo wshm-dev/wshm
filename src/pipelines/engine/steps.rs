@@ -103,6 +103,12 @@ impl StepRegistry {
         r.register(Arc::new(ReviewStep));
         r.register(Arc::new(AnalyzeStep));
         r.register(Arc::new(MemoryStep));
+        r.register(Arc::new(super::review_steps::ContextStep));
+        r.register(Arc::new(super::review_steps::SecurityStep));
+        r.register(Arc::new(super::review_steps::VerifyStep));
+        r.register(Arc::new(super::gate_steps::RiskStep));
+        r.register(Arc::new(super::gate_steps::ApprovalStep));
+        r.register(Arc::new(super::gate_steps::StatusCheckStep));
         r
     }
 
@@ -267,7 +273,9 @@ impl Step for TriageStep {
 
 /// `review`: the inline code review. Computed and stored always;
 /// posted only when apply mode and `review_post_comments` are both on (a
-/// slash command posts in apply mode, as before).
+/// slash command posts in apply mode, as before). With
+/// `with = { mode = "collect" }` the findings are kept for the `verify`
+/// step instead (see `review_steps::collect_review`).
 pub struct ReviewStep;
 
 #[async_trait]
@@ -280,15 +288,26 @@ impl Step for ReviewStep {
         PR
     }
 
-    async fn run(&self, ctx: &RunContext, _def: &StepDef) -> anyhow::Result<StepOutput> {
+    fn validate_params(
+        &self,
+        params: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        super::params::check(
+            self.kind(),
+            params,
+            &[("mode", super::params::Param::OneOf(&["post", "collect"]))],
+        )
+    }
+
+    async fn run(&self, ctx: &RunContext, def: &StepDef) -> anyhow::Result<StepOutput> {
         use crate::pipelines::review::ReviewOutcome;
+        if super::params::str_or(&def.with, "mode", "post") == "collect" {
+            return super::review_steps::collect_review(ctx).await;
+        }
         let Some(n) = ctx.item.number else {
             return Ok(StepOutput::skipped("no PR number"));
         };
-        let should_post = match ctx.source {
-            RunSource::Command => ctx.apply,
-            _ => ctx.apply && ctx.features.review_post_comments,
-        };
+        let should_post = ctx.should_post_review();
         let outcome =
             crate::pro_hooks::run_review(&ctx.config, ctx.db.as_ref(), &*ctx.gh, n, should_post)
                 .await

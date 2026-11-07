@@ -254,6 +254,70 @@ pub async fn run(
     Ok(outcomes)
 }
 
+/// The inline review of one PR, computed but not posted (the pipeline
+/// `review` step with `mode = "collect"`: the `verify` step posts the
+/// confirmed findings). Same prompts and output validation as [`run`];
+/// `extra_context` (already wrapped as untrusted blocks, e.g. CLAUDE.md /
+/// REVIEW.md and the code around the changed lines) is appended to every
+/// prompt.
+pub struct Collected {
+    pub result: InlineReviewResult,
+    pub diff: String,
+    /// The PR text or diff looks like a prompt injection attempt and
+    /// mutating actions are disabled for it.
+    pub blocked: bool,
+}
+
+pub async fn collect(
+    config: &Config,
+    db: &dyn DatabaseBackend,
+    gh: &GhClient,
+    ai: &AiBackend,
+    number: u64,
+    extra_context: &str,
+) -> Result<std::result::Result<Collected, String>> {
+    let Some(pr) = db.get_pull(number)? else {
+        return Ok(Err("PR not found in cache".into()));
+    };
+    let diff = gh.fetch_pr_diff(number).await?;
+    if diff.trim().is_empty() {
+        return Ok(Err("empty diff".into()));
+    }
+    let guard_cfg = crate::ai::guard::load(config, db);
+    let skills = crate::config::load_skills(db);
+    let mut suffix = crate::config::skills_prompt(&skills, "review");
+    suffix.push_str(extra_context);
+    let file_chunks = inline_review::split_diff_by_file(&diff);
+    let pr_body = pr.body.as_deref().unwrap_or("");
+    let mut result = if file_chunks.len() >= CHUNK_THRESHOLD_FILES {
+        review_per_file(ai, &pr.title, pr_body, &file_chunks, &suffix).await?
+    } else {
+        let mut user_prompt = inline_review::build_user_prompt(&pr.title, pr_body, &diff);
+        user_prompt.push_str(&suffix);
+        ai.complete(inline_review::SYSTEM, &user_prompt).await?
+    };
+    let dropped = crate::ai::output::validate_review(&mut result, &diff);
+    if dropped > 0 {
+        info!(
+            "PR #{number}: {dropped} review comment(s) dropped (line not in the diff or invalid)"
+        );
+    }
+    let pr_text = format!("{}\n\n{pr_body}", pr.title);
+    let assessment = crate::ai::guard::assess_texts(
+        &guard_cfg,
+        &[
+            ("pull request", pr_text.as_str()),
+            ("pull request diff", diff.as_str()),
+        ],
+    );
+    crate::ai::guard::record(db, "pull", number, "review", &assessment);
+    Ok(Ok(Collected {
+        result,
+        diff,
+        blocked: assessment.blocked,
+    }))
+}
+
 /// Review each file separately for better context and fewer truncation issues.
 async fn review_per_file(
     ai: &AiBackend,
@@ -330,7 +394,7 @@ async fn review_per_file(
 }
 
 /// Format an inline comment for GitHub, including suggestion blocks.
-fn format_github_comment(c: &InlineComment) -> String {
+pub(crate) fn format_github_comment(c: &InlineComment) -> String {
     let severity_badge = match c.severity.as_str() {
         "error" => "🔴 **ERROR**",
         "warning" => "🟡 **WARNING**",
@@ -371,7 +435,7 @@ fn format_github_comment(c: &InlineComment) -> String {
 }
 
 /// Files to skip during review (generated, config, non-code).
-fn should_skip_file(path: &str) -> bool {
+pub(crate) fn should_skip_file(path: &str) -> bool {
     let skip_extensions = [
         ".lock", ".sum", ".min.js", ".min.css", ".map", ".svg", ".png", ".jpg", ".ico", ".woff",
         ".woff2", ".ttf", ".eot", ".pdf",

@@ -46,7 +46,8 @@ pub struct Condition {
     /// (`*` within a segment, `**` across segments, `?` one char).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
-    /// PR only: the analysis risk level (low, medium, high) is one of these.
+    /// PR only: the risk tier (low, medium, high) is one of these: the tier
+    /// of the run's `risk` step when it ran, else the PR analysis risk level.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub risk: Vec<String>,
     /// The repo slug (`owner/name`) matches one of these globs. Mostly
@@ -241,13 +242,21 @@ pub async fn evaluate(c: &Condition, ctx: &RunContext) -> Result<(), String> {
         }
         let n = ctx.item.number.ok_or("no PR number")?;
         if !c.risk.is_empty() {
-            let risk = ctx
-                .db
-                .get_pr_analysis(n)
-                .ok()
-                .flatten()
-                .map(|a| a.risk_level)
-                .ok_or("no risk level yet (PR not analyzed)")?;
+            let from_step = ctx
+                .state()
+                .risk
+                .as_ref()
+                .map(|r| r.tier.as_str().to_string());
+            let risk = match from_step {
+                Some(r) => r,
+                None => ctx
+                    .db
+                    .get_pr_analysis(n)
+                    .ok()
+                    .flatten()
+                    .map(|a| a.risk_level)
+                    .ok_or("no risk level yet (PR not analyzed, no risk step)")?,
+            };
             if !c.risk.iter().any(|r| r.eq_ignore_ascii_case(&risk)) {
                 return Err(format!("risk '{risk}' not in when.risk"));
             }

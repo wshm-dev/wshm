@@ -134,6 +134,11 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline_runs: Option<serde_json::Value>,
 
+    /// `[pipeline_nightly]` — scheduled review of existing code (raw, see
+    /// `pipelines`). Off by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_nightly: Option<serde_json::Value>,
+
     /// Resolved at runtime, not from config file
     #[serde(skip)]
     pub repo_owner: String,
@@ -3135,6 +3140,7 @@ impl Default for Config {
             pipelines: None,
             pipeline_routes: None,
             pipeline_runs: None,
+            pipeline_nightly: None,
             repo_owner: String::new(),
             repo_name: String::new(),
             wshm_dir: PathBuf::from(".wshm"),

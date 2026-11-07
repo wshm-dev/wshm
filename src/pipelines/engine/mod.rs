@@ -11,11 +11,20 @@
 //! status done / skipped (with the reason) / failed, timings, AI calls,
 //! a short summary and the number of findings.
 //!
-//! Steps run sequentially in template order. `needs` already expresses the
-//! dependency graph, so a later version can run independent branches in
-//! parallel without changing the template format.
+//! Steps run sequentially in template order. A template with
+//! `parallel = true` runs consecutive steps that do not depend on each
+//! other (`needs`) side by side (see [`waves`]).
+//!
+//! Steps of one run share a [`state::RunState`]: the review context, the
+//! findings of the review and security steps, the verified findings, the
+//! risk tier and the approval requirement.
 
 pub mod condition;
+pub mod gate_steps;
+pub mod nightly;
+pub mod params;
+pub mod review_steps;
+pub mod state;
 pub mod steps;
 pub mod template;
 
@@ -149,7 +158,6 @@ pub type AiCallSink = Box<dyn FnOnce(u32) + Send + 'static>;
 #[derive(Debug, Default)]
 struct Progress {
     run_id: Option<i64>,
-    seq: u32,
     ai_used: u32,
     budget: Option<u32>,
 }
@@ -178,7 +186,12 @@ pub struct RunContext {
     /// fails or finds nothing).
     item_cache: tokio::sync::Mutex<Option<Option<ItemInfo>>>,
     paths_cache: tokio::sync::Mutex<Option<Vec<String>>>,
+    diff_cache: tokio::sync::Mutex<Option<Arc<String>>>,
     progress: std::sync::Mutex<Progress>,
+    state: std::sync::Mutex<state::RunState>,
+    /// Canned AI responses by step kind (tests only).
+    #[cfg(test)]
+    pub(crate) ai_mock: std::sync::Mutex<HashMap<String, String>>,
 }
 
 impl RunContext {
@@ -205,7 +218,11 @@ impl RunContext {
             steps_started: AtomicBool::new(false),
             item_cache: tokio::sync::Mutex::new(None),
             paths_cache: tokio::sync::Mutex::new(None),
+            diff_cache: tokio::sync::Mutex::new(None),
             progress: std::sync::Mutex::new(Progress::default()),
+            state: std::sync::Mutex::new(state::RunState::default()),
+            #[cfg(test)]
+            ai_mock: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -231,6 +248,104 @@ impl RunContext {
 
     fn progress(&self) -> std::sync::MutexGuard<'_, Progress> {
         self.progress.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// State shared by the steps of the run (findings, risk, ...).
+    pub fn state(&self) -> std::sync::MutexGuard<'_, state::RunState> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The AI backend a step of kind `kind` uses (the repo's model; a
+    /// canned response in tests).
+    pub fn ai_for(&self, kind: &str) -> anyhow::Result<crate::ai::backend::AiBackend> {
+        #[cfg(test)]
+        if let Some(raw) = self
+            .ai_mock
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(kind)
+        {
+            return Ok(crate::ai::backend::AiBackend::Mock(raw.clone()));
+        }
+        let _ = kind;
+        crate::ai::backend::AiBackend::from_config(&self.config, &self.config.ai.model)
+    }
+
+    /// Whether a review computed in this run may be posted: apply mode,
+    /// plus `review_post_comments` outside slash commands (the rule of the
+    /// `review` step).
+    pub fn should_post_review(&self) -> bool {
+        match self.source {
+            RunSource::Command => self.apply,
+            _ => self.apply && self.features.review_post_comments,
+        }
+    }
+
+    /// Whether mutating actions are disabled for the item: a stored
+    /// prompt-injection flag with `blocked` (#235). Fails closed.
+    pub fn mutations_blocked(&self) -> bool {
+        let Some(n) = self.item.number else {
+            return false;
+        };
+        let kind = match self.item.kind {
+            ItemKind::Issue => "issue",
+            ItemKind::Pr => "pull",
+        };
+        match self.db.get_injection_flags(kind, n) {
+            Ok(flags) => flags.iter().any(|f| f.blocked),
+            Err(e) => {
+                warn!(
+                    "Could not read the injection flags of {}, treating it as flagged: {e:#}",
+                    self.item
+                );
+                true
+            }
+        }
+    }
+
+    /// Root of the repo's local checkout (the default branch), when known.
+    pub fn repo_root(&self) -> Option<std::path::PathBuf> {
+        let root = self.config.wshm_dir.parent()?;
+        let root = if root.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            root
+        };
+        root.canonicalize().ok().filter(|p| p.is_dir())
+    }
+
+    /// The PR diff, fetched once per run.
+    pub async fn pr_diff(&self) -> Result<Arc<String>, String> {
+        let mut cache = self.diff_cache.lock().await;
+        if let Some(d) = cache.as_ref() {
+            return Ok(Arc::clone(d));
+        }
+        if self.item.kind != ItemKind::Pr {
+            return Err("not a PR".into());
+        }
+        let n = self.item.number.ok_or("no PR number")?;
+        let diff = self
+            .gh
+            .fetch_pr_diff(n)
+            .await
+            .map_err(|e| format!("could not fetch the PR diff: {e}"))?;
+        let diff = Arc::new(diff);
+        *cache = Some(Arc::clone(&diff));
+        Ok(diff)
+    }
+
+    /// AI calls the step `def` may still make: the run's budget and the
+    /// step's own `max_ai_calls`, minus the calls it made so far. `None` =
+    /// no limit.
+    pub fn budget_for(&self, def: &StepDef) -> Option<u32> {
+        let current = AI_CALLS
+            .try_with(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0);
+        let step = def.max_ai_calls.map(|m| m.saturating_sub(current));
+        match (self.budget_left(), step) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     fn info_from_db(&self) -> Option<ItemInfo> {
@@ -306,12 +421,7 @@ impl RunContext {
         if let Some(p) = cache.as_ref() {
             return Ok(p.clone());
         }
-        let n = self.item.number.ok_or("no PR number")?;
-        let diff = self
-            .gh
-            .fetch_pr_diff(n)
-            .await
-            .map_err(|e| format!("could not fetch the PR diff: {e}"))?;
+        let diff = self.pr_diff().await?;
         let paths = condition::diff_paths(&diff);
         *cache = Some(paths.clone());
         Ok(paths)
@@ -331,10 +441,8 @@ impl RunContext {
     /// A sink adding background AI calls to the running step and its run.
     /// `None` when the run is not recorded.
     pub fn ai_call_sink(&self) -> Option<AiCallSink> {
-        let (run_id, seq) = {
-            let p = self.progress();
-            (p.run_id?, p.seq)
-        };
+        let run_id = self.progress().run_id?;
+        let seq = STEP_SEQ.try_with(|s| *s).unwrap_or(0);
         let db = Arc::clone(&self.db);
         Some(Box::new(move |n: u32| {
             if n > 0 {
@@ -350,6 +458,8 @@ impl RunContext {
 
 tokio::task_local! {
     static AI_CALLS: Arc<AtomicU32>;
+    /// Position of the running step in its run.
+    static STEP_SEQ: u32;
 }
 
 /// Count one AI call against the step running in the current task, if any.
@@ -606,91 +716,129 @@ pub async fn execute_with(
         failure: None,
     };
     let mut statuses: HashMap<&str, StepStatus> = HashMap::new();
+    let groups = if template.parallel {
+        waves(&plan)
+    } else {
+        (0..plan.len()).map(|i| vec![i]).collect()
+    };
+    let scope = Scope {
+        in_plan: &in_plan,
+        in_template: &in_template,
+        partial: opts.only_kinds.is_some(),
+        ignore_toggles: opts.ignore_toggles,
+    };
 
-    for (seq, def) in plan.iter().enumerate() {
-        let step_started = chrono::Utc::now();
-        let t0 = Instant::now();
-        let mut rec = StepRecord {
-            step_id: def.id.clone(),
-            uses: def.uses.clone(),
-            status: StepStatus::Skipped,
-            reason: None,
-            summary: None,
-            findings: 0,
-            ai_calls: 0,
-            started_at: step_started,
-            duration_ms: 0,
-        };
-
-        let scope = Scope {
-            in_plan: &in_plan,
-            in_template: &in_template,
-            partial: opts.only_kinds.is_some(),
-            ignore_toggles: opts.ignore_toggles,
-        };
-        match gate(def, ctx, &report, &statuses, &scope, template).await {
-            Err(reason) => {
-                rec.reason = Some(clip(&reason));
-            }
-            Ok(()) => {
-                recorder.start();
-                ctx.progress().seq = seq as u32;
-                let counter = Arc::new(AtomicU32::new(0));
-                let outcome = run_step(def, registry, ctx, Arc::clone(&counter)).await;
-                rec.ai_calls = counter.load(Ordering::Relaxed);
-                {
-                    let mut p = ctx.progress();
-                    p.ai_used = p.ai_used.saturating_add(rec.ai_calls);
-                }
-                match outcome {
-                    Ok(out) => {
-                        rec.summary = out.summary.as_deref().map(clip);
-                        rec.findings = out.findings;
-                        if let Some(e) = out.failed {
-                            rec.status = StepStatus::Failed;
-                            rec.reason = Some(clip(&e));
-                        } else if let Some(reason) = out.skipped {
-                            rec.reason = Some(clip(&reason));
-                        } else {
-                            rec.status = StepStatus::Done;
-                        }
-                    }
-                    Err(e) => {
-                        rec.status = StepStatus::Failed;
-                        rec.reason = Some(clip(&format!("{e:#}")));
-                        match def.on_failure {
-                            OnFailure::Continue => {
-                                warn!(
-                                    "[{}] pipeline step '{}' failed for {} (continuing): {e:#}",
-                                    ctx.config.repo_slug(),
-                                    def.id,
-                                    ctx.item
-                                );
+    for wave in groups {
+        // Gates first (in template order), then the steps that passed,
+        // side by side when the wave has several.
+        let mut gated = Vec::with_capacity(wave.len());
+        for seq in wave {
+            let def = plan[seq];
+            let started_at = chrono::Utc::now();
+            let t0 = Instant::now();
+            let g = gate(def, ctx, &report, &statuses, &scope, template).await;
+            gated.push((seq, def, g, started_at, t0));
+        }
+        if gated.iter().any(|g| g.2.is_ok()) {
+            recorder.start();
+        }
+        let runs = gated
+            .into_iter()
+            .map(|(seq, def, g, started_at, t0)| async move {
+                let mut rec = StepRecord {
+                    step_id: def.id.clone(),
+                    uses: def.uses.clone(),
+                    status: StepStatus::Skipped,
+                    reason: None,
+                    summary: None,
+                    findings: 0,
+                    ai_calls: 0,
+                    started_at,
+                    duration_ms: 0,
+                };
+                let mut abort = None;
+                match g {
+                    Err(reason) => rec.reason = Some(clip(&reason)),
+                    Ok(()) => {
+                        let counter = Arc::new(AtomicU32::new(0));
+                        let outcome =
+                            run_step(def, registry, ctx, Arc::clone(&counter), seq as u32).await;
+                        rec.ai_calls = counter.load(Ordering::Relaxed);
+                        match outcome {
+                            Ok(out) => {
+                                rec.summary = out.summary.as_deref().map(clip);
+                                rec.findings = out.findings;
+                                if let Some(e) = out.failed {
+                                    rec.status = StepStatus::Failed;
+                                    rec.reason = Some(clip(&e));
+                                } else if let Some(reason) = out.skipped {
+                                    rec.reason = Some(clip(&reason));
+                                } else {
+                                    rec.status = StepStatus::Done;
+                                }
                             }
-                            OnFailure::Abort => report.failure = Some((def.id.clone(), e)),
+                            Err(e) => {
+                                rec.status = StepStatus::Failed;
+                                rec.reason = Some(clip(&format!("{e:#}")));
+                                match def.on_failure {
+                                    OnFailure::Continue => {
+                                        warn!(
+                                        "[{}] pipeline step '{}' failed for {} (continuing): {e:#}",
+                                        ctx.config.repo_slug(),
+                                        def.id,
+                                        ctx.item
+                                    );
+                                    }
+                                    OnFailure::Abort => abort = Some(e),
+                                }
+                            }
                         }
                     }
                 }
+                rec.duration_ms = t0.elapsed().as_millis() as u64;
+                (seq, def, rec, abort)
+            });
+        for (seq, def, rec, abort) in futures::future::join_all(runs).await {
+            {
+                let mut p = ctx.progress();
+                p.ai_used = p.ai_used.saturating_add(rec.ai_calls);
             }
+            if let Some(e) = abort {
+                if report.failure.is_none() {
+                    report.failure = Some((def.id.clone(), e));
+                }
+            }
+            if rec.status == StepStatus::Skipped {
+                info!(
+                    "[{}] {} step '{}' skipped: {}",
+                    ctx.config.repo_slug(),
+                    ctx.item,
+                    def.id,
+                    rec.reason.as_deref().unwrap_or("")
+                );
+            }
+            statuses.insert(def.id.as_str(), rec.status);
+            recorder.step(seq, &rec);
+            report.steps.push(rec);
         }
-        rec.duration_ms = t0.elapsed().as_millis() as u64;
-        if rec.status == StepStatus::Skipped {
-            info!(
-                "[{}] {} step '{}' skipped: {}",
-                ctx.config.repo_slug(),
-                ctx.item,
-                def.id,
-                rec.reason.as_deref().unwrap_or("")
-            );
-        }
-        statuses.insert(def.id.as_str(), rec.status);
-        recorder.step(seq, &rec);
-        report.steps.push(rec);
     }
 
     report.run_id = recorder.run_id;
     recorder.finish(&report, started);
     report
+}
+
+/// Groups of plan positions run side by side by a `parallel` template:
+/// consecutive steps join the current group unless they need a step of it.
+pub fn waves(plan: &[&StepDef]) -> Vec<Vec<usize>> {
+    let mut out: Vec<Vec<usize>> = Vec::new();
+    for (i, s) in plan.iter().enumerate() {
+        match out.last_mut() {
+            Some(w) if !w.iter().any(|&j| s.needs.contains(&plan[j].id)) => w.push(i),
+            _ => out.push(vec![i]),
+        }
+    }
+    out
 }
 
 struct Scope<'a> {
@@ -735,9 +883,53 @@ async fn gate(
         let mut c = def.when.clone();
         c.features.clear();
         c.repo_filters = false;
-        condition::evaluate(&c, ctx).await
+        condition::evaluate(&c, ctx).await?;
     } else {
-        condition::evaluate(&def.when, ctx).await
+        condition::evaluate(&def.when, ctx).await?;
+    }
+    if let Some(max) = def.max_rounds {
+        let done = rounds_done(ctx, &template.name, &def.id);
+        if done >= max {
+            return Err(format!(
+                "round cap reached: '{}' already ran {done} time(s) on {} (max_rounds = {max}); ask the author to reconsider the approach",
+                def.id, ctx.item
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Earlier runs of `template` on the item in which step `step_id` was
+/// done (the current run excluded). Read errors count as 0.
+fn rounds_done(ctx: &RunContext, template: &str, step_id: &str) -> u32 {
+    let Some(n) = ctx.item.number else {
+        return 0;
+    };
+    let current = ctx.progress().run_id;
+    let filter = crate::db::runs::PipelineRunFilter {
+        item_kind: Some(ctx.item.kind.as_str().to_string()),
+        item_number: Some(n),
+    };
+    match ctx
+        .db
+        .list_pipeline_runs(&filter, crate::db::runs::MAX_LIST)
+    {
+        Ok(runs) => runs
+            .iter()
+            .filter(|r| Some(r.id) != current && r.template == template)
+            .filter(|r| {
+                r.steps
+                    .iter()
+                    .any(|s| s.step_id == step_id && s.status == "done")
+            })
+            .count() as u32,
+        Err(e) => {
+            warn!(
+                "Could not count the earlier rounds of '{step_id}' on {}: {e:#}",
+                ctx.item
+            );
+            0
+        }
     }
 }
 
@@ -746,11 +938,12 @@ async fn run_step(
     registry: &StepRegistry,
     ctx: &RunContext,
     counter: Arc<AtomicU32>,
+    seq: u32,
 ) -> anyhow::Result<StepOutput> {
     let Some(step) = registry.get(&def.uses) else {
         anyhow::bail!("unknown step kind '{}'", def.uses);
     };
-    let fut = AI_CALLS.scope(counter, step.run(ctx, def));
+    let fut = AI_CALLS.scope(counter, STEP_SEQ.scope(seq, step.run(ctx, def)));
     match def.timeout_secs {
         // Dropping the future stops the step wherever it is: what it did
         // before (labels, comments) stays. See docs/configuration.md.
@@ -879,6 +1072,27 @@ pub(crate) mod tests_support {
         )
     }
 
+    /// A context on a given config, DB and forge.
+    pub fn ctx_on(
+        config: Config,
+        db: Arc<dyn DatabaseBackend>,
+        gh: Arc<GhClient>,
+        kind: ItemKind,
+        number: Option<u64>,
+        features: RepoFeatures,
+        apply: bool,
+    ) -> RunContext {
+        RunContext::new(
+            Arc::new(config),
+            db,
+            gh,
+            apply,
+            features,
+            ItemRef { kind, number },
+            "test",
+        )
+    }
+
     pub fn seed_issue(ctx: &RunContext, n: u64, labels: &[&str], author: &str) {
         ctx.db
             .upsert_issue(&crate::db::issues::Issue {
@@ -921,5 +1135,7 @@ pub(crate) mod tests_support {
     }
 }
 
+#[cfg(test)]
+mod review_tests;
 #[cfg(test)]
 mod tests;
