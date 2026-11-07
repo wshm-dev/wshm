@@ -43,7 +43,7 @@
 	let run = $derived(runs.find((r) => r.id === selectedId) ?? null);
 
 	/** Planned steps with their recorded outcome (none yet: pending). */
-	type Node = { id: string; uses: string; needs?: string[]; rec: PipelineStepRun | null };
+	type Node = { id: string; uses: string; needs?: string[]; after?: string[]; rec: PipelineStepRun | null };
 	let columns = $derived.by((): Node[][] => {
 		if (!run) return [];
 		const byId = new Map(run.steps.map((s) => [s.step_id, s]));
@@ -175,6 +175,9 @@
 											{/if}
 											{#if n.needs?.length}
 												<p class="mt-1 opacity-80">needs {n.needs.join(', ')}</p>
+											{/if}
+											{#if n.after?.length}
+												<p class="mt-1 opacity-80">after {n.after.join(', ')}</p>
 											{/if}
 											{#if !n.rec}
 												<p class="mt-1 opacity-80">not recorded (run {run.status})</p>

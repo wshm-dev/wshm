@@ -3,11 +3,13 @@
 export interface GraphStep {
 	id: string;
 	needs?: string[];
+	/** Ordering-only dependencies (runs after them whatever their outcome). */
+	after?: string[];
 }
 
 /**
  * Columns of a left-to-right flow: a step goes one column after the last
- * step it needs (needs always point to earlier steps), so steps that do not
+ * step it needs or runs after (both always point to earlier steps), so steps that do not
  * depend on each other share a column and show side by side.
  */
 export function layers<T extends GraphStep>(steps: T[]): T[][] {
@@ -15,7 +17,7 @@ export function layers<T extends GraphStep>(steps: T[]): T[][] {
 	const out: T[][] = [];
 	for (const s of steps) {
 		let c = 0;
-		for (const n of s.needs ?? []) {
+		for (const n of [...(s.needs ?? []), ...(s.after ?? [])]) {
 			const d = col.get(n);
 			if (d !== undefined) c = Math.max(c, d + 1);
 		}

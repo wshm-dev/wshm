@@ -138,6 +138,7 @@
 	function stepTitle(s: PipelineTemplate['steps'][number]): string {
 		const bits = [`uses ${s.uses}`];
 		if (s.needs?.length) bits.push(`needs ${s.needs.join(', ')}`);
+		if (s.after?.length) bits.push(`after ${s.after.join(', ')}`);
 		const w = describeCondition(s.when);
 		if (w) bits.push(`when ${w}`);
 		if (s.on_failure === 'continue') bits.push('continues on failure');

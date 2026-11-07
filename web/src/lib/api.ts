@@ -1276,6 +1276,8 @@ export interface PlannedStep {
 	id: string;
 	uses: string;
 	needs?: string[];
+	/** Ordering only (#246): runs after these whatever their outcome. */
+	after?: string[];
 }
 
 export interface PipelineStepRun {
@@ -1334,6 +1336,7 @@ export interface PipelineStepDef {
 	id: string;
 	uses: string;
 	needs?: string[];
+	after?: string[];
 	when?: PipelineCondition;
 	on_failure?: 'abort' | 'continue';
 	timeout_secs?: number;
