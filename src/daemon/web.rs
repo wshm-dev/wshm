@@ -2320,26 +2320,45 @@ async fn api_restore_backup(
 }
 
 /// GET /api/v1/license -- license status and feature gates.
+///
+/// `is_pro` only says this is the Enterprise binary (it drives the
+/// Enterprise-only pages); `licensed` says a license unlocks at least one
+/// Enterprise feature.
 async fn api_license() -> impl IntoResponse {
     let is_pro = crate::pro_hooks::is_pro();
 
     // Only features that still need a license are listed here. Review,
     // auto-fix, improve, conflicts, reports, search, insights, usage and
     // daemon webhook mode are part of wshm-core (see `oss_features`).
-    let pro_features = [(
-        "diagram_hosting",
-        "Hosted PR diagram pages",
-        is_pro && crate::pro_hooks::has_feature("diagram_hosting"),
-    )];
+    let pro_features = [
+        ("vault", "Secret vaults (HashiCorp Vault, AWS, GCP)"),
+        (
+            "exports",
+            "Exports (S3, GCS, Azure Blob, Elasticsearch, OpenSearch, MongoDB, MySQL)",
+        ),
+        (
+            crate::diagrams::publish::HOSTING_FEATURE,
+            "Hosted PR diagram pages",
+        ),
+    ];
 
     let features: Vec<serde_json::Value> = pro_features
         .iter()
-        .map(|(id, label, enabled)| json!({ "id": id, "label": label, "enabled": enabled }))
+        .map(|(id, label)| {
+            let enabled = is_pro && crate::pro_hooks::has_feature(id);
+            json!({ "id": id, "label": label, "enabled": enabled })
+        })
         .collect();
+    let licensed = features.iter().any(|f| f["enabled"] == true);
 
     Json(json!({
         "is_pro": is_pro,
-        "plan": if is_pro { "pro" } else { "free" },
+        "licensed": licensed,
+        "plan": match (is_pro, licensed) {
+            (false, _) => "free",
+            (true, true) => "enterprise",
+            (true, false) => "unlicensed",
+        },
         "features": features,
         "oss_features": [
             "triage", "pr_analysis", "merge_queue",
@@ -2924,6 +2943,7 @@ fn diagrams_settings_json(ds: &crate::daemon::DaemonState) -> serde_json::Value 
         "override": over,
         "toml": ds.config.pr.review_diagrams,
         "hosting_available": crate::pro_hooks::has_feature(crate::diagrams::publish::HOSTING_FEATURE),
+        "storage_available": crate::pro_hooks::has_feature(crate::diagrams::publish::STORAGE_FEATURE),
     })
 }
 
@@ -4874,6 +4894,27 @@ mod pipeline_api_tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let (status, _) = get(router(), "/api/v1/repos/x%2Fy/runs", true).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn license_endpoint_reports_oss_as_free_and_unlicensed() {
+        let (status, body) = get(router(), "/api/v1/license", true).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["is_pro"], false);
+        assert_eq!(body["licensed"], false);
+        assert_eq!(body["plan"], "free");
+        let ids: Vec<&str> = body["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["vault", "exports", "diagram_hosting"]);
+        assert!(body["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["enabled"] == false));
     }
 
     #[tokio::test]

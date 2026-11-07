@@ -382,7 +382,11 @@ export interface LicenseFeature {
 }
 
 export interface LicenseInfo {
+	/** Enterprise binary (drives the Enterprise-only pages). */
 	is_pro: boolean;
+	/** A license unlocks at least one Enterprise feature. Older daemons
+	 *  don't send it. */
+	licensed?: boolean;
 	plan: string;
 	features: LicenseFeature[];
 	oss_features: string[];
@@ -728,6 +732,9 @@ export interface RepoDiagramsResponse {
 	toml: DiagramSettings;
 	/** Enterprise license feature `diagram_hosting` (publish target "wshm"). */
 	hosting_available: boolean;
+	/** Enterprise license feature `exports` (publish targets s3, gcs, azure).
+	 *  Older daemons don't send it. */
+	storage_available?: boolean;
 }
 
 export async function fetchRepoDiagrams(slug: string): Promise<RepoDiagramsResponse> {

@@ -12,6 +12,9 @@ use crate::storage::{ObjectTarget, StorageTargetConfig};
 pub const PAGES_BRANCH: &str = "gh-pages";
 /// Pro feature gating the daemon-hosted pages (`target = "wshm"`).
 pub const HOSTING_FEATURE: &str = "diagram_hosting";
+/// Enterprise feature gating the object-storage targets (S3, GCS, Azure),
+/// the same one as the object-storage exports.
+pub const STORAGE_FEATURE: &str = "exports";
 
 pub fn target_name(t: DiagramPublishTarget) -> &'static str {
     match t {
@@ -289,6 +292,12 @@ pub async fn publish(
             }))
         }
         DiagramPublishTarget::S3 | DiagramPublishTarget::Gcs | DiagramPublishTarget::Azure => {
+            if !crate::pro_hooks::has_feature(STORAGE_FEATURE) {
+                warn!(
+                    "PR diagram page: target '{name}' needs the Enterprise feature '{STORAGE_FEATURE}' — page not published"
+                );
+                return Ok(None);
+            }
             let target =
                 ObjectTarget::from_config(&storage_config(cfg).expect("object storage target"))?;
             let url = put_object(&target, &key, html).await?;
