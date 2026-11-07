@@ -708,8 +708,20 @@ fn validate_gitlab_webhook(
             }
         }
     }
-    Ok(translate_gitlab(gl_event, &payload)
-        .unwrap_or_else(|| (format!("gitlab:{gl_event}"), String::new(), payload)))
+    Ok(translate_gitlab(gl_event, &payload).unwrap_or_else(|| ignored_gitlab(gl_event, &payload)))
+}
+
+/// An authenticated GitLab delivery wshm does not act on (pipeline, wiki,
+/// MR approval, issue edit without a new label, ...). It still carries
+/// `repository.full_name` so both handlers answer 200 "ignored": GitLab
+/// disables a webhook that keeps getting 4xx answers.
+fn ignored_gitlab(gl_event: &str, p: &Value) -> (String, String, Value) {
+    let full_name = p["project"]["path_with_namespace"].as_str().unwrap_or("");
+    (
+        format!("gitlab:{gl_event}"),
+        String::new(),
+        json!({ "repository": { "full_name": full_name } }),
+    )
 }
 
 /// Secret-store key of the GitLab webhook token (distinct from the GitHub
@@ -753,8 +765,9 @@ fn constant_time_eq(expected: &str, given: &str) -> bool {
 }
 
 /// Map a GitLab Issue / Merge Request / Note hook to the GitHub event the
-/// processor handles (`issues.opened`, `pull_request.opened|synchronize`,
-/// `issue_comment.created`). `None` for everything else.
+/// processor handles (`issues.opened|labeled`,
+/// `pull_request.opened|synchronize|closed`, `issue_comment.created`).
+/// `None` for everything else.
 fn translate_gitlab(gl_event: &str, p: &Value) -> Option<(String, String, Value)> {
     let full_name = p["project"]["path_with_namespace"].as_str()?.to_string();
     let attrs = &p["object_attributes"];
@@ -768,10 +781,50 @@ fn translate_gitlab(gl_event: &str, p: &Value) -> Option<(String, String, Value)
                 json!({"action": "opened", "issue": {"number": iid}, "repository": repo}),
             ))
         }
+        // Labels added by an issue edit: the injection approval label (#235)
+        // is recorded from this event, like GitHub's `issues.labeled`.
+        "Issue Hook" if attrs["action"] == "update" => {
+            let iid = attrs["iid"].as_u64()?;
+            let titles = |v: &Value| -> Vec<String> {
+                v.as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|l| l["title"].as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let changes = &p["changes"]["labels"];
+            let previous = titles(&changes["previous"]);
+            let added: Vec<String> = titles(&changes["current"])
+                .into_iter()
+                .filter(|l| !previous.contains(l))
+                .collect();
+            let first = added.first()?.clone();
+            let user = p["user"]["username"].as_str().unwrap_or("").to_string();
+            Some((
+                "issues".into(),
+                "labeled".into(),
+                json!({
+                    "action": "labeled",
+                    "label": {"name": first},
+                    "added_labels": added.iter().map(|l| json!({"name": l})).collect::<Vec<_>>(),
+                    "issue": {
+                        "number": iid,
+                        "title": attrs["title"],
+                        "body": attrs["description"],
+                    },
+                    "sender": {"login": user},
+                    "repository": repo,
+                }),
+            ))
+        }
         "Merge Request Hook" => {
             let iid = attrs["iid"].as_u64()?;
             let action = match attrs["action"].as_str()? {
                 "open" | "reopen" => "opened",
+                // Diagram page cleanup, like GitHub's `closed` (merged too).
+                "close" | "merge" => "closed",
                 // `oldrev` is only present when the update pushed commits.
                 "update" if attrs.get("oldrev").is_some_and(|v| !v.is_null()) => "synchronize",
                 _ => return None,
@@ -898,6 +951,70 @@ mod forge_webhook_tests {
         assert!(validate_webhook(Some("s3cret"), &github_secret, &body).is_err());
         let missing = headers(&[("x-gitlab-event", "Issue Hook")]);
         assert!(validate_webhook(Some("s3cret"), &missing, &body).is_err());
+
+        // A delivery wshm does not act on is accepted and ignored (never a
+        // 4xx: GitLab disables hooks that keep failing), still routable.
+        let pipeline = Bytes::from(
+            json!({"object_kind": "pipeline", "project": {"path_with_namespace": "g/p"},
+                   "object_attributes": {"status": "success"}})
+            .to_string(),
+        );
+        let h = headers(&[
+            ("x-gitlab-event", "Pipeline Hook"),
+            ("x-gitlab-token", "gl-token"),
+        ]);
+        let (ev, action, payload) = validate_webhook(None, &h, &pipeline).unwrap();
+        assert_eq!(ev, "gitlab:Pipeline Hook");
+        assert!(!should_process_event(&ev, &action));
+        assert_eq!(payload["repository"]["full_name"], "g/p");
+    }
+
+    #[test]
+    fn gitlab_closed_and_merged_mrs_map_to_closed() {
+        for gl_action in ["close", "merge"] {
+            let (ev, action, payload) = translate_gitlab(
+                "Merge Request Hook",
+                &json!({"project": {"path_with_namespace": "g/p"},
+                        "object_attributes": {"action": gl_action, "iid": 8}}),
+            )
+            .unwrap();
+            assert_eq!((ev.as_str(), action.as_str()), ("pull_request", "closed"));
+            assert!(should_process_event(&ev, &action));
+            assert_eq!(extract_number(&ev, &payload), Some(8));
+        }
+    }
+
+    #[test]
+    fn gitlab_issue_label_added_maps_to_labeled() {
+        let p = json!({
+            "project": {"path_with_namespace": "g/p"},
+            "user": {"username": "maint"},
+            "object_attributes": {"action": "update", "iid": 4, "title": "T", "description": "B"},
+            "changes": {"labels": {
+                "previous": [{"title": "bug"}],
+                "current": [{"title": "bug"}, {"title": "p1"}, {"title": "wshm:approved"}]
+            }}
+        });
+        let (ev, action, payload) = translate_gitlab("Issue Hook", &p).unwrap();
+        assert_eq!((ev.as_str(), action.as_str()), ("issues", "labeled"));
+        assert!(should_process_event(&ev, &action));
+        assert_eq!(payload["label"]["name"], "p1");
+        assert_eq!(
+            payload["added_labels"],
+            json!([{"name": "p1"}, {"name": "wshm:approved"}])
+        );
+        assert_eq!(payload["sender"]["login"], "maint");
+        assert_eq!(payload["issue"]["number"], 4);
+        assert_eq!(payload["issue"]["title"], "T");
+        assert_eq!(payload["issue"]["body"], "B");
+
+        // An edit that only removes labels (or changes the title) is ignored.
+        let mut removed = p.clone();
+        removed["changes"]["labels"]["current"] = json!([]);
+        assert!(translate_gitlab("Issue Hook", &removed).is_none());
+        let mut title_only = p.clone();
+        title_only["changes"] = json!({"title": {"previous": "a", "current": "b"}});
+        assert!(translate_gitlab("Issue Hook", &title_only).is_none());
     }
 
     #[test]
