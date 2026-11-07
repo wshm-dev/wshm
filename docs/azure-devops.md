@@ -58,6 +58,15 @@ global) or export `AZURE_DEVOPS_TOKEN` (`AZURE_DEVOPS_EXT_PAT` also works).
 It is never read from the config file. Without a token, wshm runs read-only on
 public projects.
 
+Azure DevOps Server (`git_url` set to your own host): forge tokens are bound to
+their host (introduced with the GitLab work, PR #249). The provider-wide
+`azure_devops_token` / `AZURE_DEVOPS_TOKEN` is only sent to `dev.azure.com`
+or to a host listed in `WSHM_FORGE_HOSTS`; otherwise store the PAT as
+`azure_devops_token@<host>` (for `git_url = "https://tfs.example.com/tfs"`:
+`azure_devops_token@tfs.example.com`). A plain `http://` server gets no token
+unless `WSHM_ALLOW_HTTP_FORGE=1`: prefer HTTPS, the PAT travels in every
+request.
+
 An expired PAT, or one missing a scope, makes Azure answer with a sign-in page
 (HTTP 203): wshm reports it as an authentication error.
 
@@ -77,7 +86,8 @@ An expired PAT, or one missing a scope, makes Azure answer with a sign-in page
 | conflicts | `mergeStatus` (`conflicts` / `succeeded`) |
 | CI status | build validation policies, plus PR statuses posted by other tools |
 | review decision | reviewer votes (approved / waiting / rejected) |
-| merge (`wshm queue --apply`) | auto-complete with `[queue] strategy` (`merge`, `squash`, `rebase`, `rebase-merge`): Azure completes the PR once every branch policy passes |
+| merge (`wshm queue --apply`, merge-queue policy of PR #249) | direct completion pinned to the head that was scored (refused when the source branch moved since), squash or merge commit; never auto-complete, never scheduled on CI. Branch policies still apply: Azure refuses a completion they block |
+| approvals (merge queue gate) | reviewers who voted *Approved* (10) or *Approved with suggestions* (5) and pass the permission check below; the author, wshm's own account and groups never count |
 
 Not available on Azure DevOps, and skipped with a log line:
 
@@ -96,14 +106,19 @@ Not available on Azure DevOps, and skipped with a log line:
 Slash commands, auto-fix and AI-chosen actions check that the user may push to
 the repository. On Azure DevOps a user qualifies when:
 
-1. the identity is found by exact account name or e-mail, and
-2. no explicit *Contribute* deny on the repository applies to the user or to
-   the project's Contributors / Project Administrators groups, and
-3. the user has an explicit *Contribute* allow on the repository, or is a
-   member (direct or nested) of the project's **Contributors** or
-   **Project Administrators** group.
+1. the identity is found by exact account name or e-mail;
+2. the access control lists of the repository and of its parents (all
+   repositories of the project, all repositories of the organization) are
+   read for the user and every group it belongs to, nested groups included;
+3. a *Contribute* deny at any of these levels, for the user or one of its
+   groups, denies;
+4. otherwise a *Contribute* allow grants, at the repository or at a parent
+   it inherits from (members of the project's Contributors group usually
+   qualify through the project-level allow).
 
-Anything else is denied, including when the check itself fails. For other
+Anything else is denied, including an evaluation that cannot be completed
+(unknown group membership, paged or unreadable access control list, API
+error). For other
 setups (custom groups, organization-level rights), list the users in
 `[fix] allowed_users` or `[ai.injection] trusted_authors`.
 
@@ -117,7 +132,7 @@ In the project: Project settings → Service hooks → Create subscription →
 | Work item created | the work item types you sync (optional) |
 | Work item commented on | (slash commands on issues) |
 | Pull request created | repository |
-| Pull request updated | repository, **Change: Source branch updated** (any other change would re-run the analysis) |
+| Pull request updated | repository, **Change: Source branch updated** (updates that leave the head unchanged are acknowledged and dropped anyway) |
 | Pull request commented on | repository (slash commands on PRs) |
 
 For each subscription:
@@ -135,12 +150,20 @@ For each subscription:
 The secret is its own value, distinct from the GitHub webhook secret (it is
 visible to the project administrators who manage service hooks): store it as
 the `azure_devops_webhook_secret` secret (per repo, or global) or export
-`WSHM_AZURE_DEVOPS_WEBHOOK_SECRET`. Without it, service hook deliveries are
-rejected (HTTP 503). Credentials are compared in constant time.
+`WSHM_AZURE_DEVOPS_WEBHOOK_SECRET`. Credentials are compared in constant time.
+
+Order of the checks:
+
+1. events wshm does not handle are answered 200 "ignored";
+2. the delivery is routed to one configured `azure-devops` repo; an
+   unroutable delivery is rejected (404) before any secret is looked at;
+3. it is authenticated with the secret of that repo (repo scope, then
+   global). No secret: rejected (503). `WSHM_ALLOW_UNSIGNED_WEBHOOKS` does not
+   apply to service hooks.
 
 Deliveries are deduplicated on the event id, so Azure's retries are processed
-once. A service hook can only drive a repo whose `git_provider` is
-`azure-devops`.
+once. For comment events, wshm reads the comment back through the API by its
+ids and uses the author and text from there, never from the delivery.
 
 ## Polling mode
 
