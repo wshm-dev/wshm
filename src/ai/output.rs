@@ -66,6 +66,12 @@ static RE_SECRET: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// Whether `s` contains something that looks like a secret (the patterns
+/// of [`redact_secrets`]).
+pub fn has_secret(s: &str) -> bool {
+    RE_SECRET.is_match(s)
+}
+
 /// Redact secret-looking strings.
 pub fn redact_secrets(s: &str) -> String {
     RE_SECRET.replace_all(s, "[secret removed]").into_owned()

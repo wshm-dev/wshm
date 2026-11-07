@@ -359,7 +359,9 @@ impl GitProvider for GiteaProvider {
             Capability::ReviewDecisions
             | Capability::Reactions
             | Capability::CiStatus
-            | Capability::CommentPolling => true,
+            | Capability::CommentPolling
+            | Capability::CommitStatus
+            | Capability::PrApprovals => true,
         }
     }
 
@@ -649,6 +651,43 @@ impl GitProvider for GiteaProvider {
 
     async fn comment_pr(&self, number: u64, body: &str) -> Result<()> {
         self.upsert_comment(Thread::Pull(number), body).await
+    }
+
+    async fn set_commit_status(&self, sha: &str, status: &super::CommitStatus) -> Result<()> {
+        self.rest.require_auth("set commit status")?;
+        self.rest
+            .send_json(
+                Method::POST,
+                &self.url(&format!("statuses/{}", urlencoding::encode(sha))),
+                &json!({
+                    "state": status.state.as_str(),
+                    "context": status.context,
+                    "description": super::status_description(&status.description),
+                }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn fetch_pr_approvals(&self, number: u64) -> Result<Vec<super::PrApproval>> {
+        // Paginated (oldest first). Stale approvals (given on an older
+        // commit) keep their commit id, which the approval step compares
+        // with the head. Gitea has no bot user type: `official` (a reviewer
+        // with write access) is what decides.
+        let mut reviews: Vec<Value> = Vec::new();
+        for page in 1..=20u32 {
+            let v = self
+                .rest
+                .get_json(&self.url(&format!("pulls/{number}/reviews?limit=50&page={page}")))
+                .await?;
+            let items = v.as_array().cloned().unwrap_or_default();
+            let n = items.len();
+            reviews.extend(items);
+            if n < 50 {
+                break;
+            }
+        }
+        Ok(super::approvals_from_reviews(&reviews))
     }
 
     async fn submit_review(
@@ -1071,6 +1110,56 @@ mod tests {
         assert_eq!(
             (c[1].number, c[1].is_pr, c[1].author.as_str()),
             (13, true, "eve")
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_status_and_approvals() {
+        let server = MockServer::start().await;
+        server.on(
+            "POST",
+            &format!("{R}/statuses/abc123"),
+            Reply::json(json!({})),
+        );
+        server.on(
+            "GET",
+            &format!("{R}/pulls/4/reviews"),
+            Reply::json(json!([
+                {"user": {"login": "alice"}, "state": "APPROVED", "commit_id": "old"},
+                {"user": {"login": "bob"}, "state": "APPROVED", "commit_id": "abc123", "official": true},
+                {"user": {"login": "alice"}, "state": "COMMENT", "commit_id": "abc123"},
+                {"user": {"login": "carol"}, "state": "APPROVED", "commit_id": "abc123"},
+                {"user": {"login": "carol"}, "state": "REQUEST_CHANGES", "commit_id": "abc123"},
+                {"user": {"login": "dave"}, "state": "APPROVED", "commit_id": "abc123", "dismissed": true}
+            ])),
+        );
+        let p = provider(&server);
+        assert!(p.supports(Capability::CommitStatus) && p.supports(Capability::PrApprovals));
+        p.set_commit_status(
+            "abc123",
+            &crate::git_provider::CommitStatus {
+                state: crate::git_provider::CommitState::Failure,
+                context: "wshm/review".into(),
+                description: "1 important finding open".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            server.requests()[0].json(),
+            json!({"state": "failure", "context": "wshm/review", "description": "1 important finding open"})
+        );
+        let a = p.fetch_pr_approvals(4).await.unwrap();
+        let who: Vec<(&str, Option<&str>, bool)> = a
+            .iter()
+            .map(|a| (a.login.as_str(), a.commit_sha.as_deref(), a.write_access))
+            .collect();
+        // A comment keeps alice's (stale) approval; carol's change request
+        // replaces hers; a dismissed approval does not count.
+        // Only `official` reviews (write access) are marked as counting.
+        assert_eq!(
+            who,
+            [("alice", Some("old"), false), ("bob", Some("abc123"), true)]
         );
     }
 }

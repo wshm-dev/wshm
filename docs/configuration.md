@@ -269,8 +269,17 @@ steps of one kind, recorded with their own trigger):
   that kind (trigger `command`). Their conditions apply, except the toggles
   (`features`, `repo_filters`), which govern automatic processing and never
   blocked an explicit command. A command on an item whose template has no such
-  step, or skips it, answers with the reason. The other commands (`label`,
-  `fix`, `queue`, ...) are not pipeline steps.
+  step, or skips it, answers with the reason. `/wshm review` runs the
+  template's whole review chain (`context`, `review`, `security`, `verify`,
+  `risk`, `approval`, `status_check`, those the template has), so with a
+  collect-mode review it is `verify` that posts; the reply lists what each
+  step did. The other commands (`label`, `fix`, `queue`, ...) are not
+  pipeline steps;
+- a PR review submitted or dismissed (GitHub `pull_request_review`, Gitea /
+  Forgejo review events, GitLab MR approve / unapprove) re-runs only the
+  `risk`, `approval` and `status_check` steps (trigger
+  `pull_request_review.submitted`): no AI call, no review round. Polling mode
+  (no webhooks) does not see reviews: the status is updated on the next push.
 
 The pipeline config is only read from `.wshm/config.toml` (default branch
 checkout), the global config, or the DB override. Never from the content of an
@@ -278,7 +287,7 @@ issue or PR. It holds no secret: steps read credentials from the secret store.
 
 ```toml
 [[pipelines]]
-name = "light"                  # a-z 0-9 - _ (1-64 chars); "standard" is reserved
+name = "docs-only"              # a-z 0-9 - _ (1-64 chars); "standard" is reserved
 description = "Docs and small PRs"
 max_ai_calls = 2                # AI call budget of a run; later steps are skipped
 
@@ -290,12 +299,13 @@ uses = "sync"                   # step kind
 id = "analyze"
 uses = "analyze"
 needs = ["sync"]                # earlier steps that must have finished "done"
+# after = ["x"]                 # ordering only: run after x whatever its outcome
 on_failure = "continue"         # "abort" (default): stop the run and fail the event
 timeout_secs = 300              # the step fails after this long
 when = { item = "pr", features = ["analyze_prs"], labels_none = ["skip-ai"] }
 
 [[pipeline_routes]]             # picks the pipeline of a run
-template = "light"
+template = "docs-only"
 priority = 10                   # highest first, then declaration order
 when = { item = "pr", paths = ["docs/**", "**/*.md"] }
 
@@ -308,8 +318,10 @@ No route matches: `standard` runs.
 
 Step kinds: `sync` (refresh the issue/PR from the forge), `triage` (issues),
 `review` (PRs, inline review), `analyze` (PRs, analysis and diagrams),
-`memory` (store the result in ICM when `[daemon] icm_enabled`). A step of the
-other item kind is left out of the run.
+`memory` (store the result in ICM when `[daemon] icm_enabled`), and the review
+steps `context`, `security`, `verify`, `risk`, `approval`, `status_check`
+(see [Review steps](#review-steps)). A step of the other item kind is left out
+of the run.
 
 Conditions (`when`, on steps and routes; all listed must hold):
 
@@ -322,7 +334,7 @@ Conditions (`when`, on steps and routes; all listed must hold):
 | `authors` / `skip_authors` | item author logins |
 | `forges` | `github`, `gitlab`, `gitea`, `forgejo`, `azure-devops` |
 | `paths` | PR only: a changed path matches a glob (`*`, `**`, `?`) |
-| `risk` | PR only: risk level of the analysis (`low`, `medium`, `high`) |
+| `risk` | PR only: risk tier (`low`, `medium`, `high`) of the run's `risk` step when it ran, else the risk level of the analysis |
 | `repos` | repo slug globs, e.g. `["my-org/*"]` |
 
 A step that does not run is recorded as skipped with the reason
@@ -350,14 +362,175 @@ Limits:
   step: it is not started once the budget is used up, but a started diagram
   (up to `[pr.review_diagrams] max_summary_calls` + 1 calls) is not cut short.
   Its calls are added to the run when it finishes.
+- `max_rounds` on a step skips it once it was `done` in that many earlier runs
+  of the same template on the same item (e.g. review rounds of a PR), with
+  the reason "round cap reached ... ask the author to reconsider the approach".
+- `max_ai_calls` on a step caps that step's AI calls (on top of the run's
+  budget). Steps that make several calls scale down: `verify` uses fewer
+  voters, `security` skips its AI pass and keeps the pattern scan.
+- `parallel = true` on a template runs consecutive steps that do not depend
+  on each other side by side: a step joins the current group unless it
+  `needs` or comes `after` a step of it, or has a `when.risk` condition while
+  the group holds a `risk` step. Steps are still recorded in template order.
+  The AI calls of the run are counted live across the group; `review`
+  (collect mode), `security` and `verify` reserve their calls before making
+  them, so together they never go past `max_ai_calls`. The older steps
+  (`triage`, `analyze`, post-mode `review`) are checked before they start, so
+  one of them can still finish past the budget.
 - A failure that the wrapped pipeline already handled by logging and going on
   (a triage or review AI error) is recorded as `failed` but does not abort the
   run, as before.
 
+### Built-in templates
+
+| Template | For | Steps |
+|----------|-----|-------|
+| `standard` | default | the table above (the repo toggles) |
+| `anthropic` | thorough PR review | `sync` → `context` → `review` (collect) ∥ `security` → `verify` ∥ `risk` → `approval` → `status_check`; issues as `standard` |
+| `light` | docs and small PRs | `sync` → `analyze` → `risk`, 2 AI calls at most; issues: `sync` → `triage` |
+| `triage` | issues | `sync` → `triage` → `memory`; a PR routed here runs no step |
+
+`standard` stays the default: the others only run when a route picks them. A
+user template with the name of a built-in one (other than `standard`)
+replaces it. `GET /api/v1/repos/{slug}/pipelines` lists them under `builtin`,
+with `default_template` (the highest-priority route without conditions, else
+`standard`).
+
+`anthropic` follows [how Anthropic reviews code](https://claude.dev/blog/solving-code-review-at-anthropic/):
+repository context, bug and security reviews side by side, a verification
+vote on every finding (only confirmed ones are posted), findings tagged
+Important / Nit / Pre-existing, a risk tier with human approvals per tier,
+and a blocking status while important findings stay open. It keeps the
+`review_prs` toggle on its review steps and caps the review at 3 rounds per
+PR (`max_rounds`). Route PRs to it:
+
+```toml
+[[pipeline_routes]]
+template = "anthropic"
+priority = 10
+when = { item = "pr", repos = ["my-org/critical-*"] }
+
+[[pipeline_routes]]
+template = "light"
+priority = 20
+when = { item = "pr", paths = ["docs/**", "**/*.md"] }
+```
+
+### Review steps
+
+Every step records its status (done, skipped with the reason, failed), its
+duration, AI calls, a summary and its findings count. Text from the PR, the
+repository and the model is wrapped as untrusted data, model output is
+validated (comments must target a line of the diff; mentions, links and HTML
+are removed), and nothing is posted, labelled or set for an item flagged as a
+possible prompt injection.
+
+| Kind | What it does | `with` parameters |
+|------|--------------|-------------------|
+| `context` | Loads `CLAUDE.md` / `REVIEW.md` and the code around the changed lines from the default branch of the local checkout, for the review steps: read from git objects (`origin/HEAD`, else `origin/<[fix] base_branch>`, else the local `<base_branch>`), never from the working tree or the PR; tracked files only, `.wshm/` excluded. Done even when nothing is found. No AI. | `files` (default `["CLAUDE.md", "REVIEW.md"]`), `lines` around each hunk (20), `max_bytes` of code (30000) |
+| `review` | The inline review. With `mode = "collect"` the findings are kept for `verify` instead of being posted, and the step's AI calls (one per file) stay within its `max_ai_calls` and the run's budget: files over the limit are not reviewed (said in the summary). | `mode` (`post` default, `collect`) |
+| `security` | A separate security review: a pattern scan of the added lines for committed secrets (no AI), then an AI pass on secrets, injections and permissions. Findings go to `verify`. | `ai` (true), `secrets` (true) |
+| `verify` | `voters` AI calls vote on every finding of the run; a finding is confirmed with `min_votes` votes (default: a majority of `voters`). When fewer voters than `min_votes` fit in the budget or answer, nothing is confirmed or posted and the reason is recorded (`status_check` then stays pending). Nits beyond `max_nits` are dropped. The confirmed findings are posted as one review (apply mode and `review_post_comments`), each finding once per PR (keyed by path, category, wording and the text of the targeted line; claimed in the DB before posting), and stored for the Review page. | `voters` (3, 1-5), `min_votes`, `max_nits` (3), `post` (true) |
+| `risk` | Classifies the change: `high` when a path matches `high_paths`, it changes more than `large_lines` lines, or an important security finding was made; `low` when every path matches `low_paths`; `medium` otherwise. Read by `when.risk` and `approval`. No AI. | `high_paths` (workflows, CI, Dockerfiles, migrations, auth, security, `*.pem`), `low_paths` (`*.md`, `docs/**`, `*.txt`, `*.rst`, `LICENSE*`), `large_lines` (1000), `security_high` (true) |
+| `approval` | Human approvals required per tier (default `low = 0`, `medium = 1`, `high = 2`), at least one when a path matches `always_human` or the author is not in `trusted_authors` (when set). Counts only approvals on the head commit by reviewers with write access (GitHub `author_association` OWNER, MEMBER or COLLABORATOR; Gitea / Forgejo `official` reviews); bots and the author never count. wshm itself only posts comment reviews, never approvals. Optionally keeps `label` on the PR while approvals are missing (apply mode). | `low`, `medium`, `high`, `always_human` (workflows, `CODEOWNERS`), `trusted_authors`, `label` |
+| `status_check` | Always sets a commit status `context` on the PR head the review saw, so a required check is never left missing: `pending` while the review of that commit is not complete (review, verify or security skipped or failed, round cap, findings not verified), `failure` while important findings stay open (the verified ones when `verify` ran, else the last complete review of the same commit), `pending` while required approvals are missing or could not be counted (`approvals = true`), `success` otherwise. Use `after` (not `needs`) so it runs whatever the review steps did. Make it a required check in the branch protection to block the merge. Apply mode only; not set on forges without commit statuses or on items flagged as possible prompt injection. | `context` (`wshm/review`), `approvals` (true) |
+
+Severity: a finding on a line the PR did not add is `Pre-existing` (not held
+against the author and never blocking); on an added line, `error` / `warning`
+are `Important` and the rest `Nit`.
+
+Forge support: commit statuses on GitHub, GitLab, Gitea and Forgejo (not Azure
+DevOps yet); approval counting on GitHub, Gitea and Forgejo. On GitLab,
+approvals are not counted, so `status_check` stays `pending` whenever the tier
+requires an approval: set the tiers to 0 or `approvals = false` there. A new
+commit re-runs the review on `pull_request.synchronize`; a submitted or
+dismissed review re-runs the approval and status steps.
+
+A custom template mixing them:
+
+```toml
+[[pipelines]]
+name = "strict"
+parallel = true
+max_ai_calls = 20
+
+[[pipelines.steps]]
+id = "sync"
+uses = "sync"
+when = { item = "pr" }
+
+[[pipelines.steps]]
+id = "context"
+uses = "context"
+needs = ["sync"]
+with = { files = ["CLAUDE.md", "REVIEW.md", "docs/ARCHITECTURE.md"], lines = 30 }
+
+[[pipelines.steps]]
+id = "review"
+uses = "review"
+needs = ["context"]
+max_rounds = 3
+with = { mode = "collect" }
+
+[[pipelines.steps]]
+id = "security"
+uses = "security"
+needs = ["context"]
+on_failure = "continue"
+
+[[pipelines.steps]]
+id = "verify"
+uses = "verify"
+needs = ["review"]
+max_ai_calls = 5
+with = { voters = 5, min_votes = 3, max_nits = 0 }
+
+[[pipelines.steps]]
+id = "risk"
+uses = "risk"
+needs = ["sync"]
+with = { high_paths = ["src/billing/**", ".github/**"], large_lines = 600 }
+
+[[pipelines.steps]]
+id = "approval"
+uses = "approval"
+needs = ["risk"]
+with = { medium = 1, high = 2, always_human = ["migrations/**"], trusted_authors = ["alice", "bob"], label = "needs-human-review" }
+
+[[pipelines.steps]]
+id = "status"
+uses = "status_check"
+after = ["verify", "approval"]
+with = { context = "wshm/review" }
+```
+
+### Nightly review
+
+`[pipeline_nightly]` reviews existing code of the default branch outside any
+PR, a few files per night, to find old bugs. Off by default.
+
+```toml
+[pipeline_nightly]
+enabled = true
+hour_utc = 3                  # earliest UTC hour; runs once a day, on one pod
+paths = ["src/**"]            # tracked files of the default branch matching these globs
+exclude = ["src/generated/**"]
+max_files = 5                 # one AI call per file; the next night goes on from there
+create_issue = false          # apply mode: open one issue listing the findings
+```
+
+The scheduler starts it after its sync cycle (so it needs `collect_issues` or
+`collect_prs`). Files are read from git objects of the default branch (as for
+`context`), never the working tree. Files over 60 KB or 2000 lines, lock files and binaries are
+skipped, as are files whose content looks like a prompt injection attempt.
+Each night is recorded as a run of item kind `repo`, number 0, template
+`nightly`, visible in `GET /api/v1/repos/{slug}/runs` without filter.
+`pipeline_nightly` can also be set in the DB override.
+
 DB override (multi-pod, shared by every pod): `PUT /api/v1/repos/{slug}/pipelines`
 (admin) with a JSON object holding any of `pipelines`, `pipeline_routes`,
-`pipeline_runs`; each replaces the TOML value (`pipeline_runs` is merged key by
-key). `null` drops the override. The PUT rejects an invalid override; one
+`pipeline_runs`, `pipeline_nightly`; each replaces the TOML value
+(`pipeline_runs` and `pipeline_nightly` are merged key by key). `null` drops the override. The PUT rejects an invalid override; one
 that became invalid later (for instance after an upgrade) only loses its
 invalid sections at run time (`override_error`). `GET` on the same path returns
 the effective, TOML and override values, the errors and warnings, and the

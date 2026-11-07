@@ -204,16 +204,11 @@ pub async fn execute(
             }
             info!("Slash command: review PR #{number}");
             gh_sync::incremental_sync(gh, db, "pulls").await?;
-            let report = run_command_steps(ctx, "review").await?;
+            // The template's whole review chain: with a collect-mode review,
+            // `verify` is what posts.
+            let report = run_command_kinds(ctx, pipelines::engine::REVIEW_KINDS).await?;
             Ok(match command_outcome(&report, "review", ctx) {
-                Ok(()) => format!(
-                    "Reviewed PR #{number}. {}",
-                    if apply {
-                        "Review comments posted."
-                    } else {
-                        "(dry-run)"
-                    }
-                ),
+                Ok(()) => review_reply(&report, number, apply),
                 Err(msg) => msg,
             })
         }
@@ -417,9 +412,46 @@ async fn run_command_steps(
     ctx: &pipelines::engine::RunContext,
     kind: &str,
 ) -> Result<pipelines::engine::RunReport> {
+    run_command_kinds(ctx, &[kind]).await
+}
+
+/// What `/wshm review` really did, from the summaries of its steps.
+fn review_reply(report: &pipelines::engine::RunReport, number: u64, apply: bool) -> String {
+    use pipelines::engine::StepStatus;
+    let line = |uses: &str| {
+        report
+            .steps
+            .iter()
+            .find(|s| s.uses == uses)
+            .map(|s| match s.status {
+                StepStatus::Done => {
+                    format!("{}: {}", s.step_id, s.summary.as_deref().unwrap_or("done"))
+                }
+                _ => format!(
+                    "{}: {} ({})",
+                    s.step_id,
+                    s.status.as_str(),
+                    s.reason.as_deref().unwrap_or("")
+                ),
+            })
+    };
+    let mut parts: Vec<String> = ["review", "security", "verify", "status_check"]
+        .iter()
+        .filter_map(|u| line(u))
+        .collect();
+    if !apply {
+        parts.push("dry-run: nothing posted".into());
+    }
+    format!("Reviewed PR #{number}.\n\n- {}", parts.join("\n- "))
+}
+
+async fn run_command_kinds(
+    ctx: &pipelines::engine::RunContext,
+    kinds: &[&str],
+) -> Result<pipelines::engine::RunReport> {
     let mut report = pipelines::engine::run_kinds(
         ctx,
-        &[kind],
+        kinds,
         pipelines::engine::ExecOptions {
             ignore_toggles: true,
             ..Default::default()

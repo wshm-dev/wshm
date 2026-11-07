@@ -3156,7 +3156,8 @@ fn pipelines_settings_json(ds: &crate::daemon::DaemonState) -> serde_json::Value
         "override_errors": loaded.override_errors,
         "template_errors": invalid,
         "warnings": template::warnings(&loaded.config, &registry),
-        "builtin": [template::standard()],
+        "builtin": template::builtins(),
+        "default_template": template::default_template(&loaded.config),
         "step_kinds": registry.kinds(),
     })
 }

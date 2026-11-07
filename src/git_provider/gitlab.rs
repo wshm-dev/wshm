@@ -330,7 +330,10 @@ impl GitProvider for GitLabProvider {
             Capability::ReviewDecisions
             | Capability::Reactions
             | Capability::CiStatus
-            | Capability::CommentPolling => true,
+            | Capability::CommentPolling
+            | Capability::CommitStatus => true,
+            // Merge request approvals are not bound to a commit here.
+            Capability::PrApprovals => false,
         }
     }
 
@@ -597,6 +600,27 @@ impl GitProvider for GitLabProvider {
 
     async fn comment_pr(&self, number: u64, body: &str) -> Result<()> {
         self.upsert_comment(Thread::Pull(number), body).await
+    }
+
+    async fn set_commit_status(&self, sha: &str, status: &super::CommitStatus) -> Result<()> {
+        self.rest.require_auth("set commit status")?;
+        let state = match status.state {
+            super::CommitState::Pending => "pending",
+            super::CommitState::Success => "success",
+            super::CommitState::Failure => "failed",
+        };
+        self.rest
+            .send_json(
+                Method::POST,
+                &self.url(&format!("statuses/{}", urlencoding::encode(sha))),
+                &json!({
+                    "state": state,
+                    "name": status.context,
+                    "description": super::status_description(&status.description),
+                }),
+            )
+            .await?;
+        Ok(())
     }
 
     async fn submit_review(
@@ -1138,5 +1162,28 @@ mod tests {
         );
         assert!(p.label_issue(1, &["x".into()]).await.is_err());
         assert!(server.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn commit_status_uses_gitlab_states() {
+        let server = MockServer::start().await;
+        server.on("POST", &format!("{P}/statuses/abc"), Reply::json(json!({})));
+        let p = provider(&server);
+        assert!(p.supports(Capability::CommitStatus));
+        assert!(!p.supports(Capability::PrApprovals));
+        p.set_commit_status(
+            "abc",
+            &crate::git_provider::CommitStatus {
+                state: crate::git_provider::CommitState::Failure,
+                context: "wshm/review".into(),
+                description: "x".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            server.requests()[0].json(),
+            json!({"state": "failed", "name": "wshm/review", "description": "x"})
+        );
     }
 }

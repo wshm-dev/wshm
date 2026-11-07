@@ -26,6 +26,13 @@ use super::ItemKind;
 pub const STANDARD: &str = "standard";
 /// Names user templates may not take.
 pub const BUILTIN_TEMPLATES: &[&str] = &[STANDARD];
+/// Every built-in template, in display order. Apart from `standard`, a
+/// user template of the same name replaces the built-in one.
+pub const BUILTIN_NAMES: &[&str] = &[STANDARD, ANTHROPIC, LIGHT, TRIAGE];
+pub const ANTHROPIC: &str = "anthropic";
+pub const LIGHT: &str = "light";
+pub const TRIAGE: &str = "triage";
+const MAX_ROUNDS: u32 = 100;
 
 const MAX_STEPS: usize = 64;
 const MAX_ROUTES: usize = 128;
@@ -60,6 +67,11 @@ pub struct StepDef {
     /// run. Otherwise the step is skipped with the reason.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
+    /// Ids of earlier steps this one runs after, whatever their outcome
+    /// (ordering only, for `parallel` templates: unlike `needs`, a skipped
+    /// or failed step does not skip this one).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
     /// Conditions; the step is skipped (with the reason) when one fails.
     #[serde(default, skip_serializing_if = "Condition::is_empty")]
     pub when: Condition,
@@ -68,6 +80,15 @@ pub struct StepDef {
     /// Abort the step (status failed) after this many seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Skip the step once it was done in this many earlier runs of the
+    /// template on the same item (review rounds of a PR).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<u32>,
+    /// AI calls the step may make (on top of the run's `max_ai_calls`).
+    /// Steps that make several calls (verify voters, security) scale down
+    /// or stop at the limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ai_calls: Option<u32>,
     /// Step-specific parameters, validated by the step kind. Never put a
     /// secret here: steps read secrets from the secret store by name.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
@@ -85,6 +106,10 @@ pub struct PipelineTemplate {
     /// skipped. Unset = no budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_ai_calls: Option<u32>,
+    /// Run consecutive steps that do not need each other side by side
+    /// (see [`super::waves`]). Default: one step at a time.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parallel: bool,
     pub steps: Vec<StepDef>,
 }
 
@@ -141,6 +166,71 @@ pub struct PipelinesConfig {
     pub pipeline_routes: Vec<PipelineRoute>,
     #[serde(default)]
     pub pipeline_runs: PipelineRunsConfig,
+    #[serde(default)]
+    pub pipeline_nightly: NightlyConfig,
+}
+
+/// `[pipeline_nightly]`: review of existing code outside PRs, once a day
+/// (see [`super::nightly`]). Off by default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NightlyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Earliest UTC hour of the day the review starts (0-23).
+    #[serde(default = "default_nightly_hour")]
+    pub hour_utc: u32,
+    /// Files reviewed (globs, relative to the repo root).
+    #[serde(default = "default_nightly_paths")]
+    pub paths: Vec<String>,
+    /// Files left out (globs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// Files reviewed per night (one AI call each). The next night goes on
+    /// where this one stopped.
+    #[serde(default = "default_nightly_files")]
+    pub max_files: u32,
+    /// In apply mode, open one issue listing the findings of the night.
+    #[serde(default)]
+    pub create_issue: bool,
+}
+
+fn default_nightly_hour() -> u32 {
+    3
+}
+
+fn default_nightly_paths() -> Vec<String> {
+    vec!["src/**".into()]
+}
+
+fn default_nightly_files() -> u32 {
+    5
+}
+
+impl Default for NightlyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hour_utc: default_nightly_hour(),
+            paths: default_nightly_paths(),
+            exclude: Vec::new(),
+            max_files: default_nightly_files(),
+            create_issue: false,
+        }
+    }
+}
+
+fn validate_nightly(n: &NightlyConfig) -> Result<(), String> {
+    if n.hour_utc > 23 {
+        return Err("pipeline_nightly.hour_utc must be between 0 and 23".into());
+    }
+    if n.max_files == 0 || n.max_files > 100 {
+        return Err("pipeline_nightly.max_files must be between 1 and 100".into());
+    }
+    for g in n.paths.iter().chain(&n.exclude) {
+        condition::glob_regex(g).map_err(|e| format!("pipeline_nightly: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Source of the built-in `standard` template. Kept as TOML so it reads like
@@ -203,14 +293,193 @@ static STANDARD_TEMPLATE: LazyLock<PipelineTemplate> = LazyLock::new(|| {
     toml::from_str(STANDARD_TOML).expect("built-in standard template must parse")
 });
 
+/// Source of the built-in `anthropic` template: the review flow described in
+/// <https://claude.dev/blog/solving-code-review-at-anthropic/>. Load the
+/// repo's CLAUDE.md / REVIEW.md and the code around the changes, run the
+/// bug review and a separate security review side by side, let a second
+/// pass vote on each finding (only confirmed ones are posted), classify the
+/// risk, require human approvals per risk tier, and set a blocking status
+/// while important findings stay open. Issues get the standard triage.
+pub const ANTHROPIC_TOML: &str = r#"
+name = "anthropic"
+description = "Context, parallel bug and security review, verification votes, risk tier, human approvals, blocking status."
+parallel = true
+max_ai_calls = 40
+
+[[steps]]
+id = "sync-issue"
+uses = "sync"
+when = { item = "issue", features = ["collect_issues"] }
+
+[[steps]]
+id = "triage"
+uses = "triage"
+needs = ["sync-issue"]
+when = { item = "issue", features = ["triage_issues"], repo_filters = true }
+
+[[steps]]
+id = "triage-memory"
+uses = "memory"
+needs = ["triage"]
+when = { item = "issue" }
+
+[[steps]]
+id = "sync-pr"
+uses = "sync"
+when = { item = "pr", features = ["collect_prs"] }
+
+[[steps]]
+id = "context"
+uses = "context"
+needs = ["sync-pr"]
+on_failure = "continue"
+when = { item = "pr", features = ["review_prs"] }
+
+[[steps]]
+id = "review"
+uses = "review"
+needs = ["context"]
+on_failure = "continue"
+max_rounds = 3
+with = { mode = "collect" }
+when = { item = "pr", features = ["review_prs"] }
+
+[[steps]]
+id = "security"
+uses = "security"
+needs = ["context"]
+on_failure = "continue"
+when = { item = "pr", features = ["review_prs"] }
+
+[[steps]]
+id = "verify"
+uses = "verify"
+needs = ["review"]
+on_failure = "continue"
+with = { voters = 3, max_nits = 3 }
+when = { item = "pr", features = ["review_prs"] }
+
+[[steps]]
+id = "risk"
+uses = "risk"
+needs = ["sync-pr"]
+when = { item = "pr" }
+
+[[steps]]
+id = "approval"
+uses = "approval"
+needs = ["risk"]
+on_failure = "continue"
+when = { item = "pr" }
+
+[[steps]]
+id = "status"
+uses = "status_check"
+after = ["verify", "approval"]
+on_failure = "continue"
+when = { item = "pr", features = ["review_prs"] }
+"#;
+
+/// Source of the built-in `light` template: docs and small PRs. The PR
+/// analysis and the risk tier only (no inline review), with a small AI
+/// budget. Issues get the standard triage.
+pub const LIGHT_TOML: &str = r#"
+name = "light"
+description = "Docs and small PRs: analysis and risk tier only, 2 AI calls at most."
+max_ai_calls = 2
+
+[[steps]]
+id = "sync-issue"
+uses = "sync"
+when = { item = "issue", features = ["collect_issues"] }
+
+[[steps]]
+id = "triage"
+uses = "triage"
+needs = ["sync-issue"]
+when = { item = "issue", features = ["triage_issues"], repo_filters = true }
+
+[[steps]]
+id = "sync-pr"
+uses = "sync"
+when = { item = "pr", features = ["collect_prs"] }
+
+[[steps]]
+id = "analyze"
+uses = "analyze"
+needs = ["sync-pr"]
+when = { item = "pr", features = ["analyze_prs"], repo_filters = true }
+
+[[steps]]
+id = "risk"
+uses = "risk"
+needs = ["sync-pr"]
+when = { item = "pr" }
+"#;
+
+/// Source of the built-in `triage` template: issues only (sync, triage,
+/// memory). A PR routed here runs no step.
+pub const TRIAGE_TOML: &str = r#"
+name = "triage"
+description = "Issues only: sync, triage and memory. PRs routed here are left alone."
+max_ai_calls = 4
+
+[[steps]]
+id = "sync-issue"
+uses = "sync"
+when = { item = "issue", features = ["collect_issues"] }
+
+[[steps]]
+id = "triage"
+uses = "triage"
+needs = ["sync-issue"]
+when = { item = "issue", features = ["triage_issues"], repo_filters = true }
+
+[[steps]]
+id = "triage-memory"
+uses = "memory"
+needs = ["triage"]
+when = { item = "issue" }
+"#;
+
+static OTHER_BUILTINS: LazyLock<Vec<PipelineTemplate>> = LazyLock::new(|| {
+    // Safe: constants covered by tests.
+    [ANTHROPIC_TOML, LIGHT_TOML, TRIAGE_TOML]
+        .iter()
+        .map(|src| toml::from_str(src).expect("built-in template must parse"))
+        .collect()
+});
+
 /// The built-in `standard` template.
 pub fn standard() -> &'static PipelineTemplate {
     &STANDARD_TEMPLATE
 }
 
+/// Every built-in template ([`BUILTIN_NAMES`] order).
+pub fn builtins() -> Vec<&'static PipelineTemplate> {
+    std::iter::once(standard())
+        .chain(OTHER_BUILTINS.iter())
+        .collect()
+}
+
 /// A built-in template by name.
 pub fn builtin(name: &str) -> Option<&'static PipelineTemplate> {
-    (name == STANDARD).then(standard)
+    builtins().into_iter().find(|t| t.name == name)
+}
+
+/// The template a run gets when no route with conditions matches: the
+/// highest-priority route without conditions, else `standard`.
+pub fn default_template(cfg: &PipelinesConfig) -> &str {
+    let mut routes: Vec<&PipelineRoute> = cfg
+        .pipeline_routes
+        .iter()
+        .filter(|r| r.when.is_empty())
+        .collect();
+    routes.sort_by_key(|r| std::cmp::Reverse(r.priority));
+    routes
+        .first()
+        .map(|r| r.template.as_str())
+        .unwrap_or(STANDARD)
 }
 
 fn valid_ident(s: &str) -> bool {
@@ -277,12 +546,29 @@ pub fn validate_template(t: &PipelineTemplate) -> Result<(), String> {
                 }
             }
         }
+        for a in &s.after {
+            if !seen.contains_key(a.as_str()) {
+                return Err(sctx(format!(
+                    "after '{a}', which is not an earlier step of the pipeline"
+                )));
+            }
+        }
         if let Some(secs) = s.timeout_secs {
             if secs == 0 || secs > MAX_TIMEOUT_SECS {
                 return Err(sctx(format!(
                     "timeout_secs must be between 1 and {MAX_TIMEOUT_SECS}"
                 )));
             }
+        }
+        if s.max_rounds.is_some_and(|r| r == 0 || r > MAX_ROUNDS) {
+            return Err(sctx(format!(
+                "max_rounds must be between 1 and {MAX_ROUNDS}"
+            )));
+        }
+        if s.max_ai_calls == Some(0) {
+            return Err(sctx(
+                "max_ai_calls must be at least 1 (omit it for no limit)".into(),
+            ));
         }
         condition::validate(&s.when).map_err(sctx)?;
         seen.insert(&s.id, s);
@@ -321,6 +607,7 @@ pub fn validate(cfg: &PipelinesConfig) -> Result<(), String> {
         }
         condition::validate(&r.when).map_err(|e| format!("pipeline route #{}: {e}", i + 1))?;
     }
+    validate_nightly(&cfg.pipeline_nightly)?;
     Ok(())
 }
 
@@ -410,7 +697,12 @@ pub fn plan<'a>(
 
 // ── Config sources: TOML + DB override ──────────────────────────────
 
-const SECTIONS: [&str; 3] = ["pipelines", "pipeline_routes", "pipeline_runs"];
+const SECTIONS: [&str; 4] = [
+    "pipelines",
+    "pipeline_routes",
+    "pipeline_runs",
+    "pipeline_nightly",
+];
 
 fn parse_valid(v: serde_json::Value) -> Result<PipelinesConfig, String> {
     let cfg: PipelinesConfig =
@@ -429,6 +721,7 @@ pub fn toml_config(config: &crate::config::Config) -> (PipelinesConfig, Option<S
         ("pipelines", &config.pipelines),
         ("pipeline_routes", &config.pipeline_routes),
         ("pipeline_runs", &config.pipeline_runs),
+        ("pipeline_nightly", &config.pipeline_nightly),
     ] {
         if let Some(v) = v {
             obj.insert(k.to_string(), v.clone());
@@ -511,10 +804,12 @@ pub fn apply_override_lenient(
         (!m.is_empty()).then_some(serde_json::Value::Object(m))
     };
     let mut current = toml.clone();
-    if let Some(runs) = pick(&["pipeline_runs"]) {
-        match merged(&current, &runs) {
-            Ok(c) => current = c,
-            Err(e) => errors.push(format!("pipeline_runs ignored: {e}")),
+    for key in ["pipeline_runs", "pipeline_nightly"] {
+        if let Some(part) = pick(&[key]) {
+            match merged(&current, &part) {
+                Ok(c) => current = c,
+                Err(e) => errors.push(format!("{key} ignored: {e}")),
+            }
         }
     }
     let both = pick(&["pipelines", "pipeline_routes"]);

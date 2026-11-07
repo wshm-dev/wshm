@@ -203,6 +203,16 @@ pub async fn run(state: Arc<DaemonState>) {
             error!("Pipeline run cleanup failed: {e:#}");
         }
 
+        // Nightly review of existing code ([pipeline_nightly], off by
+        // default): once a UTC day, on one pod.
+        crate::pipelines::engine::nightly::maybe_run(
+            &state.config,
+            state.db.as_ref(),
+            &*state.gh(),
+            state.apply(),
+        )
+        .await;
+
         // Auto-update check — gated on a process-global atomic so only
         // one repo's scheduler triggers the download per interval, even
         // when N>1 schedulers race here at the same tick.
