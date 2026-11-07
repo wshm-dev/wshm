@@ -4,6 +4,7 @@
 	import { fetchIssues, type Issue } from '$lib/api';
 	import * as Card from '$lib/components/ui/card';
 	import IssueDetail from '$lib/components/IssueDetail.svelte';
+	import RunGraph from '$lib/components/RunGraph.svelte';
 
 	let issue: Issue | null = $state(null);
 	let error: string | null = $state(null);
@@ -37,6 +38,7 @@
 		</h2>
 	</div>
 	<IssueDetail {issue} />
+	<RunGraph repo={issue.repo} kind="issue" number={issue.number} />
 {:else}
 	<p class="text-muted-foreground">Loading...</p>
 {/if}
